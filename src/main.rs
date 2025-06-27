@@ -1,5 +1,7 @@
 use clap::Parser;
+use colored::*;
 use mcts::{GameState, MCTS};
+use std::collections::HashSet;
 use std::io;
 
 #[derive(Parser)]
@@ -101,13 +103,18 @@ impl GameState for GomokuState {
 }
 
 fn print_board(board: &Vec<Vec<i32>>) {
-    for row in board {
+    print!("   ");
+    for i in 0..board.len() {
+        print!("{:^3}", i);
+    }
+    println!();
+    for (i, row) in board.iter().enumerate() {
+        print!("{:>2} ", i);
         for &cell in row {
-            print!(" ");
             match cell {
-                1 => print!("X"),
-                -1 => print!("O"),
-                _ => print!("."),
+                1 => print!("X  "),
+                -1 => print!("O  "),
+                _ => print!(".  "),
             }
         }
         println!();
@@ -140,6 +147,10 @@ fn main() {
             println!("AI is thinking...");
             let mv = mcts.search(&state, 100000);
 
+            let root_stats = mcts.get_root_stats();
+            let root_value = if root_stats.1 > 0 { root_stats.0 / root_stats.1 as f64 } else { 0.0 };
+            println!("Root node value: {:.4}", root_value);
+
             println!("AI move stats (value/wins/visits):");
             let stats = mcts.get_root_children_stats();
             let mut value_grid = vec![vec![0.0; state.board_size]; state.board_size];
@@ -154,17 +165,34 @@ fn main() {
                 visits_grid[*r][*c] = *visits;
             }
 
+            let mut top_values = stats.iter().filter(|(_, (_, v))| *v > 0).collect::<Vec<_>>();
+            top_values.sort_by(|a, b| (b.1.0 / b.1.1 as f64).partial_cmp(&(a.1.0 / a.1.1 as f64)).unwrap());
+            let top_5_value_moves: HashSet<_> = top_values.iter().take(5).map(|(m, _)| *m).collect();
+
+            let mut top_wins = stats.iter().filter(|(_, (_, v))| *v > 0).collect::<Vec<_>>();
+            top_wins.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
+            let top_5_win_moves: HashSet<_> = top_wins.iter().take(5).map(|(m, _)| *m).collect();
+
+            let mut top_visits = stats.iter().collect::<Vec<_>>();
+            top_visits.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+            let top_5_visit_moves: HashSet<_> = top_visits.iter().take(5).map(|(m, _)| *m).collect();
+
             println!("--- Values ---");
             for r in 0..state.board_size {
                 for c in 0..state.board_size {
-                    if state.board[r][c] == 1 {
-                        print!("    X     ");
+                    let text = if state.board[r][c] == 1 {
+                        "    X     ".normal()
                     } else if state.board[r][c] == -1 {
-                        print!("    O     ");
+                        "    O     ".normal()
                     } else if visits_grid[r][c] > 0 {
-                        print!("{:^10.2}", value_grid[r][c]);
+                        format!("{:^10.2}", value_grid[r][c]).normal()
                     } else {
-                        print!("{:^10}", ".");
+                        format!("{:^10}", ".").normal()
+                    };
+                    if top_5_value_moves.contains(&(r, c)) {
+                        print!("{}", text.red());
+                    } else {
+                        print!("{}", text);
                     }
                 }
                 println!();
@@ -173,12 +201,17 @@ fn main() {
             println!("\n--- Wins ---");
             for r in 0..state.board_size {
                 for c in 0..state.board_size {
-                    if state.board[r][c] == 1 {
-                        print!("    X     ");
+                     let text = if state.board[r][c] == 1 {
+                        "    X     ".normal()
                     } else if state.board[r][c] == -1 {
-                        print!("    O     ");
+                        "    O     ".normal()
                     } else {
-                        print!("{:^10.0}", wins_grid[r][c]);
+                        format!("{:^10.0}", wins_grid[r][c]).normal()
+                    };
+                    if top_5_win_moves.contains(&(r,c)) {
+                        print!("{}", text.red());
+                    } else {
+                        print!("{}", text);
                     }
                 }
                 println!();
@@ -187,12 +220,17 @@ fn main() {
             println!("\n--- Visits ---");
             for r in 0..state.board_size {
                 for c in 0..state.board_size {
-                    if state.board[r][c] == 1 {
-                        print!("    X     ");
+                    let text = if state.board[r][c] == 1 {
+                        "    X     ".normal()
                     } else if state.board[r][c] == -1 {
-                        print!("    O     ");
+                        "    O     ".normal()
                     } else {
-                        print!("{:^10}", visits_grid[r][c]);
+                        format!("{:^10}", visits_grid[r][c]).normal()
+                    };
+                    if top_5_visit_moves.contains(&(r,c)) {
+                        print!("{}", text.red());
+                    } else {
+                        print!("{}", text);
                     }
                 }
                 println!();

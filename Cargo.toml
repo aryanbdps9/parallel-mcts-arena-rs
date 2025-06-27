@@ -8,6 +8,7 @@ rand = "0.8.5"
 clap = { version = "4.5.40", features = ["derive"] }
 rayon = "1.10.0"
 parking_lot = "0.12.3"
+colored = "2.1.0"
 
 [lib]
 name = "mcts"

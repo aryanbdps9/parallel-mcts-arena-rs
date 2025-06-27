@@ -8,6 +8,9 @@ This project is a simple implementation of the game Gomoku (also known as Five i
 - A configurable board size and line length to win.
 - A parallelized MCTS engine for the AI, using `rayon` for data parallelism.
 - Thread-safe tree nodes using `Arc` and `parking_lot::Mutex` for fine-grained locking.
+- Enhanced debugging output with colored highlighting for top moves based on value, wins, and visits.
+- Display of the MCTS root node value to gauge the AI's confidence in the current position.
+- Row and column labels on the game board for easier move identification.
 
 ## How to Build and Run
 
@@ -33,15 +36,17 @@ This project is a simple implementation of the game Gomoku (also known as Five i
     ```sh
     cargo run
     ```
+    The output will now include colored grids highlighting the top moves, providing more insight into the AI's decision-making process.
 
 ### Command-line Options
 
 -   `--board-size <SIZE>`: Sets the size of the board (default: 19).
 -   `--line-size <SIZE>`: Sets the number of pieces in a row needed to win (default: 5).
+-   `--num-threads <THREADS>`: Sets the number of threads for the MCTS search (default: 0, which lets `rayon` decide).
 
 Example:
 ```sh
-cargo run -- --board-size 15 --line-size 4
+cargo run -- --board-size 15 --line-size 4 --num-threads 8
 ```
 
 ## Parallel MCTS Implementation

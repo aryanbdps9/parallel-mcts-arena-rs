@@ -50,7 +50,7 @@ impl<M: Clone + Eq + std::hash::Hash + Send + Sync> Node<M> {
     /// This score balances exploration and exploitation.
     ///
     /// # Arguments
-    /// * `parent_visits` - The number of visits to the parent node.
+    /// * `parent_visits` - The no. of visits to the parent node.
     /// * `exploration_parameter` - A constant to tune the level of exploration.
     fn ucb1(&self, parent_visits: i32, exploration_parameter: f64) -> f64 {
         let visits = self.visits.load(Ordering::Relaxed);
@@ -117,6 +117,14 @@ impl<S: GameState> MCTS<S> {
                 (mv.clone(), (wins, visits))
             })
             .collect()
+    }
+
+    /// Returns the stats for the root node.
+    /// The stats are a tuple of (wins, visits).
+    pub fn get_root_stats(&self) -> (f64, i32) {
+        let wins = *self.root.wins.lock();
+        let visits = self.root.visits.load(Ordering::Relaxed);
+        (wins, visits)
     }
 
     /// Performs a parallel MCTS search.
