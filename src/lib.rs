@@ -35,6 +35,8 @@ struct Node<M: Clone + Eq + std::hash::Hash> {
     /// Sum of rewards from the parent's perspective, stored as an integer.
     /// 2 for a win, 1 for a draw, 0 for a loss. Uses atomic operations for lock-free updates.
     wins: AtomicI32,
+    /// Virtual losses applied to this node. Used to reduce thread contention in parallel search.
+    virtual_losses: AtomicI32,
 }
 
 impl<M: Clone + Eq + std::hash::Hash> Node<M> {
@@ -44,11 +46,23 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
             children: RwLock::new(HashMap::new()),
             visits: AtomicI32::new(0),
             wins: AtomicI32::new(0),
+            virtual_losses: AtomicI32::new(0),
         }
+    }
+
+    /// Applies virtual loss to this node.
+    fn apply_virtual_loss(&self) {
+        self.virtual_losses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Removes virtual loss from this node.
+    fn remove_virtual_loss(&self) {
+        self.virtual_losses.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Calculates the PUCT (Predictor + Upper Confidence bounds applied to Trees) score for this node.
     /// This is a more sophisticated version of UCB1 that includes a prior probability term.
+    /// Now includes virtual losses to discourage other threads from selecting the same path.
     ///
     /// # Arguments
     /// * `parent_visits` - The no. of visits to the parent node.
@@ -56,16 +70,23 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     /// * `prior_probability` - The prior probability of selecting this move (usually from a neural network).
     fn puct(&self, parent_visits: i32, exploration_parameter: f64, prior_probability: f64) -> f64 {
         let visits = self.visits.load(Ordering::Relaxed);
-        if visits == 0 {
+        let virtual_losses = self.virtual_losses.load(Ordering::Relaxed);
+        let effective_visits = visits + virtual_losses;
+        
+        if effective_visits == 0 {
             // For unvisited nodes, return only the exploration term
             exploration_parameter * prior_probability * (parent_visits as f64).sqrt()
         } else {
             let wins = self.wins.load(Ordering::Relaxed) as f64;
-            let visits_f = visits as f64;
-            // PUCT formula: Q(s,a) + C_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a))
-            // Win rate is scaled from [0, 2] to [0, 1] for Q value
-            let q_value = (wins / visits_f) / 2.0;
-            let exploration_term = exploration_parameter * prior_probability * (parent_visits as f64).sqrt() / (1.0 + visits_f);
+            let effective_visits_f = effective_visits as f64;
+            // PUCT formula with virtual losses: Q(s,a) + C_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a) + VL(s,a))
+            // Virtual losses effectively reduce the Q value, making the node less attractive
+            let q_value = if visits > 0 {
+                (wins / visits as f64) / 2.0
+            } else {
+                0.0 // If only virtual losses, assume worst case
+            };
+            let exploration_term = exploration_parameter * prior_probability * (parent_visits as f64).sqrt() / (1.0 + effective_visits_f);
             q_value + exploration_term
         }
     }
@@ -156,14 +177,14 @@ impl<S: GameState> MCTS<S> {
             .expect("Search returned no moves. The root node has no children.")
     }
 
-    /// Runs a single MCTS simulation.
+    /// Runs a single MCTS simulation with virtual loss support.
     fn run_simulation(&self, state: &S) {
         let mut current_state = state.clone();
         let mut path: Vec<Arc<Node<S::Move>>> = vec![self.root.clone()];
         let mut current_node = self.root.clone();
         let mut moves_cache = Vec::new(); // Reuse this vector
         
-        // --- Selection Phase ---
+        // --- Selection Phase with Virtual Loss ---
         // Traverse the tree until a leaf node is reached.
         loop {
             let children_guard = current_node.children.read();
@@ -205,6 +226,9 @@ impl<S: GameState> MCTS<S> {
 
             drop(children_guard); // Release read lock
 
+            // Apply virtual loss to the selected node
+            next_node.apply_virtual_loss();
+            
             current_state.make_move(&best_move);
             current_node = next_node;
             path.push(current_node.clone());
@@ -237,10 +261,16 @@ impl<S: GameState> MCTS<S> {
         }
         let winner = sim_state.get_winner();
 
-        // --- Backpropagation Phase ---
+        // --- Backpropagation Phase with Virtual Loss Removal ---
         // Update the visit counts and win statistics for all nodes in the path.
+        // Also remove virtual losses that were applied during selection.
         let mut player_for_reward = current_state.get_current_player();
-        for node in path.iter().rev() {
+        for (i, node) in path.iter().rev().enumerate() {
+            // Remove virtual loss (skip root node as it wasn't given virtual loss)
+            if i > 0 {
+                node.remove_virtual_loss();
+            }
+            
             node.visits.fetch_add(1, Ordering::Relaxed);
             let reward = match winner {
                 Some(w) if w == player_for_reward => 0, // Loss for parent
