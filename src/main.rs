@@ -10,6 +10,9 @@ struct Args {
 
     #[clap(short, long, default_value_t = 5)]
     line_size: usize,
+
+    #[clap(short, long, default_value_t = 0)]
+    num_threads: usize,
 }
 
 #[derive(Clone)]
@@ -121,7 +124,7 @@ fn main() {
         line_size: args.line_size,
     };
 
-    let mut mcts = MCTS::new(1.414);
+    let mut mcts = MCTS::new(1.414, args.num_threads);
 
     while !state.is_terminal() {
         print_board(&state.board);
@@ -135,7 +138,7 @@ fn main() {
         } else {
             // AI player
             println!("AI is thinking...");
-            let mv = mcts.search(&state, 10000);
+            let mv = mcts.search(&state, 100000);
 
             println!("AI move stats (value/wins/visits):");
             let stats = mcts.get_root_children_stats();
