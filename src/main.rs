@@ -15,6 +15,9 @@ struct Args {
 
     #[clap(short, long, default_value_t = 0)]
     num_threads: usize,
+
+    #[clap(short = 'e', long, default_value_t = 4.0)]
+    exploration_parameter: f64,
 }
 
 #[derive(Clone)]
@@ -131,7 +134,7 @@ fn main() {
         line_size: args.line_size,
     };
 
-    let mut mcts = MCTS::new(1.414, args.num_threads);
+    let mut mcts = MCTS::new(args.exploration_parameter, args.num_threads);
 
     while !state.is_terminal() {
         print_board(&state.board);

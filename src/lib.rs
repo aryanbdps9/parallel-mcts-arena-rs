@@ -47,22 +47,26 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
         }
     }
 
-    /// Calculates the UCB1 (Upper Confidence Bound 1) score for this node.
-    /// This score balances exploration and exploitation.
+    /// Calculates the PUCT (Predictor + Upper Confidence bounds applied to Trees) score for this node.
+    /// This is a more sophisticated version of UCB1 that includes a prior probability term.
     ///
     /// # Arguments
     /// * `parent_visits` - The no. of visits to the parent node.
-    /// * `exploration_parameter` - A constant to tune the level of exploration.
-    fn ucb1(&self, parent_visits: i32, exploration_parameter: f64) -> f64 {
+    /// * `exploration_parameter` - A constant to tune the level of exploration (C_puct).
+    /// * `prior_probability` - The prior probability of selecting this move (usually from a neural network).
+    fn puct(&self, parent_visits: i32, exploration_parameter: f64, prior_probability: f64) -> f64 {
         let visits = self.visits.load(Ordering::Relaxed);
         if visits == 0 {
-            std::f64::INFINITY
+            // For unvisited nodes, return only the exploration term
+            exploration_parameter * prior_probability * (parent_visits as f64).sqrt()
         } else {
             let wins = self.wins.load(Ordering::Relaxed) as f64;
             let visits_f = visits as f64;
-            // UCB1 formula. The win rate is scaled from [0, 2] to [0, 1].
-            (wins / visits_f) / 2.0
-                + exploration_parameter * ((parent_visits as f64).ln() / visits_f).sqrt()
+            // PUCT formula: Q(s,a) + C_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a))
+            // Win rate is scaled from [0, 2] to [0, 1] for Q value
+            let q_value = (wins / visits_f) / 2.0;
+            let exploration_term = exploration_parameter * prior_probability * (parent_visits as f64).sqrt() / (1.0 + visits_f);
+            q_value + exploration_term
         }
     }
 }
@@ -170,13 +174,15 @@ impl<S: GameState> MCTS<S> {
 
             let parent_visits = current_node.visits.load(Ordering::Relaxed);
             let moves = current_state.get_possible_moves();
+            // Use uniform prior probability for all moves since we don't have a neural network
+            let prior_probability = 1.0 / moves.len() as f64;
             let (best_move, next_node) = moves
                 .iter()
                 .filter_map(|m| children_guard.get(m).map(|n| (m, n)))
                 .max_by(|(_, a), (_, b)| {
-                    let a_ucb = a.ucb1(parent_visits, self.exploration_parameter);
-                    let b_ucb = b.ucb1(parent_visits, self.exploration_parameter);
-                    a_ucb.partial_cmp(&b_ucb).unwrap_or(std::cmp::Ordering::Equal)
+                    let a_puct = a.puct(parent_visits, self.exploration_parameter, prior_probability);
+                    let b_puct = b.puct(parent_visits, self.exploration_parameter, prior_probability);
+                    a_puct.partial_cmp(&b_puct).unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|(m, n)| (m.clone(), n.clone()))
                 .expect("Selection failed: node has children but no best move found.");
