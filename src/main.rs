@@ -29,6 +29,7 @@ struct GomokuState {
     current_player: i32,
     board_size: usize,
     line_size: usize,
+    last_move: Option<(usize, usize)>,
 }
 
 impl GameState for GomokuState {
@@ -43,6 +44,7 @@ impl GameState for GomokuState {
 
     fn make_move(&mut self, mv: &Self::Move) {
         self.board[mv.0][mv.1] = self.current_player;
+        self.last_move = Some(*mv);
         self.current_player = -self.current_player;
     }
 
@@ -51,37 +53,104 @@ impl GameState for GomokuState {
     }
 
     fn get_winner(&self) -> Option<i32> {
-        for r in 0..self.board_size {
-            for c in 0..self.board_size {
-                if self.board[r][c] != 0 {
-                    let player = self.board[r][c];
-                    // Check horizontal
-                    if c + self.line_size <= self.board_size {
-                        if (0..self.line_size).all(|i| self.board[r][c + i] == player) {
-                            return Some(player);
-                        }
-                    }
-                    // Check vertical
-                    if r + self.line_size <= self.board_size {
-                        if (0..self.line_size).all(|i| self.board[r + i][c] == player) {
-                            return Some(player);
-                        }
-                    }
-                    // Check diagonal (down-right)
-                    if r + self.line_size <= self.board_size && c + self.line_size <= self.board_size {
-                        if (0..self.line_size).all(|i| self.board[r + i][c + i] == player) {
-                            return Some(player);
-                        }
-                    }
-                    // Check diagonal (up-right)
-                    if r >= self.line_size - 1 && c + self.line_size <= self.board_size {
-                        if (0..self.line_size).all(|i| self.board[r - i][c + i] == player) {
-                            return Some(player);
-                        }
-                    }
-                }
+        // If no move has been made yet, there's no winner
+        let last_move = self.last_move?;
+        let (r, c) = last_move;
+        let player = self.board[r][c];
+        
+        // If the position is empty, there's no winner (shouldn't happen in normal play)
+        if player == 0 {
+            return None;
+        }
+        
+        // Check horizontal (left-right through the last move)
+        let mut count = 1;
+        // Check left
+        for i in 1..self.line_size {
+            if c >= i && self.board[r][c - i] == player {
+                count += 1;
+            } else {
+                break;
             }
         }
+        // Check right
+        for i in 1..self.line_size {
+            if c + i < self.board_size && self.board[r][c + i] == player {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count >= self.line_size {
+            return Some(player);
+        }
+        
+        // Check vertical (up-down through the last move)
+        count = 1;
+        // Check up
+        for i in 1..self.line_size {
+            if r >= i && self.board[r - i][c] == player {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        // Check down
+        for i in 1..self.line_size {
+            if r + i < self.board_size && self.board[r + i][c] == player {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count >= self.line_size {
+            return Some(player);
+        }
+        
+        // Check diagonal (top-left to bottom-right through the last move)
+        count = 1;
+        // Check top-left
+        for i in 1..self.line_size {
+            if r >= i && c >= i && self.board[r - i][c - i] == player {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        // Check bottom-right
+        for i in 1..self.line_size {
+            if r + i < self.board_size && c + i < self.board_size && self.board[r + i][c + i] == player {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count >= self.line_size {
+            return Some(player);
+        }
+        
+        // Check diagonal (top-right to bottom-left through the last move)
+        count = 1;
+        // Check top-right
+        for i in 1..self.line_size {
+            if r >= i && c + i < self.board_size && self.board[r - i][c + i] == player {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        // Check bottom-left
+        for i in 1..self.line_size {
+            if r + i < self.board_size && c >= i && self.board[r + i][c - i] == player {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count >= self.line_size {
+            return Some(player);
+        }
+        
         None
     }
 
@@ -117,6 +186,7 @@ fn main() {
         current_player: 1,
         board_size: args.board_size,
         line_size: args.line_size,
+        last_move: None,
     };
 
     let mut mcts = MCTS::new(args.exploration_parameter, args.num_threads);
@@ -238,15 +308,14 @@ fn main() {
         };
 
         // Print mv
-        println!("[main]: Player {} moves to ({}, {})", state.current_player, mv.0, mv.1);
+        let current_player = state.current_player;
         if !state.get_possible_moves().contains(&mv) {
-            println!("Invalid move! Try again.");
+            println!("Invalid move [{}, {}]! Try again.", mv.0, mv.1);
             continue;
         }
-        println!("[main]: Valid move!");
 
         state.make_move(&mv);
-        println!("[main]: Player {} made a move to ({}, {})", state.current_player, mv.0, mv.1);
+        println!("[main]: Player {} made a move to ({}, {})", current_player, mv.0, mv.1);
         mcts.advance_root(&mv);
         println!("[main]: MCTS root advanced to next state.");
     }
