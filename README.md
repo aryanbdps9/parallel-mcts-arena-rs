@@ -43,10 +43,11 @@ This project is a simple implementation of the game Gomoku (also known as Five i
 -   `--board-size <SIZE>`: Sets the size of the board (default: 19).
 -   `--line-size <SIZE>`: Sets the number of pieces in a row needed to win (default: 5).
 -   `--num-threads <THREADS>`: Sets the number of threads for the MCTS search (default: 0, which lets `rayon` decide).
+-   `--max-nodes <NODES>`: Sets the maximum number of nodes allowed in the search tree (default: 100000).
 
 Example:
 ```sh
-cargo run -- --board-size 15 --line-size 4 --num-threads 8
+cargo run -- --board-size 15 --line-size 4 --num-threads 8 --max-nodes 50000
 ```
 
 ## Parallel MCTS Implementation

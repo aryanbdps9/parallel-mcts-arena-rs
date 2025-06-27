@@ -2,13 +2,43 @@ use rand::Rng;
 use std::collections::HashMap;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use parking_lot::{RwLock};
+use parking_lot::{RwLock, Mutex};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 // Thread-local storage for move generation to avoid allocations
 thread_local! {
     static MOVE_BUFFER: std::cell::RefCell<Vec<(usize, usize)>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// A pool for recycling nodes to reduce memory allocations
+struct NodePool<M: Clone + Eq + std::hash::Hash> {
+    /// Pool of available nodes that can be reused
+    available_nodes: Arc<Mutex<Vec<Arc<Node<M>>>>>,
+}
+
+impl<M: Clone + Eq + std::hash::Hash> NodePool<M> {
+    fn new() -> Self {
+        Self {
+            available_nodes: Arc::new(Mutex::new(Vec::with_capacity(1000000))),
+        }
+    }
+
+    /// Return multiple nodes to the pool in batch
+    fn return_nodes(&self, nodes: Vec<Arc<Node<M>>>) {
+        let mut pool = self.available_nodes.lock();
+        for node in nodes {
+            // Only recycle nodes that have unique ownership
+            if let Ok(mut node) = Arc::try_unwrap(node) {
+                node.reset();
+                pool.push(Arc::new(node));
+            }
+        }
+        // Limit pool size to prevent unbounded growth
+        if pool.len() > 4000000 {
+            pool.truncate(1000000);
+        }
+    }
 }
 
 /// The state of the game. Must be cloneable to be used in the MCTS.
@@ -42,6 +72,8 @@ struct Node<M: Clone + Eq + std::hash::Hash> {
     wins: AtomicI32,
     /// Virtual losses applied to this node. Used to reduce thread contention in parallel search.
     virtual_losses: AtomicI32,
+    /// Depth of this node in the tree (0 for root)
+    depth: u32,
 }
 
 impl<M: Clone + Eq + std::hash::Hash> Node<M> {
@@ -52,7 +84,61 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
             visits: AtomicI32::new(0),
             wins: AtomicI32::new(0),
             virtual_losses: AtomicI32::new(0),
+            depth: 0,
         }
+    }
+
+    /// Resets the node to its initial state for reuse
+    fn reset(&mut self) {
+        *self.children.write() = HashMap::new();
+        self.visits.store(0, Ordering::Relaxed);
+        self.wins.store(0, Ordering::Relaxed);
+        self.virtual_losses.store(0, Ordering::Relaxed);
+        self.depth = 0;
+    }
+
+    /// Collects all descendant nodes for batch recycling
+    fn collect_subtree_nodes(&self) -> Vec<Arc<Node<M>>> {
+        let mut nodes = Vec::new();
+        let mut stack = Vec::new();
+        
+        // Start with immediate children
+        {
+            let children = self.children.read();
+            stack.extend(children.values().cloned());
+        }
+        
+        while let Some(current) = stack.pop() {
+            // Add the current node to the result
+            nodes.push(current.clone());
+            
+            // Add its children to the stack
+            let children = current.children.read();
+            stack.extend(children.values().cloned());
+        }
+        
+        nodes
+    }
+
+    /// Prunes weak children to save memory
+    /// Keeps only children with visit count >= threshold
+    fn prune_weak_children(&self, min_visits: i32) -> Vec<Arc<Node<M>>> {
+        let mut children = self.children.write();
+        let mut pruned_nodes = Vec::new();
+        
+        children.retain(|_, node| {
+            let visits = node.visits.load(Ordering::Relaxed);
+            if visits < min_visits {
+                // Collect the pruned subtree for recycling
+                pruned_nodes.extend(node.collect_subtree_nodes());
+                pruned_nodes.push(node.clone());
+                false
+            } else {
+                true
+            }
+        });
+        
+        pruned_nodes
     }
 
     /// Applies virtual loss to this node.
@@ -105,6 +191,12 @@ pub struct MCTS<S: GameState> {
     exploration_parameter: f64,
     /// The rayon thread pool for parallel search.
     pool: ThreadPool,
+    /// Node pool for recycling nodes
+    node_pool: NodePool<S::Move>,
+    /// Maximum number of nodes allowed in the tree
+    max_nodes: usize,
+    /// Current number of nodes in the tree (approximate)
+    node_count: Arc<AtomicI32>,
 }
 
 impl<S: GameState> MCTS<S> {
@@ -113,7 +205,8 @@ impl<S: GameState> MCTS<S> {
     /// # Arguments
     /// * `exploration_parameter` - A constant to tune the level of exploration.
     /// * `num_threads` - The number of threads to use for the search. If 0, rayon will use the default.
-    pub fn new(exploration_parameter: f64, num_threads: usize) -> Self {
+    /// * `max_nodes` - Maximum number of nodes allowed in the tree.
+    pub fn new(exploration_parameter: f64, num_threads: usize, max_nodes: usize) -> Self {
         let pool_builder = ThreadPoolBuilder::new();
         let pool = if num_threads > 0 {
             pool_builder.num_threads(num_threads).build().unwrap()
@@ -124,17 +217,88 @@ impl<S: GameState> MCTS<S> {
             root: Arc::new(Node::new()),
             exploration_parameter,
             pool,
+            node_pool: NodePool::new(),
+            max_nodes,
+            node_count: Arc::new(AtomicI32::new(1)), // Start with 1 for root node
         }
     }
 
     /// Advances the root of the tree to the node corresponding to the given move.
-    /// This is useful to preserve the search tree between moves.
+    /// This version recycles unused subtrees to reduce memory allocation/deallocation.
     pub fn advance_root(&mut self, mv: &S::Move) {
-        let new_root = {
+        let (new_root, nodes_to_recycle, new_tree_size) = {
             let children = self.root.children.read();
-            children.get(mv).map(Arc::clone).unwrap_or_else(|| Arc::new(Node::new()))
+            let new_root = children.get(mv).map(Arc::clone).unwrap_or_else(|| Arc::new(Node::new()));
+            
+            // Calculate the size of the new subtree
+            let new_tree_size = if children.contains_key(mv) {
+                1 + self.count_subtree_nodes(&new_root)
+            } else {
+                1 // Just the new root node
+            };
+            
+            // Collect all nodes from non-selected subtrees for recycling
+            let mut nodes_to_recycle = Vec::new();
+            for (other_move, other_node) in children.iter() {
+                if other_move != mv {
+                    // Collect the entire subtree for recycling
+                    nodes_to_recycle.extend(other_node.collect_subtree_nodes());
+                    nodes_to_recycle.push(other_node.clone());
+                }
+            }
+            
+            (new_root, nodes_to_recycle, new_tree_size)
         };
+        
+        // Batch recycle all collected nodes
+        if !nodes_to_recycle.is_empty() {
+            self.node_pool.return_nodes(nodes_to_recycle);
+        }
+        
+        // Update the node count to reflect the new tree size
+        self.node_count.store(new_tree_size as i32, Ordering::Relaxed);
+        
         self.root = new_root;
+    }
+
+    /// Counts the total number of nodes in a subtree (including the root of the subtree)
+    fn count_subtree_nodes(&self, root: &Arc<Node<S::Move>>) -> usize {
+        let mut count = 0;
+        let mut stack = vec![root.clone()];
+        
+        while let Some(node) = stack.pop() {
+            count += 1;
+            let children = node.children.read();
+            stack.extend(children.values().cloned());
+        }
+        
+        count
+    }
+
+    /// Prunes weak children from the tree to save memory and computation.
+    /// Call this periodically during search to maintain tree efficiency.
+    pub fn prune_tree(&mut self, min_visits_threshold: i32) {
+        let pruned_nodes = self.root.prune_weak_children(min_visits_threshold);
+        if !pruned_nodes.is_empty() {
+            self.node_pool.return_nodes(pruned_nodes);
+        }
+        
+        // Recursively prune children that survived the initial pruning
+        let children = self.root.children.read();
+        for child in children.values() {
+            let child_pruned = child.prune_weak_children(min_visits_threshold);
+            if !child_pruned.is_empty() {
+                self.node_pool.return_nodes(child_pruned);
+            }
+        }
+    }
+
+    /// Automatically prunes the tree based on visit statistics
+    /// Removes children with less than 1% of the root's visits
+    pub fn auto_prune(&mut self) {
+        let root_visits = self.root.visits.load(Ordering::Relaxed);
+        let min_visits = std::cmp::max(1, root_visits / 100); // At least 1% of root visits
+        self.prune_tree(min_visits);
     }
 
     /// Returns statistics for the children of the root node.
@@ -159,27 +323,173 @@ impl<S: GameState> MCTS<S> {
         (wins, visits)
     }
 
-    /// Performs a parallel MCTS search.
+    /// Returns debug information about the current MCTS state
+    pub fn get_debug_info(&self) -> String {
+        let root_visits = self.root.visits.load(Ordering::Relaxed);
+        let root_wins = self.root.wins.load(Ordering::Relaxed);
+        let node_count = self.node_count.load(Ordering::Relaxed);
+        let children_count = self.root.children.read().len();
+        
+        format!(
+            "MCTS Debug - Root: {} visits, {} wins, {} children, {} total nodes in tree",
+            root_visits, root_wins, children_count, node_count
+        )
+    }
+
+    /// Ensures the root node is fully expanded with all possible moves.
+    /// This prevents the issue where only one move gets explored due to early exploitation.
+    fn ensure_root_expanded(&mut self, state: &S) {
+        let mut children_guard = self.root.children.write();
+        if children_guard.is_empty() && !state.is_terminal() {
+            let possible_moves = state.get_possible_moves();
+            let mut new_nodes_count = 0;
+
+            for mv in possible_moves.iter() {
+                let new_node = Arc::new(Node {
+                    children: RwLock::new(HashMap::new()),
+                    visits: AtomicI32::new(0),
+                    wins: AtomicI32::new(0),
+                    virtual_losses: AtomicI32::new(0),
+                    depth: 1, // Children of root are at depth 1
+                });
+                children_guard.insert(mv.clone(), new_node);
+                new_nodes_count += 1;
+            }
+            
+            // Update node count
+            self.node_count.fetch_add(new_nodes_count, Ordering::Relaxed);
+        }
+    }
+
+    /// Performs a parallel MCTS search with optional pruning.
     /// This method launches multiple simulations in parallel using `rayon`.
     ///
     /// # Arguments
     /// * `state` - The current state of the game.
     /// * `iterations` - The total number of simulations to run.
-    pub fn search(&self, state: &S, iterations: i32) -> S::Move {
-        // Run simulations in parallel within the custom thread pool.
-        self.pool.install(|| {
-            (0..iterations).into_par_iter().for_each(|_| {
-                self.run_simulation(state);
+    pub fn search(&mut self, state: &S, iterations: i32) -> S::Move {
+        // Ensure root node is fully expanded before starting parallel search
+        self.ensure_root_expanded(state);
+        
+        // Run simulations in parallel with periodic pruning
+        let prune_interval = std::cmp::max(1000, iterations / 10); // Prune every 10% of iterations or at least every 1000
+        
+        if iterations > prune_interval {
+            // Split search into chunks with periodic pruning
+            let chunks = iterations / prune_interval;
+            let remainder = iterations % prune_interval;
+            
+            for _ in 0..chunks {
+                self.pool.install(|| {
+                    (0..prune_interval).into_par_iter().for_each(|_| {
+                        self.run_simulation(state);
+                    });
+                });
+                // Prune after each chunk - remove children with < 3% of max visits
+                self.prune_children_by_percentage(0.03);
+            }
+            
+            // Run remaining iterations
+            if remainder > 0 {
+                self.pool.install(|| {
+                    (0..remainder).into_par_iter().for_each(|_| {
+                        self.run_simulation(state);
+                    });
+                });
+            }
+        } else {
+            // Run all iterations at once if too few iterations
+            self.pool.install(|| {
+                (0..iterations).into_par_iter().for_each(|_| {
+                    self.run_simulation(state);
+                });
             });
-        });
+        }
+
+        // Don't auto-prune immediately after search to preserve statistics for display
+        // The pruning will be done later via explicit call or on next search
 
         // After all simulations, the best move is the one most visited.
         let children = self.root.children.read();
-        children
-            .iter()
-            .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
-            .map(|(mv, _)| mv.clone())
-            .expect("Search returned no moves. The root node has no children.")
+        if children.is_empty() {
+            // Fallback: if no children exist, return a random valid move
+            // This should rarely happen with the improved expansion logic
+            let possible_moves = state.get_possible_moves();
+            if possible_moves.is_empty() {
+                panic!("No possible moves available - game should be terminal");
+            }
+            possible_moves[rand::thread_rng().gen_range(0..possible_moves.len())].clone()
+        } else {
+            children
+                .iter()
+                .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
+                .map(|(mv, _)| mv.clone())
+                .expect("Root node has children but max_by_key failed")
+        }
+    }
+
+    /// Performs a parallel MCTS search with custom pruning interval.
+    /// Prunes the tree every `prune_interval` iterations to maintain memory efficiency.
+    ///
+    /// # Arguments
+    /// * `state` - The current state of the game.
+    /// * `iterations` - The total number of simulations to run.
+    /// * `prune_interval` - How often to prune the tree (0 = no pruning during search).
+    pub fn search_with_pruning(&mut self, state: &S, iterations: i32, prune_interval: i32) -> S::Move {
+        // Ensure root node is fully expanded before starting parallel search
+        self.ensure_root_expanded(state);
+        
+        if prune_interval > 0 && iterations > prune_interval {
+            // Split search into chunks with pruning
+            let chunks = iterations / prune_interval;
+            let remainder = iterations % prune_interval;
+            
+            for _ in 0..chunks {
+                self.pool.install(|| {
+                    (0..prune_interval).into_par_iter().for_each(|_| {
+                        self.run_simulation(state);
+                    });
+                });
+                // Prune after each chunk - remove children with < 3% of max visits
+                self.prune_children_by_percentage(0.03);
+            }
+            
+            // Run remaining iterations
+            if remainder > 0 {
+                self.pool.install(|| {
+                    (0..remainder).into_par_iter().for_each(|_| {
+                        self.run_simulation(state);
+                    });
+                });
+            }
+        } else {
+            // Run all iterations at once
+            self.pool.install(|| {
+                (0..iterations).into_par_iter().for_each(|_| {
+                    self.run_simulation(state);
+                });
+            });
+        }
+
+        // Don't do final pruning here - let it be done explicitly after statistics are displayed
+
+        // Return the best move
+        let children = self.root.children.read();
+        if children.is_empty() {
+            // Fallback: if no children exist, return a random valid move
+            // This should rarely happen with the improved expansion logic
+            let possible_moves = state.get_possible_moves();
+            if possible_moves.is_empty() {
+                panic!("No possible moves available - game should be terminal");
+            }
+            possible_moves[rand::thread_rng().gen_range(0..possible_moves.len())].clone()
+        } else {
+            children
+                .iter()
+                .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
+                .map(|(mv, _)| mv.clone())
+                .expect("Root node has children but max_by_key failed")
+        }
     }
 
     /// Runs a single MCTS simulation with virtual loss support.
@@ -251,16 +561,70 @@ impl<S: GameState> MCTS<S> {
         }
 
         // --- Expansion Phase ---
-        // If the node is a leaf and the game is not over, expand it.
+        // If the node is a leaf and the game is not over, decide whether to expand based on:
+        // 1. Current tree size vs max_nodes limit
+        // 2. Depth-based probability (deeper nodes are less likely to expand)
+        // 3. Visit count (more visited nodes are more likely to expand)
+        // Special case: Always expand the root node to ensure the search can find moves
         if !current_state.is_terminal() {
-            let mut children_guard = current_node.children.write();
-            // It's possible another thread expanded it between our read lock release and write lock acquisition.
-            // So we must check if it's still empty.
-            if children_guard.is_empty() {
-                moves_cache.clear();
-                moves_cache.extend(current_state.get_possible_moves());
-                for mv in moves_cache.iter() {
-                    children_guard.insert(mv.clone(), Arc::new(Node::new()));
+            let should_expand = {
+                let current_nodes = self.node_count.load(Ordering::Relaxed) as usize;
+                let tree_capacity_available = current_nodes < self.max_nodes;
+                
+                if !tree_capacity_available {
+                    false // Hard limit: no expansion if tree is full
+                } else {
+                    let children_guard = current_node.children.read();
+                    let is_leaf = children_guard.is_empty();
+                    drop(children_guard);
+                    
+                    if !is_leaf {
+                        false // Already expanded by another thread
+                    } else {
+                        // Always expand the root node (depth 0) to ensure we have moves to choose from
+                        let depth = current_node.depth;
+                        if depth == 0 {
+                            true
+                        } else {
+                            // Probabilistic expansion based on depth and visits for non-root nodes
+                            let visits = current_node.visits.load(Ordering::Relaxed);
+                            
+                            // Base expansion probability decreases with depth
+                            // More visits increase the likelihood of expansion
+                            let depth_factor = 1.0 / (1.0 + (depth as f64) * 0.5);
+                            let visit_factor = (visits as f64).sqrt() / 10.0; // Encourage expansion for well-visited nodes
+                            let expansion_probability = (depth_factor + visit_factor).min(1.0);
+                            
+                            rand::thread_rng().gen::<f64>() < expansion_probability
+                        }
+                    }
+                }
+            };
+            
+            if should_expand {
+                let mut children_guard = current_node.children.write();
+                // Double-check it's still empty after acquiring write lock
+                if children_guard.is_empty() {
+                    moves_cache.clear();
+                    moves_cache.extend(current_state.get_possible_moves());
+                    let new_depth = current_node.depth + 1;
+                    let mut new_nodes_count = 0;
+                    
+                    for mv in moves_cache.iter() {
+                        // Create a new node with the correct depth
+                        let new_node = Arc::new(Node {
+                            children: RwLock::new(HashMap::new()),
+                            visits: AtomicI32::new(0),
+                            wins: AtomicI32::new(0),
+                            virtual_losses: AtomicI32::new(0),
+                            depth: new_depth,
+                        });
+                        children_guard.insert(mv.clone(), new_node);
+                        new_nodes_count += 1;
+                    }
+                    
+                    // Update node count
+                    self.node_count.fetch_add(new_nodes_count, Ordering::Relaxed);
                 }
             }
         }
@@ -284,8 +648,9 @@ impl<S: GameState> MCTS<S> {
         // Also remove virtual losses that were applied during selection.
         let mut player_for_reward = current_state.get_current_player();
         for (i, node) in path.iter().rev().enumerate() {
-            // Remove virtual loss (skip root node as it wasn't given virtual loss)
-            if i > 0 {
+            // Remove virtual loss from all nodes except the last one (the leaf/terminal node)
+            // which didn't have virtual loss applied during selection
+            if i < path.len() - 1 {
                 node.remove_virtual_loss();
             }
             
@@ -297,6 +662,47 @@ impl<S: GameState> MCTS<S> {
             };
             node.wins.fetch_add(reward, Ordering::Relaxed);
             player_for_reward = -player_for_reward;
+        }
+    }
+
+    /// Prunes children based on visit percentage relative to the best child
+    /// Removes children with less than the specified percentage of the most visited child's visits
+    pub fn prune_children_by_percentage(&mut self, min_percentage: f64) {
+        let mut children = self.root.children.write();
+        
+        if children.len() <= 1 {
+            return; // No need to prune if we have 1 or fewer children
+        }
+        
+        // Find the maximum visit count among children
+        let max_visits = children
+            .values()
+            .map(|node| node.visits.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0);
+        
+        if max_visits == 0 {
+            return; // No visits yet, nothing to prune
+        }
+        
+        let min_visits_threshold = ((max_visits as f64) * min_percentage).ceil() as i32;
+        let mut pruned_nodes = Vec::new();
+        
+        children.retain(|_, node| {
+            let visits = node.visits.load(Ordering::Relaxed);
+            if visits < min_visits_threshold {
+                // Collect the pruned subtree for recycling
+                pruned_nodes.extend(node.collect_subtree_nodes());
+                pruned_nodes.push(node.clone());
+                false
+            } else {
+                true
+            }
+        });
+        
+        // Batch recycle all pruned nodes
+        if !pruned_nodes.is_empty() {
+            self.node_pool.return_nodes(pruned_nodes);
         }
     }
 }

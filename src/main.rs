@@ -21,6 +21,9 @@ struct Args {
 
     #[clap(short = 'i', long, default_value_t = 1000000)]
     iterations: i32,
+
+    #[clap(short = 'm', long, default_value_t = 100000)]
+    max_nodes: usize,
 }
 
 #[derive(Clone)]
@@ -189,7 +192,7 @@ fn main() {
         last_move: None,
     };
 
-    let mut mcts = MCTS::new(args.exploration_parameter, args.num_threads);
+    let mut mcts = MCTS::new(args.exploration_parameter, args.num_threads, args.max_nodes);
 
     while !state.is_terminal() {
         print_board(&state.board);
@@ -203,7 +206,9 @@ fn main() {
         } else {
             // AI player
             println!("AI is thinking...");
+            println!("[DEBUG] Before search: {}", mcts.get_debug_info());
             let mv = mcts.search(&state, args.iterations);
+            println!("[DEBUG] After search: {}", mcts.get_debug_info());
 
             let root_stats = mcts.get_root_stats();
             // Normalize the root value to 0-1 range (since rewards are 0, 1, 2, we divide by 2)
@@ -304,6 +309,9 @@ fn main() {
                 println!();
             }
 
+            // Now prune the tree after displaying statistics to prepare for the next search
+            mcts.auto_prune();
+
             mv
         };
 
@@ -316,7 +324,9 @@ fn main() {
 
         state.make_move(&mv);
         println!("[main]: Player {} made a move to ({}, {})", current_player, mv.0, mv.1);
+        println!("[DEBUG] Before advancing root: {}", mcts.get_debug_info());
         mcts.advance_root(&mv);
+        println!("[DEBUG] After advancing root: {}", mcts.get_debug_info());
         println!("[main]: MCTS root advanced to next state.");
     }
 
