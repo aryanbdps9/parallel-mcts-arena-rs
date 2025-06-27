@@ -18,6 +18,9 @@ struct Args {
 
     #[clap(short = 'e', long, default_value_t = 4.0)]
     exploration_parameter: f64,
+
+    #[clap(short = 'i', long, default_value_t = 1000000)]
+    iterations: i32,
 }
 
 #[derive(Clone)]
@@ -148,7 +151,7 @@ fn main() {
         } else {
             // AI player
             println!("AI is thinking...");
-            let mv = mcts.search(&state, 100000);
+            let mv = mcts.search(&state, args.iterations);
 
             let root_stats = mcts.get_root_stats();
             let root_value = if root_stats.1 > 0 { root_stats.0 / root_stats.1 as f64 } else { 0.0 };
