@@ -2,7 +2,7 @@ use rand::Rng;
 use std::collections::HashMap;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
@@ -27,22 +27,23 @@ pub trait GameState: Clone + Send + Sync {
 
 /// A node in the Monte Carlo Search Tree.
 /// It is wrapped in an `Arc` to allow for shared ownership across threads.
-struct Node<M: Clone + Eq + std::hash::Hash + Send + Sync> {
-    /// Sum of rewards from this node's perspective. Protected by a Mutex for concurrent access.
-    wins: Mutex<f64>,
-    /// Number of times this node has been visited. Atomic for lock-free updates.
+struct Node<M: Clone + Eq + std::hash::Hash> {
+    /// A map from a move to the child node.
+    children: RwLock<HashMap<M, Arc<Node<M>>>>,
+    /// The number of times this node has been visited. Atomic for lock-free updates.
     visits: AtomicI32,
-    /// Child nodes, representing possible next states. The HashMap is protected by a Mutex.
-    children: Mutex<HashMap<M, Arc<Node<M>>>>,
+    /// Sum of rewards from the parent's perspective, stored as an integer.
+    /// 2 for a win, 1 for a draw, 0 for a loss. Uses atomic operations for lock-free updates.
+    wins: AtomicI32,
 }
 
-impl<M: Clone + Eq + std::hash::Hash + Send + Sync> Node<M> {
+impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     /// Creates a new, empty node.
     fn new() -> Self {
         Node {
-            wins: Mutex::new(0.0),
+            children: RwLock::new(HashMap::new()),
             visits: AtomicI32::new(0),
-            children: Mutex::new(HashMap::new()),
+            wins: AtomicI32::new(0),
         }
     }
 
@@ -57,10 +58,11 @@ impl<M: Clone + Eq + std::hash::Hash + Send + Sync> Node<M> {
         if visits == 0 {
             std::f64::INFINITY
         } else {
-            let wins = *self.wins.lock();
-            // UCB1 formula
-            wins / visits as f64
-                + exploration_parameter * ((parent_visits as f64).ln() / visits as f64).sqrt()
+            let wins = self.wins.load(Ordering::Relaxed) as f64;
+            let visits_f = visits as f64;
+            // UCB1 formula. The win rate is scaled from [0, 2] to [0, 1].
+            (wins / visits_f) / 2.0
+                + exploration_parameter * ((parent_visits as f64).ln() / visits_f).sqrt()
         }
     }
 }
@@ -99,7 +101,7 @@ impl<S: GameState> MCTS<S> {
     /// This is useful to preserve the search tree between moves.
     pub fn advance_root(&mut self, mv: &S::Move) {
         let new_root = {
-            let children = self.root.children.lock();
+            let children = self.root.children.read();
             children.get(mv).cloned().unwrap_or_else(|| Arc::new(Node::new()))
         };
         self.root = new_root;
@@ -108,11 +110,11 @@ impl<S: GameState> MCTS<S> {
     /// Returns statistics for the children of the root node.
     /// The stats are a map from a move to a tuple of (wins, visits).
     pub fn get_root_children_stats(&self) -> std::collections::HashMap<S::Move, (f64, i32)> {
-        let children = self.root.children.lock();
+        let children = self.root.children.read();
         children
             .iter()
             .map(|(mv, node)| {
-                let wins = *node.wins.lock();
+                let wins = node.wins.load(Ordering::Relaxed) as f64;
                 let visits = node.visits.load(Ordering::Relaxed);
                 (mv.clone(), (wins, visits))
             })
@@ -122,7 +124,7 @@ impl<S: GameState> MCTS<S> {
     /// Returns the stats for the root node.
     /// The stats are a tuple of (wins, visits).
     pub fn get_root_stats(&self) -> (f64, i32) {
-        let wins = *self.root.wins.lock();
+        let wins = self.root.wins.load(Ordering::Relaxed) as f64;
         let visits = self.root.visits.load(Ordering::Relaxed);
         (wins, visits)
     }
@@ -142,8 +144,9 @@ impl<S: GameState> MCTS<S> {
         });
 
         // After all simulations, the best move is the one most visited.
-        let children = self.root.children.lock();
-        children.iter()
+        let children = self.root.children.read();
+        children
+            .iter()
             .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
             .map(|(mv, _)| mv.clone())
             .expect("Search returned no moves. The root node has no children.")
@@ -158,21 +161,14 @@ impl<S: GameState> MCTS<S> {
         // --- Selection Phase ---
         // Traverse the tree until a leaf node is reached.
         loop {
-            let parent_visits = current_node.visits.load(Ordering::Relaxed);
-            let mut children_guard = current_node.children.lock();
-
+            let children_guard = current_node.children.read();
             if children_guard.is_empty() || current_state.is_terminal() {
-                // --- Expansion Phase ---
-                // If the node is a leaf and the game is not over, expand it.
-                if !current_state.is_terminal() {
-                    let moves = current_state.get_possible_moves();
-                    for mv in moves {
-                        children_guard.insert(mv, Arc::new(Node::new()));
-                    }
-                }
+                // This is a leaf node, drop the read lock and proceed to expansion.
+                drop(children_guard);
                 break;
             }
 
+            let parent_visits = current_node.visits.load(Ordering::Relaxed);
             let moves = current_state.get_possible_moves();
             let (best_move, next_node) = moves
                 .iter()
@@ -183,19 +179,27 @@ impl<S: GameState> MCTS<S> {
                     a_ucb.partial_cmp(&b_ucb).unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|(m, n)| (m.clone(), n.clone()))
-                .unwrap_or_else(|| {
-                    // If some moves don't have corresponding nodes, pick one to explore.
-                    // This can happen with a partial expansion.
-                    let mv = moves[0].clone();
-                    let node = children_guard.entry(mv.clone()).or_insert_with(|| Arc::new(Node::new()));
-                    (mv, node.clone())
-                });
+                .expect("Selection failed: node has children but no best move found.");
 
-            drop(children_guard); // Release lock before state update
+            drop(children_guard); // Release read lock
 
             current_state.make_move(&best_move);
             current_node = next_node;
             path.push(current_node.clone());
+        }
+
+        // --- Expansion Phase ---
+        // If the node is a leaf and the game is not over, expand it.
+        if !current_state.is_terminal() {
+            let mut children_guard = current_node.children.write();
+            // It's possible another thread expanded it between our read lock release and write lock acquisition.
+            // So we must check if it's still empty.
+            if children_guard.is_empty() {
+                let moves = current_state.get_possible_moves();
+                for mv in moves {
+                    children_guard.insert(mv, Arc::new(Node::new()));
+                }
+            }
         }
 
         // --- Simulation Phase ---
@@ -203,7 +207,9 @@ impl<S: GameState> MCTS<S> {
         let mut sim_state = current_state.clone();
         while !sim_state.is_terminal() {
             let moves = sim_state.get_possible_moves();
-            if moves.is_empty() { break; }
+            if moves.is_empty() {
+                break;
+            }
             let mv = &moves[rand::thread_rng().gen_range(0..moves.len())];
             sim_state.make_move(mv);
         }
@@ -215,11 +221,11 @@ impl<S: GameState> MCTS<S> {
         for node in path.iter().rev() {
             node.visits.fetch_add(1, Ordering::Relaxed);
             let reward = match winner {
-                Some(w) if w == player_for_reward => 0.0, // Opponent won
-                Some(w) if w == -player_for_reward => 1.0, // We won
-                _ => 0.5, // Draw
+                Some(w) if w == player_for_reward => 0, // Loss for parent
+                Some(w) if w == -player_for_reward => 2, // Win for parent
+                _ => 1,                                 // Draw
             };
-            *node.wins.lock() += reward;
+            node.wins.fetch_add(reward, Ordering::Relaxed);
             player_for_reward = -player_for_reward;
         }
     }

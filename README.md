@@ -55,10 +55,10 @@ The MCTS algorithm is parallelized to speed up the search for the best move. Her
 
 -   **Parallel Simulations:** The main search function launches multiple MCTS simulations in parallel using the `rayon` crate. Each simulation consists of the selection, expansion, simulation, and backpropagation phases.
 
--   **Thread-Safe Tree:** The search tree is shared across all threads. To ensure thread safety, the nodes of the tree (`Node`) are wrapped in `Arc` (Atomic Reference Counting) for shared ownership. The internal data of each node (wins, visits, children) is protected by `parking_lot::Mutex` or atomic types for safe concurrent access.
+-   **Thread-Safe Tree with `RwLock`:** The search tree is shared across all threads. To ensure thread safety, the nodes of the tree (`Node`) are wrapped in `Arc` (Atomic Reference Counting) for shared ownership. The `children` map of each node is protected by a `parking_lot::RwLock`, which allows multiple threads to simultaneously read the children (during the selection phase) while ensuring exclusive access for modifications (during the expansion phase). This significantly reduces lock contention and improves the throughput of parallel simulations, leading to much higher CPU utilization and a stronger AI.
 
--   **Fine-Grained Locking:** Instead of locking the entire tree, only the necessary parts of a node are locked during an update. This reduces contention and improves parallelism. For example, the `wins` and `children` of a node are in separate mutexes, and `visits` is an atomic integer.
+-   **Fine-Grained Locking:** Other node statistics like `wins` are protected by a `parking_lot::Mutex`, while `visits` is an `AtomicI32` to allow for lock-free updates. This fine-grained approach minimizes synchronization overhead.
 
 -   **UCB1 Formula:** The selection phase uses the UCB1 formula to balance exploration (visiting less-explored nodes) and exploitation (focusing on promising nodes).
 
-This parallel implementation allows the AI to perform a much deeper search in the same amount of time, leading to stronger gameplay.
+This parallel implementation allows the AI to perform a much deeper search in the same amount of time, leading to stronger gameplay and the ability to anticipate threats several moves in advance.
