@@ -161,23 +161,25 @@ impl<S: GameState> MCTS<S> {
         let mut current_state = state.clone();
         let mut path: Vec<Arc<Node<S::Move>>> = vec![self.root.clone()];
         let mut current_node = self.root.clone();
-
+        let mut moves_cache = Vec::new(); // Reuse this vector
+        
         // --- Selection Phase ---
         // Traverse the tree until a leaf node is reached.
         loop {
             let children_guard = current_node.children.read();
             if children_guard.is_empty() || current_state.is_terminal() {
-                // This is a leaf node, drop the read lock and proceed to expansion.
                 drop(children_guard);
                 break;
             }
 
+            moves_cache.clear();
+            moves_cache.extend(current_state.get_possible_moves());
+            
             let parent_visits = current_node.visits.load(Ordering::Relaxed);
-            let moves = current_state.get_possible_moves();
             // Use uniform prior probability for all moves since we don't have a neural network
-            let prior_probability = 1.0 / moves.len() as f64;
+            let prior_probability = 1.0 / moves_cache.len() as f64;
             let (best_move, next_node) = {
-                let candidates: Vec<_> = moves
+                let candidates: Vec<_> = moves_cache
                     .iter()
                     .filter_map(|m| children_guard.get(m).map(|n| (m, n)))
                     .map(|(m, n)| {

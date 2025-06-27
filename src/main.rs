@@ -35,27 +35,14 @@ impl GameState for GomokuState {
     type Move = (usize, usize);
 
     fn get_possible_moves(&self) -> Vec<Self::Move> {
-        let mut moves = vec![];
-        let mut num_invalid = 0;
-        let mut num_valid = 0;
+        let mut moves = Vec::with_capacity(self.board_size * self.board_size);
         for r in 0..self.board_size {
             for c in 0..self.board_size {
                 if self.board[r][c] == 0 {
                     moves.push((r, c));
-                    num_valid += 1;
-                } else {
-                    num_invalid += 1;
                 }
             }
         }
-        let visited_cells = num_invalid + num_valid;
-
-        assert_eq!(visited_cells, self.board_size * self.board_size, "Not all cells were visited! Invalid: {}, Valid: {}, Total: {}", num_invalid, num_valid, visited_cells);
-        // print!("[get_possible_moves]: Possible moves: ");
-        // for mv in &moves {
-        //     print!("({},{}) ", mv.0, mv.1);
-        // }
-        // println!();
         moves
     }
 

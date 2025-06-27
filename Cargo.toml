@@ -9,6 +9,7 @@ clap = { version = "4.5.40", features = ["derive"] }
 rayon = "1.10.0"
 parking_lot = "0.12.3"
 colored = "2.1.0"
+rand_xoshiro = "0.6"
 
 [lib]
 name = "mcts"
@@ -17,3 +18,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "gomoku"
 path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
