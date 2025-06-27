@@ -2,7 +2,7 @@ use rand::Rng;
 use std::collections::HashMap;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{RwLock};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
@@ -176,16 +176,30 @@ impl<S: GameState> MCTS<S> {
             let moves = current_state.get_possible_moves();
             // Use uniform prior probability for all moves since we don't have a neural network
             let prior_probability = 1.0 / moves.len() as f64;
-            let (best_move, next_node) = moves
-                .iter()
-                .filter_map(|m| children_guard.get(m).map(|n| (m, n)))
-                .max_by(|(_, a), (_, b)| {
-                    let a_puct = a.puct(parent_visits, self.exploration_parameter, prior_probability);
-                    let b_puct = b.puct(parent_visits, self.exploration_parameter, prior_probability);
-                    a_puct.partial_cmp(&b_puct).unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .map(|(m, n)| (m.clone(), n.clone()))
-                .expect("Selection failed: node has children but no best move found.");
+            let (best_move, next_node) = {
+                let candidates: Vec<_> = moves
+                    .iter()
+                    .filter_map(|m| children_guard.get(m).map(|n| (m, n)))
+                    .map(|(m, n)| {
+                        let puct = n.puct(parent_visits, self.exploration_parameter, prior_probability);
+                        (m.clone(), n.clone(), puct)
+                    })
+                    .collect();
+                
+                // Find the maximum PUCT score
+                let max_puct = candidates.iter()
+                    .map(|(_, _, puct)| *puct)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                
+                // Filter candidates with the maximum score
+                let best_candidates: Vec<_> = candidates.into_iter()
+                    .filter(|(_, _, puct)| (*puct - max_puct).abs() < 1e-10)
+                    .collect();
+                
+                // Randomly select among the best candidates
+                let selected = &best_candidates[rand::thread_rng().gen_range(0..best_candidates.len())];
+                (selected.0.clone(), selected.1.clone())
+            };
 
             drop(children_guard); // Release read lock
 

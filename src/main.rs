@@ -154,7 +154,8 @@ fn main() {
             let mv = mcts.search(&state, args.iterations);
 
             let root_stats = mcts.get_root_stats();
-            let root_value = if root_stats.1 > 0 { root_stats.0 / root_stats.1 as f64 } else { 0.0 };
+            // Normalize the root value to 0-1 range (since rewards are 0, 1, 2, we divide by 2)
+            let root_value = if root_stats.1 > 0 { (root_stats.0 / root_stats.1 as f64) / 2.0 } else { 0.0 };
             println!("Root node value: {:.4}", root_value);
 
             println!("AI move stats (value/wins/visits):");
@@ -165,14 +166,16 @@ fn main() {
 
             for ((r, c), (wins, visits)) in stats.iter() {
                 if *visits > 0 {
-                    value_grid[*r][*c] = wins / *visits as f64;
+                    // Normalize the value to 0-1 range (since rewards are 0, 1, 2, we divide by 2)
+                    value_grid[*r][*c] = (wins / *visits as f64) / 2.0;
                 }
                 wins_grid[*r][*c] = *wins;
                 visits_grid[*r][*c] = *visits;
             }
 
             let mut top_values = stats.iter().filter(|(_, (_, v))| *v > 0).collect::<Vec<_>>();
-            top_values.sort_by(|a, b| (b.1.0 / b.1.1 as f64).partial_cmp(&(a.1.0 / a.1.1 as f64)).unwrap());
+            // Normalize values when sorting (divide by 2 since max reward is 2)
+            top_values.sort_by(|a, b| ((b.1.0 / b.1.1 as f64) / 2.0).partial_cmp(&((a.1.0 / a.1.1 as f64) / 2.0)).unwrap());
             let top_5_value_moves: HashSet<_> = top_values.iter().take(5).map(|(m, _)| *m).collect();
 
             let mut top_wins = stats.iter().filter(|(_, (_, v))| *v > 0).collect::<Vec<_>>();
