@@ -35,15 +35,10 @@ impl GameState for GomokuState {
     type Move = (usize, usize);
 
     fn get_possible_moves(&self) -> Vec<Self::Move> {
-        let mut moves = Vec::with_capacity(self.board_size * self.board_size);
-        for r in 0..self.board_size {
-            for c in 0..self.board_size {
-                if self.board[r][c] == 0 {
-                    moves.push((r, c));
-                }
-            }
-        }
-        moves
+        (0..self.board_size)
+            .flat_map(|r| (0..self.board_size).map(move |c| (r, c)))
+            .filter(|&(r, c)| self.board[r][c] == 0)
+            .collect()
     }
 
     fn make_move(&mut self, mv: &Self::Move) {
@@ -151,6 +146,11 @@ fn main() {
             let mut wins_grid = vec![vec![0.0; state.board_size]; state.board_size];
             let mut visits_grid = vec![vec![0; state.board_size]; state.board_size];
 
+            // Pre-allocate vectors for sorting
+            let mut top_values = Vec::with_capacity(stats.len());
+            let mut top_wins = Vec::with_capacity(stats.len());
+            let mut top_visits = Vec::with_capacity(stats.len());
+
             for ((r, c), (wins, visits)) in stats.iter() {
                 if *visits > 0 {
                     // Normalize the value to 0-1 range (since rewards are 0, 1, 2, we divide by 2)
@@ -158,20 +158,22 @@ fn main() {
                 }
                 wins_grid[*r][*c] = *wins;
                 visits_grid[*r][*c] = *visits;
+                
+                if *visits > 0 {
+                    top_values.push((*r, *c, (wins / *visits as f64) / 2.0));
+                }
+                top_wins.push((*r, *c, *wins));
+                top_visits.push((*r, *c, *visits));
             }
 
-            let mut top_values = stats.iter().filter(|(_, (_, v))| *v > 0).collect::<Vec<_>>();
-            // Normalize values when sorting (divide by 2 since max reward is 2)
-            top_values.sort_by(|a, b| ((b.1.0 / b.1.1 as f64) / 2.0).partial_cmp(&((a.1.0 / a.1.1 as f64) / 2.0)).unwrap());
-            let top_5_value_moves: HashSet<_> = top_values.iter().take(5).map(|(m, _)| *m).collect();
+            // Sort once and take top 5
+            top_values.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+            top_wins.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+            top_visits.sort_by(|a, b| b.2.cmp(&a.2));
 
-            let mut top_wins = stats.iter().filter(|(_, (_, v))| *v > 0).collect::<Vec<_>>();
-            top_wins.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap());
-            let top_5_win_moves: HashSet<_> = top_wins.iter().take(5).map(|(m, _)| *m).collect();
-
-            let mut top_visits = stats.iter().collect::<Vec<_>>();
-            top_visits.sort_by(|a, b| b.1.1.cmp(&a.1.1));
-            let top_5_visit_moves: HashSet<_> = top_visits.iter().take(5).map(|(m, _)| *m).collect();
+            let top_5_value_moves: HashSet<_> = top_values.iter().take(5).map(|(r, c, _)| (*r, *c)).collect();
+            let top_5_win_moves: HashSet<_> = top_wins.iter().take(5).map(|(r, c, _)| (*r, *c)).collect();
+            let top_5_visit_moves: HashSet<_> = top_visits.iter().take(5).map(|(r, c, _)| (*r, *c)).collect();
 
             println!("--- Values ---");
             for r in 0..state.board_size {
@@ -241,9 +243,12 @@ fn main() {
             println!("Invalid move! Try again.");
             continue;
         }
+        println!("[main]: Valid move!");
 
         state.make_move(&mv);
+        println!("[main]: Player {} made a move to ({}, {})", state.current_player, mv.0, mv.1);
         mcts.advance_root(&mv);
+        println!("[main]: MCTS root advanced to next state.");
     }
 
     print_board(&state.board);

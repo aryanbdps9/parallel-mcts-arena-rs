@@ -6,6 +6,11 @@ use parking_lot::{RwLock};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
+// Thread-local storage for move generation to avoid allocations
+thread_local! {
+    static MOVE_BUFFER: std::cell::RefCell<Vec<(usize, usize)>> = std::cell::RefCell::new(Vec::new());
+}
+
 /// The state of the game. Must be cloneable to be used in the MCTS.
 /// `Send` and `Sync` are required for parallel processing.
 pub trait GameState: Clone + Send + Sync {
@@ -127,7 +132,7 @@ impl<S: GameState> MCTS<S> {
     pub fn advance_root(&mut self, mv: &S::Move) {
         let new_root = {
             let children = self.root.children.read();
-            children.get(mv).cloned().unwrap_or_else(|| Arc::new(Node::new()))
+            children.get(mv).map(Arc::clone).unwrap_or_else(|| Arc::new(Node::new()))
         };
         self.root = new_root;
     }
@@ -180,10 +185,15 @@ impl<S: GameState> MCTS<S> {
     /// Runs a single MCTS simulation with virtual loss support.
     fn run_simulation(&self, state: &S) {
         let mut current_state = state.clone();
-        let mut path: Vec<Arc<Node<S::Move>>> = vec![self.root.clone()];
+        let mut path: Vec<Arc<Node<S::Move>>> = Vec::with_capacity(64); // Pre-allocate reasonable capacity
+        path.push(self.root.clone());
         let mut current_node = self.root.clone();
-        let mut moves_cache = Vec::new(); // Reuse this vector
         
+        // Calculate board capacity based on initial move count for better memory allocation
+        let board_capacity = current_state.get_possible_moves().len();
+        let mut moves_cache = Vec::with_capacity(board_capacity);
+        let mut candidates = Vec::with_capacity(board_capacity);
+
         // --- Selection Phase with Virtual Loss ---
         // Traverse the tree until a leaf node is reached.
         loop {
@@ -200,27 +210,33 @@ impl<S: GameState> MCTS<S> {
             // Use uniform prior probability for all moves since we don't have a neural network
             let prior_probability = 1.0 / moves_cache.len() as f64;
             let (best_move, next_node) = {
-                let candidates: Vec<_> = moves_cache
-                    .iter()
-                    .filter_map(|m| children_guard.get(m).map(|n| (m, n)))
-                    .map(|(m, n)| {
-                        let puct = n.puct(parent_visits, self.exploration_parameter, prior_probability);
-                        (m.clone(), n.clone(), puct)
-                    })
-                    .collect();
+                candidates.clear();
+                candidates.extend(
+                    moves_cache
+                        .iter()
+                        .filter_map(|m| children_guard.get(m).map(|n| (m, n)))
+                        .map(|(m, n)| {
+                            let puct = n.puct(parent_visits, self.exploration_parameter, prior_probability);
+                            (m.clone(), n.clone(), puct)
+                        })
+                );
                 
-                // Find the maximum PUCT score
-                let max_puct = candidates.iter()
-                    .map(|(_, _, puct)| *puct)
-                    .fold(f64::NEG_INFINITY, f64::max);
+                // Find the maximum PUCT score and collect best indices in one pass
+                let mut max_puct = f64::NEG_INFINITY;
+                let mut best_indices = Vec::with_capacity(4); // Most common case is 1-4 best moves
                 
-                // Filter candidates with the maximum score
-                let best_candidates: Vec<_> = candidates.into_iter()
-                    .filter(|(_, _, puct)| (*puct - max_puct).abs() < 1e-10)
-                    .collect();
+                for (i, (_, _, puct)) in candidates.iter().enumerate() {
+                    if *puct > max_puct {
+                        max_puct = *puct;
+                        best_indices.clear();
+                        best_indices.push(i);
+                    } else if (*puct - max_puct).abs() < 1e-10 {
+                        best_indices.push(i);
+                    }
+                }
                 
-                // Randomly select among the best candidates
-                let selected = &best_candidates[rand::thread_rng().gen_range(0..best_candidates.len())];
+                let selected_idx = best_indices[rand::thread_rng().gen_range(0..best_indices.len())];
+                let selected = &candidates[selected_idx];
                 (selected.0.clone(), selected.1.clone())
             };
 
@@ -241,9 +257,10 @@ impl<S: GameState> MCTS<S> {
             // It's possible another thread expanded it between our read lock release and write lock acquisition.
             // So we must check if it's still empty.
             if children_guard.is_empty() {
-                let moves = current_state.get_possible_moves();
-                for mv in moves {
-                    children_guard.insert(mv, Arc::new(Node::new()));
+                moves_cache.clear();
+                moves_cache.extend(current_state.get_possible_moves());
+                for mv in moves_cache.iter() {
+                    children_guard.insert(mv.clone(), Arc::new(Node::new()));
                 }
             }
         }
@@ -252,11 +269,12 @@ impl<S: GameState> MCTS<S> {
         // Run a random playout from the new node to the end of the game.
         let mut sim_state = current_state.clone();
         while !sim_state.is_terminal() {
-            let moves = sim_state.get_possible_moves();
-            if moves.is_empty() {
+            moves_cache.clear();
+            moves_cache.extend(sim_state.get_possible_moves());
+            if moves_cache.is_empty() {
                 break;
             }
-            let mv = &moves[rand::thread_rng().gen_range(0..moves.len())];
+            let mv = &moves_cache[rand::thread_rng().gen_range(0..moves_cache.len())];
             sim_state.make_move(mv);
         }
         let winner = sim_state.get_winner();
