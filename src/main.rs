@@ -4,6 +4,7 @@ use mcts::{
     GameState, MCTS,
 };
 use std::io;
+use std::collections::HashMap;
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -34,6 +35,12 @@ struct Args {
 
     #[clap(long, default_value_t = 0)]
     timeout_secs: u64,
+
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    ai_only: bool,
+
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    shared_tree: bool,
 }
 
 fn print_board(board: &Vec<Vec<i32>>, _game: &str) {
@@ -65,11 +72,16 @@ where
     S::Move: std::str::FromStr,
     <S::Move as std::str::FromStr>::Err: std::fmt::Debug,
 {
-    let mut mcts = MCTS::new(args.exploration_parameter, args.num_threads, args.max_nodes);
+    let mut mcts_map = HashMap::new();
+    let mut single_mcts = MCTS::new(args.exploration_parameter, args.num_threads, args.max_nodes);
 
     while !state.is_terminal() {
         print_board(state.get_board(), game);
-        let mv = if state.get_current_player() == 1 {
+        let current_player = state.get_current_player();
+
+        let is_human_turn = !args.ai_only && current_player == 1;
+
+        let mv = if is_human_turn {
             // Human player
             let mut input = String::new();
             match game {
@@ -95,8 +107,15 @@ where
             }
         } else {
             // AI player
-            println!("AI is thinking...");
-            mcts.search(
+            println!("Player {} (AI) is thinking...", current_player);
+            let mcts_instance = if args.shared_tree {
+                &mut single_mcts
+            } else {
+                mcts_map.entry(current_player).or_insert_with(|| {
+                    MCTS::new(args.exploration_parameter, args.num_threads, args.max_nodes)
+                })
+            };
+            mcts_instance.search(
                 &state,
                 args.iterations,
                 args.stats_interval_secs,
@@ -110,7 +129,19 @@ where
         }
 
         state.make_move(&mv);
-        mcts.advance_root(&mv);
+
+        if args.shared_tree {
+            single_mcts.advance_root(&mv);
+        } else {
+            // When not sharing, all players have their own tree, so we advance all of them
+            for mcts_instance in mcts_map.values_mut() {
+                mcts_instance.advance_root(&mv);
+            }
+            // Also advance the single_mcts instance if it's not a fully AI game
+            if !args.ai_only {
+                single_mcts.advance_root(&mv);
+            }
+        }
     }
 
     print_board(state.get_board(), game);
