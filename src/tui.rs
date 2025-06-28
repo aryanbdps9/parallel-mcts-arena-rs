@@ -1,4 +1,4 @@
-use crate::{App, AppState};
+use crate::{App, AppState, DragBoundary};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind},
     execute,
@@ -44,6 +44,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
     let debounce_duration = Duration::from_millis(100); // 100ms debounce
 
     loop {
+        // Check for terminal size changes
+        let terminal_size = terminal.size()?;
+        if (terminal_size.width, terminal_size.height) != app.last_terminal_size {
+            app.handle_window_resize(terminal_size.width, terminal_size.height);
+        }
+        
         terminal.draw(|f| ui(f, app))?;
         app.tick();
 
@@ -119,6 +125,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                         MouseEventKind::Down(MouseButton::Left) => {
                             handle_mouse_click(app, mouse.column, mouse.row, terminal.size()?);
                         }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            handle_mouse_drag(app, mouse.column, mouse.row, terminal.size()?);
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            handle_mouse_release(app, mouse.column, mouse.row, terminal.size()?);
+                        }
                         MouseEventKind::ScrollUp => {
                             handle_mouse_scroll(app, mouse.column, mouse.row, terminal.size()?, true);
                         }
@@ -137,7 +149,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
 fn ui(f: &mut Frame, app: &mut App) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(15), Constraint::Percentage(15)].as_ref())
+        .constraints(app.get_layout_constraints().as_ref())
         .split(f.size());
 
     match app.state {
@@ -188,15 +200,15 @@ fn ui(f: &mut Frame, app: &mut App) {
             let instructions_text = if !app.game.is_terminal() {
                 if app.ai_only {
                     if app.is_ai_thinking() {
-                        "AI vs AI mode - AI is thinking... Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info.".to_string()
+                        "AI vs AI mode - AI is thinking... Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes.".to_string()
                     } else {
-                        "AI vs AI mode - Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info.".to_string()
+                        "AI vs AI mode - Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes.".to_string()
                     }
                 } else {
                     if app.is_ai_thinking() {
-                        "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info.".to_string()
+                        "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes.".to_string()
                     } else {
-                        "Arrow keys to move, Enter to place, or click on board. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info.".to_string()
+                        "Arrow keys to move, Enter to place, or click on board. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes.".to_string()
                     }
                 }
             } else {
@@ -213,19 +225,37 @@ fn ui(f: &mut Frame, app: &mut App) {
                 // Create styled instruction text for game over
                 let instruction_spans = vec![
                     Span::styled(winner_text, Style::default().fg(winner_color).add_modifier(Modifier::BOLD)),
-                    Span::raw(" Press 'r' to play again, 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info."),
+                    Span::raw(" Press 'r' to play again, 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes."),
                 ];
                 
+                let drag_indicator = if app.is_dragging { "🔀" } else { "↕" };
+                let instructions_title = format!("{} Game Over ({}%|{}%|{}%)", 
+                    drag_indicator,
+                    app.board_height_percent, 
+                    app.instructions_height_percent, 
+                    app.stats_height_percent);
+                
                 let instructions = Paragraph::new(Line::from(instruction_spans))
-                    .block(Block::default().title("Game Over").borders(Borders::ALL));
+                    .block(Block::default().title(instructions_title).borders(Borders::ALL));
                 f.render_widget(instructions, main_chunks[1]);
                 
                 draw_stats(f, app, main_chunks[2]);
                 return;
             };
 
+            let instructions_title = if app.state == AppState::Playing || app.state == AppState::GameOver {
+                let drag_indicator = if app.is_dragging { "🔀" } else { "↕" };
+                format!("{} Instructions ({}%|{}%|{}%)", 
+                    drag_indicator,
+                    app.board_height_percent, 
+                    app.instructions_height_percent, 
+                    app.stats_height_percent)
+            } else {
+                "Instructions".to_string()
+            };
+
             let instructions = Paragraph::new(instructions_text)
-                .block(Block::default().title("Instructions").borders(Borders::ALL));
+                .block(Block::default().title(instructions_title).borders(Borders::ALL));
             f.render_widget(instructions, main_chunks[1]);
             
             draw_stats(f, app, main_chunks[2]);
@@ -307,10 +337,11 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     };
 
     // Create the paragraph with scrollable content
+    let drag_indicator = if app.is_dragging { "🔀" } else { "↕" };
     let title = if max_scroll > 0 {
-        format!("Debug Statistics (scroll: {}/{})", scroll_offset, max_scroll)
+        format!("{} Debug Statistics (scroll: {}/{}) - {}%", drag_indicator, scroll_offset, max_scroll, app.stats_height_percent)
     } else {
-        "Debug Statistics".to_string()
+        format!("{} Debug Statistics - {}%", drag_indicator, app.stats_height_percent)
     };
     
     // Split area for content and scrollbar with minimum space check
@@ -394,6 +425,12 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
+    // Check if the click is on a drag boundary first
+    if let Some(boundary) = detect_boundary_click(app, row, terminal_size.height) {
+        app.start_drag(boundary);
+        return;
+    }
+
     match app.state {
         AppState::Menu => {
             handle_menu_click(app, col, row, terminal_size);
@@ -412,11 +449,44 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     }
 }
 
+fn handle_mouse_drag(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
+    if app.is_dragging {
+        app.handle_drag(row, terminal_size.height);
+    }
+}
+
+fn handle_mouse_release(app: &mut App, _col: u16, _row: u16, _terminal_size: Rect) {
+    if app.is_dragging {
+        app.stop_drag();
+    }
+}
+
+fn detect_boundary_click(app: &App, row: u16, terminal_height: u16) -> Option<DragBoundary> {
+    // Only allow boundary dragging in Playing or GameOver states
+    match app.state {
+        AppState::Playing | AppState::GameOver => {
+            let (board_instructions_boundary, instructions_stats_boundary) = app.get_drag_area(terminal_height);
+            
+            // Check if click is near the board-instructions boundary (within 1 row)
+            if row.abs_diff(board_instructions_boundary) <= 1 {
+                return Some(DragBoundary::BoardInstructions);
+            }
+            
+            // Check if click is near the instructions-stats boundary (within 1 row)
+            if row.abs_diff(instructions_stats_boundary) <= 1 {
+                return Some(DragBoundary::InstructionsStats);
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
 fn handle_menu_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
-    // Calculate the menu area based on the new vertical layout
-    let main_area_height = (terminal_size.height as f32 * 0.7) as u16;
+    // Calculate the menu area based on the dynamic layout
+    let main_area_height = (terminal_size.height as f32 * app.board_height_percent as f32 / 100.0) as u16;
     
-    // Check if click is within the menu area (top 70% of screen)
+    // Check if click is within the menu area
     if row < main_area_height {
         // Calculate which menu item was clicked
         // The menu starts at row 1 (border) and each item takes roughly 1 row
@@ -441,18 +511,20 @@ fn handle_menu_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
 fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     let board_size = app.game.get_board().len();
     
-    // Calculate the game board area based on the new vertical layout
-    let main_area_height = (terminal_size.height as f32 * 0.7) as u16;
+    // Calculate the game board area based on the dynamic layout
+    let main_area_height = (terminal_size.height as f32 * app.board_height_percent as f32 / 100.0) as u16;
     
-    // Check if click is within the board area (top 70% of screen)
+    // Check if click is within the board area
     if row < main_area_height {
         // Calculate board position
-        // The board starts at position (1, 1) due to borders and each cell is about 4 characters wide and 2 high
-        let board_start_col = 1;
-        let board_start_row = 2; // Account for title border
+        // The board area has a block border, then margin(1) creates the content area
+        // So content starts at: border (1) + margin (1) = row 1 for columns, row 1 for rows
+        let board_start_col = 1; // Border + margin
+        let board_start_row = 1; // Border + margin
         
         if col >= board_start_col && row >= board_start_row {
             let board_col = ((col - board_start_col) / 4) as usize;
+            // Each board cell occupies 2 terminal rows
             let board_row = ((row - board_start_row) / 2) as usize;
             
             if board_row < board_size && board_col < board_size {
@@ -468,10 +540,10 @@ fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
 }
 
 fn handle_settings_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
-    // Calculate the settings area based on the vertical layout
-    let main_area_height = (terminal_size.height as f32 * 0.7) as u16;
+    // Calculate the settings area based on the dynamic layout
+    let main_area_height = (terminal_size.height as f32 * app.board_height_percent as f32 / 100.0) as u16;
     
-    // Check if click is within the settings area (top 70% of screen)
+    // Check if click is within the settings area
     if row < main_area_height {
         // Calculate which settings item was clicked
         // Account for the borders and spacing
@@ -495,8 +567,10 @@ fn handle_mouse_scroll(app: &mut App, _col: u16, row: u16, terminal_size: Rect, 
     // Only handle scrolling when in Playing or GameOver state
     match app.state {
         AppState::Playing | AppState::GameOver => {
-            // Calculate the stats area position (bottom 15% of screen)
-            let stats_area_start = (terminal_size.height as f32 * 0.85) as u16;
+            // Calculate the stats area position based on dynamic layout
+            let board_height = (terminal_size.height as f32 * app.board_height_percent as f32 / 100.0) as u16;
+            let instructions_height = (terminal_size.height as f32 * app.instructions_height_percent as f32 / 100.0) as u16;
+            let stats_area_start = board_height + instructions_height;
             
             // Check if the mouse is in the stats area
             if row >= stats_area_start {

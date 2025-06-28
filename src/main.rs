@@ -11,6 +11,7 @@ use crate::games::connect4::{Connect4Move, Connect4State};
 use crate::games::blokus::{BlokusMove, BlokusState};
 use crate::games::othello::{OthelloMove, OthelloState};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
+use ratatui::layout::Constraint;
 
 // AI Worker Communication
 #[derive(Debug)]
@@ -83,6 +84,12 @@ pub enum AppState {
     GameOver,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DragBoundary {
+    BoardInstructions,  // Boundary between board and instructions panes
+    InstructionsStats,  // Boundary between instructions and stats panes
+}
+
 pub struct App<'a> {
     pub titles: Vec<&'a str>,
     pub index: usize,
@@ -112,6 +119,13 @@ pub struct App<'a> {
     pub othello_board_size: usize,
     pub exploration_parameter: f64,
     pub max_nodes: usize,
+    // Responsive layout fields
+    pub board_height_percent: u16,
+    pub instructions_height_percent: u16,
+    pub stats_height_percent: u16,
+    pub is_dragging: bool,
+    pub drag_boundary: Option<DragBoundary>,
+    pub last_terminal_size: (u16, u16),
 }
 
 impl<'a> App<'a> {
@@ -163,6 +177,13 @@ impl<'a> App<'a> {
             othello_board_size: 8,
             exploration_parameter: args.exploration_parameter,
             max_nodes: args.max_nodes,
+            // Responsive layout fields
+            board_height_percent: 50,
+            instructions_height_percent: 20,
+            stats_height_percent: 30,
+            is_dragging: false,
+            drag_boundary: None,
+            last_terminal_size: (0, 0),
         };
         app.update_settings_display();
         app
@@ -523,6 +544,73 @@ impl<'a> App<'a> {
 
     pub fn is_ai_thinking(&self) -> bool {
         self.ai_state == AIState::Thinking
+    }
+
+    // Responsive layout methods
+    pub fn handle_window_resize(&mut self, width: u16, height: u16) {
+        self.last_terminal_size = (width, height);
+        // Reset scroll if content might have changed
+        self.debug_scroll_offset = 0;
+    }
+
+    pub fn start_drag(&mut self, boundary: DragBoundary) {
+        self.is_dragging = true;
+        self.drag_boundary = Some(boundary);
+    }
+
+    pub fn stop_drag(&mut self) {
+        self.is_dragging = false;
+        self.drag_boundary = None;
+        // Reset scroll position after layout change to prevent display issues
+        self.debug_scroll_offset = 0;
+    }
+
+    pub fn handle_drag(&mut self, mouse_row: u16, terminal_height: u16) {
+        if !self.is_dragging || self.drag_boundary.is_none() {
+            return;
+        }
+
+        let boundary = self.drag_boundary.unwrap();
+        let row_percent = ((mouse_row as f32 / terminal_height as f32) * 100.0) as u16;
+
+        match boundary {
+            DragBoundary::BoardInstructions => {
+                // Ensure reasonable bounds (30-80% for board)
+                let new_board_percent = row_percent.clamp(30, 80);
+                let remaining = 100 - new_board_percent;
+                // Maintain the relative ratio between instructions and stats
+                let instructions_ratio = self.instructions_height_percent as f32 / (self.instructions_height_percent + self.stats_height_percent) as f32;
+                self.board_height_percent = new_board_percent;
+                self.instructions_height_percent = (remaining as f32 * instructions_ratio) as u16;
+                self.stats_height_percent = remaining - self.instructions_height_percent;
+            }
+            DragBoundary::InstructionsStats => {
+                // Calculate which part of the non-board area we're in
+                let non_board_start = self.board_height_percent;
+                if row_percent > non_board_start {
+                    let non_board_percent = 100 - self.board_height_percent;
+                    let relative_pos = row_percent - non_board_start;
+                    let instructions_percent = relative_pos.clamp(5, non_board_percent - 5);
+                    self.instructions_height_percent = instructions_percent;
+                    self.stats_height_percent = non_board_percent - instructions_percent;
+                }
+            }
+        }
+    }
+
+    pub fn get_layout_constraints(&self) -> [Constraint; 3] {
+        [
+            Constraint::Percentage(self.board_height_percent),
+            Constraint::Percentage(self.instructions_height_percent),
+            Constraint::Percentage(self.stats_height_percent),
+        ]
+    }
+
+    pub fn get_drag_area(&self, terminal_height: u16) -> (u16, u16) {
+        // Return the row ranges where dragging is allowed
+        let board_end = (terminal_height as f32 * self.board_height_percent as f32 / 100.0) as u16;
+        let instructions_end = board_end + (terminal_height as f32 * self.instructions_height_percent as f32 / 100.0) as u16;
+        (board_end.saturating_sub(1), instructions_end.saturating_sub(1))
     }
 }
 
