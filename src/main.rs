@@ -13,6 +13,27 @@ use crate::games::othello::{OthelloMove, OthelloState};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use ratatui::layout::Constraint;
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::SystemTime;
+
+// Move history tracking
+#[derive(Debug, Clone)]
+pub struct MoveHistoryEntry {
+    pub timestamp: SystemTime,
+    pub move_number: u32,
+    pub player: i32,
+    pub move_data: MoveWrapper,
+}
+
+impl MoveHistoryEntry {
+    pub fn new(move_number: u32, player: i32, move_data: MoveWrapper) -> Self {
+        Self {
+            timestamp: SystemTime::now(),
+            move_number,
+            player,
+            move_data,
+        }
+    }
+}
 
 // Centralized move processing
 pub enum GameRequest {
@@ -189,6 +210,11 @@ pub struct App<'a> {
     pub last_stats_request_time: Option<std::time::Instant>,
     pub next_request_id: u64,
     pub current_request_id: u64,
+    // Move history tracking
+    pub move_history: Vec<MoveHistoryEntry>,
+    pub move_counter: u32,
+    pub move_history_scroll_offset: usize,
+    pub moves_in_current_round: u32, // Track how many moves made in current round
 }
 
 impl<'a> App<'a> {
@@ -272,6 +298,10 @@ impl<'a> App<'a> {
             last_stats_request_time: None,
             next_request_id: 1,
             current_request_id: 0,
+            move_history: vec![],
+            move_counter: 0,
+            move_history_scroll_offset: 0,
+            moves_in_current_round: 0,
         };
         app.update_settings_display();
         
@@ -329,6 +359,10 @@ impl<'a> App<'a> {
             _ => (0, 0),
         };
         self.debug_scroll_offset = 0;
+        self.move_history.clear();
+        self.move_counter = 0;
+        self.move_history_scroll_offset = 0;
+        self.moves_in_current_round = 0;
         self.ai_state = AIState::Idle;
         self.pending_ai_move = None;
         
@@ -392,8 +426,28 @@ impl<'a> App<'a> {
             match game_request {
                 GameRequest::MakeMove(mv) => {
                     if self.game.is_legal(&mv) {
+                        // Track move history before applying the move
+                        let current_player = self.game.get_current_player();
+                        
+                        // Increment moves in current round
+                        self.moves_in_current_round += 1;
+                        
+                        // If this is the first move of a new round, increment move counter
+                        if self.moves_in_current_round == 1 {
+                            self.move_counter += 1;
+                        }
+                        
+                        let history_entry = MoveHistoryEntry::new(self.move_counter, current_player, mv.clone());
+                        self.move_history.push(history_entry);
+                        
                         // Apply the move to our game state
                         self.game.make_move(&mv);
+
+                        // Check if we completed a full round of players
+                        let player_count = self.get_player_count();
+                        if self.moves_in_current_round >= player_count {
+                            self.moves_in_current_round = 0; // Reset for next round
+                        }
 
                         // If not in AI-only mode, or if in AI-only mode with a shared tree, advance the root.
                         if !self.ai_only || self.shared_tree {
@@ -520,6 +574,13 @@ impl<'a> App<'a> {
             "othello" => GameWrapper::Othello(OthelloState::new(self.othello_board_size)),
             _ => panic!("Unknown game type"),
         };
+        
+        // Reset move history
+        self.move_history.clear();
+        self.move_counter = 0;
+        self.move_history_scroll_offset = 0;
+        self.moves_in_current_round = 0;
+        
         let _ = self.ai_tx.send(AIRequest::UpdateSettings {
             exploration_parameter: self.exploration_parameter,
             num_threads: self.num_threads,
@@ -545,15 +606,47 @@ impl<'a> App<'a> {
     }
 
     pub fn scroll_debug_down(&mut self) {
-        // Add a reasonable upper bound to prevent excessive scrolling
-        if self.debug_scroll_offset < 1000 {
-            self.debug_scroll_offset = self.debug_scroll_offset.saturating_add(1);
+        if self.debug_scroll_offset < 100 { // Safety limit
+            self.debug_scroll_offset += 1;
         }
     }
 
     pub fn reset_debug_scroll(&mut self) {
         self.debug_scroll_offset = 0;
     }
+
+    pub fn scroll_move_history_up(&mut self) {
+        if self.move_history_scroll_offset > 0 {
+            self.move_history_scroll_offset -= 1;
+        }
+    }
+
+    pub fn scroll_move_history_down(&mut self) {
+        // Count the number of unique move numbers (move groups)
+        let mut unique_moves = std::collections::HashSet::new();
+        for entry in &self.move_history {
+            unique_moves.insert(entry.move_number);
+        }
+        let total_move_groups = unique_moves.len();
+        let max_scroll = total_move_groups.saturating_sub(5); // Show up to 5 move groups at once
+        if self.move_history_scroll_offset < max_scroll {
+            self.move_history_scroll_offset += 1;
+        }
+    }
+
+    pub fn reset_move_history_scroll(&mut self) {
+        self.move_history_scroll_offset = 0;
+    }
+
+    /// Get the number of players for the current game
+    fn get_player_count(&self) -> u32 {
+        match self.game {
+            GameWrapper::Blokus(_) => 4,
+            _ => 2, // Gomoku, Connect4, Othello are all 2-player games
+        }
+    }
+
+    // ...existing code...
 
     pub fn settings_next(&mut self) {
         self.settings_index = (self.settings_index + 1) % self.settings_titles.len();
@@ -866,7 +959,7 @@ impl<'a> App<'a> {
                 if row_percent > non_board_start {
                     let non_board_percent = 100 - self.board_height_percent;
                     let relative_pos = row_percent - non_board_start;
-                    
+
                     // Ensure instructions doesn't go below its minimum
                     let max_instructions = non_board_percent - min_stats_percent;
                     let instructions_percent = relative_pos.clamp(min_instructions_percent, max_instructions);

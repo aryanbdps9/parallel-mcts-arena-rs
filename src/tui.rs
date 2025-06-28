@@ -99,8 +99,20 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                             },
                             AppState::Playing => {
                                 match key.code {
-                                    KeyCode::Down => if !app.ai_only { app.move_cursor_down(); },
-                                    KeyCode::Up => if !app.ai_only { app.move_cursor_up(); },
+                                    KeyCode::Down => {
+                                        if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                                            app.scroll_move_history_down();
+                                        } else if !app.ai_only {
+                                            app.move_cursor_down();
+                                        }
+                                    },
+                                    KeyCode::Up => {
+                                        if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                                            app.scroll_move_history_up();
+                                        } else if !app.ai_only {
+                                            app.move_cursor_up();
+                                        }
+                                    },
                                     KeyCode::Left => if !app.ai_only { app.move_cursor_left(); },
                                     KeyCode::Right => if !app.ai_only { app.move_cursor_right(); },
                                     KeyCode::Enter => if !app.ai_only { app.submit_move(); },
@@ -115,6 +127,16 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                 KeyCode::Char('m') => app.state = AppState::Menu,
                                 KeyCode::PageUp => app.scroll_debug_up(),
                                 KeyCode::PageDown => app.scroll_debug_down(),
+                                KeyCode::Down => {
+                                    if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                                        app.scroll_move_history_down();
+                                    }
+                                },
+                                KeyCode::Up => {
+                                    if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                                        app.scroll_move_history_up();
+                                    }
+                                },
                                 _ => {}
                             },
                         }
@@ -201,15 +223,15 @@ fn ui(f: &mut Frame, app: &mut App) {
             let instructions_text = if !app.game.is_terminal() {
                 if app.ai_only {
                     if app.is_ai_thinking() {
-                        "AI vs AI mode - AI is thinking... Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes.".to_string()
+                        "AI vs AI mode - AI is thinking... Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
                     } else {
-                        "AI vs AI mode - Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes.".to_string()
+                        "AI vs AI mode - Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
                     }
                 } else {
                     if app.is_ai_thinking() {
-                        "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes.".to_string()
+                        "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
                     } else {
-                        "Arrow keys to move, Enter to place, or click on board. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes.".to_string()
+                        "Arrow keys to move, Enter to place, or click on board. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
                     }
                 }
             } else {
@@ -241,7 +263,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 // Create styled instruction text for game over
                 let instruction_spans = vec![
                     Span::styled(winner_text, Style::default().fg(winner_color).add_modifier(Modifier::BOLD)),
-                    Span::raw(" Press 'r' to play again, 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info. Drag boundaries to resize panes."),
+                    Span::raw(" Press 'r' to play again, 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes."),
                 ];
                 
                 let drag_indicator = if app.is_dragging { "🔀" } else { "↕" };
@@ -552,6 +574,82 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     if let Some(debug_info) = &app.mcts_debug_info {
         for line in debug_info.lines() {
             stats_lines.push(Line::from(line));
+        }
+    }
+    
+    // Add move history section
+    if !app.move_history.is_empty() {
+        stats_lines.push(Line::from(""));
+        stats_lines.push(Line::from(vec![
+            Span::styled("MOVE HISTORY:", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        ]));
+        
+        // Group moves by move number for display
+        let mut grouped_moves: std::collections::BTreeMap<u32, Vec<&crate::MoveHistoryEntry>> = std::collections::BTreeMap::new();
+        for entry in &app.move_history {
+            grouped_moves.entry(entry.move_number).or_insert_with(Vec::new).push(entry);
+        }
+        
+        let visible_moves = 5; // Number of move groups to show at once
+        let total_move_groups = grouped_moves.len();
+        let start_idx = app.move_history_scroll_offset;
+        let end_idx = (start_idx + visible_moves).min(total_move_groups);
+        
+        for (move_num, moves) in grouped_moves.iter().skip(start_idx).take(visible_moves) {
+            let mut move_spans = vec![
+                Span::styled(format!("{}. ", move_num), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            ];
+            
+            for (i, entry) in moves.iter().enumerate() {
+                if i > 0 {
+                    move_spans.push(Span::raw(" "));
+                }
+                
+                let player_color = match entry.player {
+                    1 => Color::Red,
+                    -1 => Color::Blue,
+                    2 => Color::Green,
+                    3 => Color::Yellow,
+                    4 => Color::Cyan,
+                    _ => Color::White,
+                };
+                
+                let player_symbol = match app.game {
+                    GameWrapper::Blokus(_) => format!("P{}", entry.player),
+                    _ => if entry.player == 1 { "X".to_string() } else { "O".to_string() },
+                };
+                
+                move_spans.push(Span::styled(
+                    format!("{}:{}", player_symbol, entry.move_data),
+                    Style::default().fg(player_color)
+                ));
+            }
+            
+            // Add timestamp for the move group (using the first move's timestamp)
+            if let Some(first_move) = moves.first() {
+                let timestamp = first_move.timestamp
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                move_spans.push(Span::styled(
+                    format!(" ({:02}:{:02})", timestamp / 60 % 60, timestamp % 60),
+                    Style::default().fg(Color::Gray)
+                ));
+            }
+            
+            stats_lines.push(Line::from(move_spans));
+        }
+        
+        if total_move_groups > visible_moves {
+            let showing_from = start_idx + 1;
+            let showing_to = end_idx;
+            stats_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("Showing moves {}-{} of {} (use Shift+Up/Down to scroll)", 
+                        showing_from, showing_to, total_move_groups),
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)
+                ),
+            ]));
         }
     }
     
