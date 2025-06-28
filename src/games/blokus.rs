@@ -104,6 +104,12 @@ impl GameState for BlokusState {
                 }
             }
         }
+        
+        // If no valid piece placements exist, add a pass move
+        if moves.is_empty() {
+            moves.push(BlokusMove(999, 0, 0, 0)); // Pass move
+        }
+        
         moves
     }
 
@@ -129,20 +135,16 @@ impl GameState for BlokusState {
         }
 
         // Advance to the next player who hasn't passed
-        let mut next_player_found = false;
         for i in 1..=4 {
-            let next_player = (self.current_player % 4) + i;
+            let next_player = ((self.current_player - 1 + i) % 4) + 1;
             let next_player_idx = (next_player - 1) as usize;
             if !self.passed_players[next_player_idx] {
                 self.current_player = next_player;
-                next_player_found = true;
-                break;
+                return;
             }
         }
-        if !next_player_found {
-            // All players have passed, game ends
-            self.current_player = -1; // Or some other indicator
-        }
+        // All players have passed, keep current player but game will be terminal
+        // Don't set to -1 as it breaks the game flow
     }
 
     fn is_terminal(&self) -> bool {

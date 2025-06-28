@@ -540,7 +540,9 @@ impl<S: GameState> MCTS<S> {
     fn run_simulation(&self, state: &S) {
         let mut current_state = state.clone();
         let mut path: Vec<Arc<Node<S::Move>>> = Vec::with_capacity(64); // Pre-allocate reasonable capacity
+        let mut path_players: Vec<i32> = Vec::with_capacity(64); // Track which player made each move
         path.push(self.root.clone());
+        path_players.push(current_state.get_current_player()); // Root represents current player's turn
         let mut current_node = self.root.clone();
 
         // Calculate board capacity based on initial move count for better memory allocation
@@ -599,9 +601,12 @@ impl<S: GameState> MCTS<S> {
             // Apply virtual loss to the selected node
             next_node.apply_virtual_loss();
 
+            // Remember which player is making this move
+            let moving_player = current_state.get_current_player();
             current_state.make_move(&best_move);
             current_node = next_node;
             path.push(current_node.clone());
+            path_players.push(moving_player); // Track the player who made this move
         }
 
         // --- Expansion Phase ---
@@ -690,8 +695,8 @@ impl<S: GameState> MCTS<S> {
         // --- Backpropagation Phase with Virtual Loss Removal ---
         // Update the visit counts and win statistics for all nodes in the path.
         // Also remove virtual losses that were applied during selection.
-        let mut player_for_reward = current_state.get_current_player();
-        for (i, node) in path.iter().rev().enumerate() {
+        // For multi-player games, reward each node based on whether the player who made that move won
+        for (i, (node, &player_who_moved)) in path.iter().zip(path_players.iter()).rev().enumerate() {
             // Remove virtual loss from all nodes except the last one (the leaf/terminal node)
             // which didn't have virtual loss applied during selection
             if i < path.len() - 1 {
@@ -700,12 +705,11 @@ impl<S: GameState> MCTS<S> {
             
             node.visits.fetch_add(1, Ordering::Relaxed);
             let reward = match winner {
-                Some(w) if w == player_for_reward => 0, // Loss for parent
-                Some(w) if w == -player_for_reward => 2, // Win for parent
-                _ => 1,                                 // Draw
+                Some(w) if w == player_who_moved => 2, // Win for the player who made this move
+                Some(_) => 0,                          // Loss (another player won)
+                None => 1,                             // Draw
             };
             node.wins.fetch_add(reward, Ordering::Relaxed);
-            player_for_reward = -player_for_reward;
         }
     }
 

@@ -214,10 +214,25 @@ fn ui(f: &mut Frame, app: &mut App) {
                 }
             } else {
                 let (winner_text, winner_color) = if let Some(winner) = app.winner {
-                    if winner == 1 {
-                        ("Player X wins!", Color::Red)
-                    } else {
-                        ("Player O wins!", Color::Blue)
+                    match app.game {
+                        GameWrapper::Blokus(_) => {
+                            // Blokus is a 4-player game
+                            match winner {
+                                1 => ("Player 1 wins!", Color::Red),
+                                2 => ("Player 2 wins!", Color::Blue),
+                                3 => ("Player 3 wins!", Color::Green),
+                                4 => ("Player 4 wins!", Color::Yellow),
+                                _ => ("Unknown player wins!", Color::White),
+                            }
+                        }
+                        _ => {
+                            // 2-player games (Gomoku, Connect4, Othello)
+                            if winner == 1 {
+                                ("Player X wins!", Color::Red)
+                            } else {
+                                ("Player O wins!", Color::Blue)
+                            }
+                        }
                     }
                 } else {
                     ("It's a draw!", Color::Yellow)
@@ -274,10 +289,25 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let current_player = app.game.get_current_player();
-    let (player_symbol, player_color) = if current_player == 1 {
-        ("X", Color::Red)
-    } else {
-        ("O", Color::Blue)
+    let (player_symbol, player_color) = match app.game {
+        GameWrapper::Blokus(_) => {
+            // Blokus is a 4-player game
+            match current_player {
+                1 => ("Player 1", Color::Red),
+                2 => ("Player 2", Color::Blue),
+                3 => ("Player 3", Color::Green),
+                4 => ("Player 4", Color::Yellow),
+                _ => ("Unknown", Color::White),
+            }
+        }
+        _ => {
+            // 2-player games (Gomoku, Connect4, Othello)
+            if current_player == 1 {
+                ("X", Color::Red)
+            } else {
+                ("O", Color::Blue)
+            }
+        }
     };
 
     let mut stats_lines = vec![
@@ -622,10 +652,25 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
 
         for c in 0..board_size {
             let player = board[r][c];
-            let (symbol, player_color) = match player {
-                1 => ("X", Color::Red),
-                -1 => ("O", Color::Blue),
-                _ => (".", Color::White),
+            let (symbol, player_color) = match app.game {
+                GameWrapper::Blokus(_) => {
+                    // Blokus uses player numbers 1-4
+                    match player {
+                        1 => ("1", Color::Red),
+                        2 => ("2", Color::Blue),
+                        3 => ("3", Color::Green),
+                        4 => ("4", Color::Yellow),
+                        _ => (".", Color::White),
+                    }
+                }
+                _ => {
+                    // 2-player games use X and O
+                    match player {
+                        1 => ("X", Color::Red),
+                        -1 => ("O", Color::Blue),
+                        _ => (".", Color::White),
+                    }
+                }
             };
 
             let mut style = Style::default().fg(player_color);
