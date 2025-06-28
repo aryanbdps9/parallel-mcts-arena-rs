@@ -193,12 +193,20 @@ pub struct App<'a> {
 
 impl<'a> App<'a> {
     fn new(args: Args) -> App<'a> {
-        let game = match args.game.as_str() {
-            "gomoku" => GameWrapper::Gomoku(GomokuState::new(args.board_size, args.line_size)),
-            "connect4" => GameWrapper::Connect4(Connect4State::new(7, 6, 4)),
-            "blokus" => GameWrapper::Blokus(BlokusState::new()),
-            "othello" => GameWrapper::Othello(OthelloState::new(8)),
-            _ => panic!("Unknown game type"),
+        let (game, game_type, should_start_playing) = if let Some(game_name) = args.game {
+            // Game was explicitly specified
+            let game = match game_name.as_str() {
+                "gomoku" => GameWrapper::Gomoku(GomokuState::new(args.board_size, args.line_size)),
+                "connect4" => GameWrapper::Connect4(Connect4State::new(7, 6, 4)),
+                "blokus" => GameWrapper::Blokus(BlokusState::new()),
+                "othello" => GameWrapper::Othello(OthelloState::new(8)),
+                _ => panic!("Unknown game type: {}", game_name),
+            };
+            (game, game_name, args.ai_only)
+        } else {
+            // No game specified, use default but always show menu
+            let default_game = GameWrapper::Gomoku(GomokuState::new(args.board_size, args.line_size));
+            (default_game, "gomoku".to_string(), false)
         };
         
         // Create AI worker thread communication channels
@@ -218,7 +226,7 @@ impl<'a> App<'a> {
             titles: vec!["Gomoku", "Connect4", "Blokus", "Othello", "Settings", "Quit"],
             index: 0,
             state: AppState::Menu,
-            game_type: args.game,
+            game_type,
             game,
             cursor: (0, 0),
             winner: None,
@@ -276,8 +284,8 @@ impl<'a> App<'a> {
             stats_interval_secs: args.stats_interval_secs,
         });
         
-        // If ai_only mode, automatically start playing
-        if app.ai_only {
+        // If ai_only mode and game was explicitly specified, automatically start playing
+        if should_start_playing {
             app.state = AppState::Playing;
         }
         
@@ -911,8 +919,8 @@ impl<'a> App<'a> {
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    #[clap(short, long, default_value = "gomoku")]
-    game: String,
+    #[clap(short, long)]
+    game: Option<String>,
 
     #[clap(short, long, default_value_t = 9)]
     board_size: usize,
