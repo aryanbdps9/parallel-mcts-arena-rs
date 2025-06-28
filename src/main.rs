@@ -158,6 +158,7 @@ pub enum AppState {
 pub enum DragBoundary {
     BoardInstructions,  // Boundary between board and instructions panes
     InstructionsStats,  // Boundary between instructions and stats panes
+    StatsHistory,       // Boundary between debug stats and move history panes
 }
 
 pub struct App<'a> {
@@ -196,6 +197,7 @@ pub struct App<'a> {
     pub board_height_percent: u16,
     pub instructions_height_percent: u16,
     pub stats_height_percent: u16,
+    pub stats_width_percent: u16,      // Width of debug stats vs move history
     pub is_dragging: bool,
     pub drag_boundary: Option<DragBoundary>,
     pub last_terminal_size: (u16, u16),
@@ -284,6 +286,7 @@ impl<'a> App<'a> {
             board_height_percent: 50, // Temporary default, will be overridden
             instructions_height_percent: 20, // Temporary default, will be overridden
             stats_height_percent: 30, // Temporary default, will be overridden
+            stats_width_percent: 60, // Default: 60% for debug stats, 40% for move history
             is_dragging: false,
             drag_boundary: None,
             last_terminal_size: (0, 0),
@@ -622,16 +625,9 @@ impl<'a> App<'a> {
     }
 
     pub fn scroll_move_history_down(&mut self) {
-        // Count the number of unique move numbers (move groups)
-        let mut unique_moves = std::collections::HashSet::new();
-        for entry in &self.move_history {
-            unique_moves.insert(entry.move_number);
-        }
-        let total_move_groups = unique_moves.len();
-        let max_scroll = total_move_groups.saturating_sub(5); // Show up to 5 move groups at once
-        if self.move_history_scroll_offset < max_scroll {
-            self.move_history_scroll_offset += 1;
-        }
+        self.move_history_scroll_offset += 1;
+        // The bounds will be clamped when update_move_history_scroll_bounds is called
+        // or when the UI renders
     }
 
     pub fn reset_move_history_scroll(&mut self) {
@@ -856,6 +852,24 @@ impl<'a> App<'a> {
         min_percent.clamp(5, 15) // Reasonable bounds
     }
 
+    /// Update move history scroll bounds based on current terminal size and content
+    pub fn update_move_history_scroll_bounds(&mut self, terminal_height: u16) {
+        // Calculate actual move history area height
+        let stats_height = (terminal_height as f32 * self.stats_height_percent as f32 / 100.0) as u16;
+        let visible_height = (stats_height.saturating_sub(2) as usize).min(20);
+        
+        // Count the number of move groups
+        let mut unique_moves = std::collections::HashSet::new();
+        for entry in &self.move_history {
+            unique_moves.insert(entry.move_number);
+        }
+        let content_height = unique_moves.len();
+        
+        // Calculate and clamp scroll offset
+        let max_scroll = content_height.saturating_sub(visible_height);
+        self.move_history_scroll_offset = self.move_history_scroll_offset.min(max_scroll);
+    }
+
     // Responsive layout methods
     pub fn handle_window_resize(&mut self, width: u16, height: u16) {
         self.last_terminal_size = (width, height);
@@ -912,8 +926,9 @@ impl<'a> App<'a> {
     pub fn stop_drag(&mut self) {
         self.is_dragging = false;
         self.drag_boundary = None;
-        // Reset scroll position after layout change to prevent display issues
+        // Reset scroll positions after layout change to prevent display issues
         self.debug_scroll_offset = 0;
+        self.move_history_scroll_offset = 0;
     }
 
     pub fn handle_drag(&mut self, mouse_row: u16, terminal_height: u16) {
@@ -971,6 +986,26 @@ impl<'a> App<'a> {
                         self.stats_height_percent = stats_percent;
                     }
                 }
+            }
+            DragBoundary::StatsHistory => {
+                // For horizontal dragging within the stats area, we don't use row_percent
+                // This case should be handled by a separate method for horizontal dragging
+                // For now, do nothing as this will be handled by handle_horizontal_drag
+            }
+        }
+    }
+
+    pub fn handle_horizontal_drag(&mut self, col: u16, terminal_width: u16) {
+        if let Some(boundary) = self.drag_boundary {
+            if boundary == DragBoundary::StatsHistory {
+                let col_percent = (col as f32 / terminal_width as f32 * 100.0) as u16;
+                
+                // Allow stats to be 20% to 80% of the width
+                let min_stats_width = 20u16;
+                let max_stats_width = 80u16;
+                
+                let new_stats_width = col_percent.clamp(min_stats_width, max_stats_width);
+                self.stats_width_percent = new_stats_width;
             }
         }
     }

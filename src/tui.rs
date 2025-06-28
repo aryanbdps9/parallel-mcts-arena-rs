@@ -170,6 +170,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
+    // Update scroll bounds to ensure they're consistent with current terminal size
+    app.update_move_history_scroll_bounds(f.size().height);
+    
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(app.get_layout_constraints().as_ref())
@@ -277,7 +280,18 @@ fn ui(f: &mut Frame, app: &mut App) {
                     .block(Block::default().title(instructions_title).borders(Borders::ALL));
                 f.render_widget(instructions, main_chunks[1]);
                 
-                draw_stats(f, app, main_chunks[2]);
+                // Split the stats area horizontally for Debug Statistics and Move History
+                let stats_area = main_chunks[2];
+                let horizontal_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(app.stats_width_percent),
+                        Constraint::Percentage(100 - app.stats_width_percent),
+                    ])
+                    .split(stats_area);
+                
+                draw_stats(f, app, horizontal_chunks[0]);
+                draw_move_history(f, app, horizontal_chunks[1]);
                 return;
             };
 
@@ -296,7 +310,18 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(Block::default().title(instructions_title).borders(Borders::ALL));
             f.render_widget(instructions, main_chunks[1]);
             
-            draw_stats(f, app, main_chunks[2]);
+            // Split the stats area horizontally for Debug Statistics and Move History
+            let stats_area = main_chunks[2];
+            let horizontal_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(app.stats_width_percent),
+                    Constraint::Percentage(100 - app.stats_width_percent),
+                ])
+                .split(stats_area);
+            
+            draw_stats(f, app, horizontal_chunks[0]);
+            draw_move_history(f, app, horizontal_chunks[1]);
         }
     }
 }
@@ -577,82 +602,6 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         }
     }
     
-    // Add move history section
-    if !app.move_history.is_empty() {
-        stats_lines.push(Line::from(""));
-        stats_lines.push(Line::from(vec![
-            Span::styled("MOVE HISTORY:", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        ]));
-        
-        // Group moves by move number for display
-        let mut grouped_moves: std::collections::BTreeMap<u32, Vec<&crate::MoveHistoryEntry>> = std::collections::BTreeMap::new();
-        for entry in &app.move_history {
-            grouped_moves.entry(entry.move_number).or_insert_with(Vec::new).push(entry);
-        }
-        
-        let visible_moves = 5; // Number of move groups to show at once
-        let total_move_groups = grouped_moves.len();
-        let start_idx = app.move_history_scroll_offset;
-        let end_idx = (start_idx + visible_moves).min(total_move_groups);
-        
-        for (move_num, moves) in grouped_moves.iter().skip(start_idx).take(visible_moves) {
-            let mut move_spans = vec![
-                Span::styled(format!("{}. ", move_num), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            ];
-            
-            for (i, entry) in moves.iter().enumerate() {
-                if i > 0 {
-                    move_spans.push(Span::raw(" "));
-                }
-                
-                let player_color = match entry.player {
-                    1 => Color::Red,
-                    -1 => Color::Blue,
-                    2 => Color::Green,
-                    3 => Color::Yellow,
-                    4 => Color::Cyan,
-                    _ => Color::White,
-                };
-                
-                let player_symbol = match app.game {
-                    GameWrapper::Blokus(_) => format!("P{}", entry.player),
-                    _ => if entry.player == 1 { "X".to_string() } else { "O".to_string() },
-                };
-                
-                move_spans.push(Span::styled(
-                    format!("{}:{}", player_symbol, entry.move_data),
-                    Style::default().fg(player_color)
-                ));
-            }
-            
-            // Add timestamp for the move group (using the first move's timestamp)
-            if let Some(first_move) = moves.first() {
-                let timestamp = first_move.timestamp
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                move_spans.push(Span::styled(
-                    format!(" ({:02}:{:02})", timestamp / 60 % 60, timestamp % 60),
-                    Style::default().fg(Color::Gray)
-                ));
-            }
-            
-            stats_lines.push(Line::from(move_spans));
-        }
-        
-        if total_move_groups > visible_moves {
-            let showing_from = start_idx + 1;
-            let showing_to = end_idx;
-            stats_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("Showing moves {}-{} of {} (use Shift+Up/Down to scroll)", 
-                        showing_from, showing_to, total_move_groups),
-                    Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)
-                ),
-            ]));
-        }
-    }
-    
     // Calculate content height and scrolling bounds with strict enforcement
     let content_height = stats_lines.len();
     let visible_height = (area.height.saturating_sub(2) as usize).min(20); // Hard limit to prevent overflow
@@ -791,7 +740,7 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
 
 fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     // Check if the click is on a drag boundary first
-    if let Some(boundary) = detect_boundary_click(app, row, terminal_size.height) {
+    if let Some(boundary) = detect_boundary_click(app, col, row, terminal_size.width, terminal_size.height) {
         app.start_drag(boundary);
         return;
     }
@@ -814,9 +763,18 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     }
 }
 
-fn handle_mouse_drag(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
+fn handle_mouse_drag(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     if app.is_dragging {
-        app.handle_drag(row, terminal_size.height);
+        if let Some(boundary) = app.drag_boundary {
+            match boundary {
+                DragBoundary::StatsHistory => {
+                    app.handle_horizontal_drag(col, terminal_size.width);
+                }
+                _ => {
+                    app.handle_drag(row, terminal_size.height);
+                }
+            }
+        }
     }
 }
 
@@ -826,7 +784,7 @@ fn handle_mouse_release(app: &mut App, _col: u16, _row: u16, _terminal_size: Rec
     }
 }
 
-fn detect_boundary_click(app: &App, row: u16, terminal_height: u16) -> Option<DragBoundary> {
+fn detect_boundary_click(app: &App, col: u16, row: u16, terminal_width: u16, terminal_height: u16) -> Option<DragBoundary> {
     // Only allow boundary dragging in Playing or GameOver states
     match app.state {
         AppState::Playing | AppState::GameOver => {
@@ -840,6 +798,17 @@ fn detect_boundary_click(app: &App, row: u16, terminal_height: u16) -> Option<Dr
             // Check if click is near the instructions-stats boundary (within 1 row)
             if row.abs_diff(instructions_stats_boundary) <= 1 {
                 return Some(DragBoundary::InstructionsStats);
+            }
+            
+            // Check if click is in the stats area for horizontal dragging (stats/history boundary)
+            if row > instructions_stats_boundary {
+                // Calculate the boundary between debug stats and move history
+                let stats_width_boundary = (terminal_width as f32 * app.stats_width_percent as f32 / 100.0) as u16;
+                
+                // Check if click is near the stats-history boundary (within 2 columns)
+                if col.abs_diff(stats_width_boundary) <= 2 {
+                    return Some(DragBoundary::StatsHistory);
+                }
             }
         }
         _ => {}
@@ -928,7 +897,7 @@ fn handle_settings_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect
     }
 }
 
-fn handle_mouse_scroll(app: &mut App, _col: u16, row: u16, terminal_size: Rect, scroll_up: bool) {
+fn handle_mouse_scroll(app: &mut App, col: u16, row: u16, terminal_size: Rect, scroll_up: bool) {
     // Only handle scrolling when in Playing or GameOver state
     match app.state {
         AppState::Playing | AppState::GameOver => {
@@ -939,15 +908,183 @@ fn handle_mouse_scroll(app: &mut App, _col: u16, row: u16, terminal_size: Rect, 
             
             // Check if the mouse is in the stats area
             if row >= stats_area_start {
-                if scroll_up {
-                    app.scroll_debug_up();
+                // Determine which horizontal section (debug stats vs move history)
+                let stats_width_boundary = (terminal_size.width as f32 * app.stats_width_percent as f32 / 100.0) as u16;
+                
+                if col < stats_width_boundary {
+                    // Mouse is in the debug stats area
+                    if scroll_up {
+                        app.scroll_debug_up();
+                    } else {
+                        app.scroll_debug_down();
+                    }
                 } else {
-                    app.scroll_debug_down();
+                    // Mouse is in the move history area
+                    if scroll_up {
+                        app.scroll_move_history_up();
+                    } else {
+                        app.scroll_move_history_down();
+                    }
                 }
             }
         }
         _ => {
             // No scrolling for other states
         }
+    }
+}
+
+fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
+    // Early return if area is too small
+    if area.height < 3 || area.width < 10 {
+        let paragraph = Paragraph::new("Area too small")
+            .block(Block::default().title("Move History").borders(Borders::ALL));
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let mut history_lines = vec![];
+    
+    // Add move history section
+    if !app.move_history.is_empty() {
+        // Group moves by move number for display
+        let mut grouped_moves: std::collections::BTreeMap<u32, Vec<&crate::MoveHistoryEntry>> = std::collections::BTreeMap::new();
+        for entry in &app.move_history {
+            grouped_moves.entry(entry.move_number).or_insert_with(Vec::new).push(entry);
+        }
+        
+        for (move_num, moves) in grouped_moves.iter() {
+            let mut move_spans = vec![
+                Span::styled(format!("{}. ", move_num), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            ];
+            
+            for (i, entry) in moves.iter().enumerate() {
+                if i > 0 {
+                    move_spans.push(Span::raw(" "));
+                }
+                
+                let player_color = match entry.player {
+                    1 => Color::Red,
+                    -1 => Color::Blue,
+                    2 => Color::Green,
+                    3 => Color::Yellow,
+                    4 => Color::Cyan,
+                    _ => Color::White,
+                };
+                
+                let player_symbol = match app.game {
+                    GameWrapper::Blokus(_) => format!("P{}", entry.player),
+                    _ => if entry.player == 1 { "X".to_string() } else { "O".to_string() },
+                };
+                
+                move_spans.push(Span::styled(
+                    format!("{}:{}", player_symbol, entry.move_data),
+                    Style::default().fg(player_color)
+                ));
+            }
+            
+            // Add timestamp for the move group (using the first move's timestamp)
+            if let Some(first_move) = moves.first() {
+                let timestamp = first_move.timestamp
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                move_spans.push(Span::styled(
+                    format!(" ({:02}:{:02})", timestamp / 60 % 60, timestamp % 60),
+                    Style::default().fg(Color::Gray)
+                ));
+            }
+            
+            history_lines.push(Line::from(move_spans));
+        }
+    } else {
+        history_lines.push(Line::from("No moves yet"));
+    }
+    
+    // Calculate content height and scrolling bounds
+    let content_height = history_lines.len();
+    let visible_height = (area.height.saturating_sub(2) as usize).min(20);
+    let max_scroll = content_height.saturating_sub(visible_height);
+    
+    // Use move history scroll offset
+    let scroll_offset = app.move_history_scroll_offset.min(max_scroll);
+
+    // Create the visible portion of content with word wrapping
+    let mut visible_lines: Vec<Line> = Vec::new();
+    let content_width = area.width.saturating_sub(4) as usize; // Account for borders and padding
+    
+    for line in history_lines.iter().skip(scroll_offset).take(visible_height) {
+        // Simple word wrapping - split long lines
+        let line_text = line.spans.iter().map(|span| span.content.as_ref()).collect::<String>();
+        if line_text.len() > content_width {
+            // For now, just truncate long lines - proper word wrapping would be more complex
+            let mut truncated_spans = line.spans.clone();
+            let total_len_before_last = truncated_spans.iter().take(truncated_spans.len().saturating_sub(1))
+                .map(|s| s.content.len()).sum::<usize>();
+            
+            if let Some(last_span) = truncated_spans.last_mut() {
+                let available_for_last = content_width.saturating_sub(total_len_before_last);
+                if available_for_last < last_span.content.len() {
+                    last_span.content = format!("{}...", &last_span.content[..available_for_last.saturating_sub(3)]).into();
+                }
+            }
+            visible_lines.push(Line::from(truncated_spans));
+        } else {
+            visible_lines.push(line.clone());
+        }
+    }
+
+    // Add scrollbar information
+    if max_scroll > 0 && content_height > visible_height {
+        let showing_from = scroll_offset + 1;
+        let showing_to = (scroll_offset + visible_height).min(content_height);
+        visible_lines.push(Line::from(vec![
+            Span::styled(
+                format!("Moves {}-{} of {} (Shift+Up/Down)", showing_from, showing_to, content_height),
+                Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)
+            ),
+        ]));
+    }
+
+    // Create the paragraph with scrollable content
+    let drag_indicator = if app.is_dragging { "🔀" } else { "↔" };
+    let title = if max_scroll > 0 {
+        format!("{} Move History (scroll: {}/{}) - {}%", drag_indicator, scroll_offset, max_scroll, 100 - app.stats_width_percent)
+    } else {
+        format!("{} Move History - {}%", drag_indicator, 100 - app.stats_width_percent)
+    };
+    
+    // Split area for content and scrollbar
+    let chunks = if area.width > 5 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100)])
+            .split(area)
+    };
+    
+    let paragraph = Paragraph::new(visible_lines)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .wrap(ratatui::widgets::Wrap { trim: true });
+    
+    f.render_widget(paragraph, chunks[0]);
+    
+    // Render scrollbar if content is scrollable and we have space for it
+    if max_scroll > 0 && chunks.len() > 1 && chunks[1].height > 2 {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(content_height)
+            .viewport_content_length(visible_height)
+            .position(scroll_offset);
+        
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        
+        f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
     }
 }
