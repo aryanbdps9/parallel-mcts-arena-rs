@@ -103,7 +103,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                     KeyCode::Up => if !app.ai_only { app.move_cursor_up(); },
                                     KeyCode::Left => if !app.ai_only { app.move_cursor_left(); },
                                     KeyCode::Right => if !app.ai_only { app.move_cursor_right(); },
-                                    KeyCode::Enter => if !app.ai_only { app.make_move(); },
+                                    KeyCode::Enter => if !app.ai_only { app.submit_move(); },
                                     KeyCode::Char('m') => app.state = AppState::Menu,
                                     KeyCode::PageUp => app.scroll_debug_up(),
                                     KeyCode::PageDown => app.scroll_debug_down(),
@@ -754,7 +754,7 @@ fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
                 if app.game.get_board()[board_row][board_col] == 0 {
                     // Update cursor position and make move
                     app.cursor = (board_row, board_col);
-                    app.make_move();
+                    app.submit_move();
                 }
             }
         }

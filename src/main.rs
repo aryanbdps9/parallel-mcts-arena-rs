@@ -12,6 +12,12 @@ use crate::games::blokus::{BlokusMove, BlokusState};
 use crate::games::othello::{OthelloMove, OthelloState};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use ratatui::layout::Constraint;
+use std::sync::mpsc::{Receiver, Sender};
+
+// Centralized move processing
+enum GameRequest {
+    MakeMove(MoveWrapper),
+}
 
 // AI Worker Communication
 #[derive(Debug)]
@@ -142,8 +148,10 @@ pub struct App<'a> {
     pub cursor: (usize, usize),
     pub winner: Option<i32>,
     pub ai_state: AIState,
-    pub ai_tx: std::sync::mpsc::Sender<AIRequest>,
-    pub ai_rx: std::sync::mpsc::Receiver<AIResponse>,
+    pub ai_tx: Sender<AIRequest>,
+    pub ai_rx: Receiver<AIResponse>,
+    pub game_tx: Sender<GameRequest>,
+    pub game_rx: Receiver<GameRequest>,
     pub pending_ai_move: Option<MoveWrapper>,
     pub ai_only: bool,
     pub shared_tree: bool,
@@ -196,6 +204,9 @@ impl<'a> App<'a> {
         // Create AI worker thread communication channels
         let (ai_tx, worker_rx) = std::sync::mpsc::channel::<AIRequest>();
         let (worker_tx, ai_rx) = std::sync::mpsc::channel::<AIResponse>();
+
+        // Create game move channel
+        let (game_tx, game_rx) = std::sync::mpsc::channel::<GameRequest>();
         
         // Spawn AI worker thread
         let ai_worker = AIWorker::new(args.exploration_parameter, args.num_threads, args.max_nodes);
@@ -214,6 +225,8 @@ impl<'a> App<'a> {
             ai_state: AIState::Idle,
             ai_tx,
             ai_rx,
+            game_tx,
+            game_rx,
             pending_ai_move: None,
             ai_only: args.ai_only,
             shared_tree: args.shared_tree,
@@ -357,31 +370,47 @@ impl<'a> App<'a> {
             }
         }
 
+        // Process ready AI move by submitting it to the central game channel
         if self.ai_state == AIState::Ready {
             if let Some(mv) = self.pending_ai_move.take() {
-                if self.game.is_legal(&mv) {
-                    // Apply the move to our game state
-                    self.game.make_move(&mv);
-                    
-                    // If not in AI-only mode, or if in AI-only mode with a shared tree, advance the root.
-                    if !self.ai_only || self.shared_tree {
-                        let _ = self.ai_tx.send(AIRequest::AdvanceRoot { last_move: mv });
-                    }
+                // The AI has a move, send it to the game loop for processing
+                let _ = self.game_tx.send(GameRequest::MakeMove(mv));
+                self.ai_state = AIState::Idle; // Reset state, new move will be requested if needed after processing
+            }
+        }
 
-                    self.ai_state = AIState::Idle;
-                    self.ai_thinking_start_time = None;
+        // Process any pending game requests (e.g., moves from player or AI)
+        if let Ok(game_request) = self.game_rx.try_recv() {
+            match game_request {
+                GameRequest::MakeMove(mv) => {
+                    if self.game.is_legal(&mv) {
+                        // Apply the move to our game state
+                        self.game.make_move(&mv);
 
-                    // After making a move, check if game is over
-                    if self.game.is_terminal() {
-                        self.winner = self.game.get_winner();
-                        self.state = AppState::GameOver;
-                    } else if self.ai_only {
-                        // In AI-only mode, request next move with the updated game state
-                        self.send_search_request(self.timeout_secs);
+                        // If not in AI-only mode, or if in AI-only mode with a shared tree, advance the root.
+                        if !self.ai_only || self.shared_tree {
+                            let _ = self.ai_tx.send(AIRequest::AdvanceRoot { last_move: mv });
+                        }
+
+                        self.ai_thinking_start_time = None;
+
+                        // After making a move, check if game is over
+                        if self.game.is_terminal() {
+                            self.winner = self.game.get_winner();
+                            self.state = AppState::GameOver;
+                        } else {
+                            // If it's the AI's turn next, request a move
+                            let is_ai_turn = self.ai_only || self.game.get_current_player() == -1;
+                            if is_ai_turn && self.ai_state == AIState::Idle {
+                                self.send_search_request(self.timeout_secs);
+                            }
+                        }
+                    } else {
+                        // The move was illegal. If it came from an AI, reset state.
+                        if self.ai_state == AIState::Ready {
+                             self.ai_state = AIState::Idle;
+                        }
                     }
-                } else {
-                    // The AI returned an illegal move. Reset state to allow for next move
-                    self.ai_state = AIState::Idle;
                 }
             }
         }
@@ -456,33 +485,21 @@ impl<'a> App<'a> {
         }
     }
 
-    pub fn make_move(&mut self) {
+    pub fn submit_move(&mut self) {
         let (r, c) = self.cursor;
-        if self.game.get_board()[r][c] == 0 {
-            let player_move = match self.game {
-                GameWrapper::Gomoku(_) => MoveWrapper::Gomoku(GomokuMove(r, c)),
-                GameWrapper::Connect4(_) => MoveWrapper::Connect4(Connect4Move(c)),
-                GameWrapper::Blokus(_) => {
-                    // For Blokus, we'll use the first available piece and transformation as a placeholder
-                    // This is a simplified move selection for UI purposes
-                    MoveWrapper::Blokus(BlokusMove(0, 0, r, c))
-                },
-                GameWrapper::Othello(_) => MoveWrapper::Othello(OthelloMove(r, c)),
-            };
-            self.game.make_move(&player_move);
-            
-            // Advance the AI's search tree to maintain context
-            let _ = self.ai_tx.send(AIRequest::AdvanceRoot { last_move: player_move });
-            
-            if self.game.is_terminal() {
-                self.winner = self.game.get_winner();
-                self.state = AppState::GameOver;
-                return;
-            }
+        let player_move = match self.game {
+            GameWrapper::Gomoku(_) => MoveWrapper::Gomoku(GomokuMove(r, c)),
+            GameWrapper::Connect4(_) => MoveWrapper::Connect4(Connect4Move(c)),
+            GameWrapper::Blokus(_) => {
+                // For Blokus, we'll use the first available piece and transformation as a placeholder
+                // This is a simplified move selection for UI purposes
+                MoveWrapper::Blokus(BlokusMove(0, 0, r, c))
+            },
+            GameWrapper::Othello(_) => MoveWrapper::Othello(OthelloMove(r, c)),
+        };
 
-            if !self.ai_only && self.ai_state == AIState::Idle {
-                self.send_search_request(self.timeout_secs);
-            }
+        if self.game.is_legal(&player_move) {
+            let _ = self.game_tx.send(GameRequest::MakeMove(player_move));
         }
     }
 
@@ -924,7 +941,7 @@ struct Args {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     ai_only: bool,
 
-    #[clap(long, action = clap::ArgAction::SetTrue)]
+    #[clap(long, action = clap::ArgAction::SetTrue, default_value_t = true)]
     shared_tree: bool,
 }
 
