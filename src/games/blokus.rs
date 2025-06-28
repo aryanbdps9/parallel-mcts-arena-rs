@@ -199,6 +199,19 @@ impl BlokusState {
         1 // Blokus doesn't have a line size concept, return 1 as default
     }
 
+    pub fn is_legal(&self, mv: &BlokusMove) -> bool {
+        let player_idx = (self.current_player - 1) as usize;
+        if player_idx >= self.player_pieces.len() || mv.0 >= self.player_pieces[player_idx].len() {
+            return false;
+        }
+        let piece = &self.player_pieces[player_idx][mv.0];
+        if mv.1 >= piece.transformations.len() {
+            return false;
+        }
+        let shape = &piece.transformations[mv.1];
+        self.is_valid_move(player_idx, shape, mv.2, mv.3)
+    }
+
     fn is_valid_move(&self, player_idx: usize, shape: &[(i32, i32)], r: usize, c: usize) -> bool {
         let player_id = (player_idx + 1) as i32;
         let mut corner_touch = false;

@@ -1,4 +1,5 @@
 use crate::{App, AppState, DragBoundary};
+use crate::game_wrapper::GameWrapper;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind},
     execute,
@@ -272,14 +273,6 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Note: AI stats temporarily disabled due to threaded AI implementation
-    if app.state == AppState::GameOver {
-        let paragraph = Paragraph::new("Game Over - Debug info not available")
-            .block(Block::default().title("Debug Statistics").borders(Borders::ALL));
-        f.render_widget(paragraph, area);
-        return;
-    }
-
     let current_player = app.game.get_current_player();
     let (player_symbol, player_color) = if current_player == 1 {
         ("X", Color::Red)
@@ -293,21 +286,244 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(player_symbol, Style::default().fg(player_color).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(format!("AI State: {:?} | Threads: {}", app.ai_state, app.num_threads)),
-        Line::from(""),
     ];
 
-    // Show AI thinking status
+    // Show AI thinking status and time remaining
     if app.is_ai_thinking() {
         stats_lines.push(Line::from(vec![
             Span::styled("🤔 AI is thinking...", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ]));
+        
+        if let Some(time_remaining) = app.get_ai_time_remaining() {
+            stats_lines.push(Line::from(format!("Time remaining: {:.1}s", time_remaining)));
+        }
     } else {
         stats_lines.push(Line::from("AI ready"));
     }
     
     stats_lines.push(Line::from(""));
-    stats_lines.push(Line::from("AI Stats temporarily unavailable in threaded mode"));
-    stats_lines.push(Line::from("(Stats will be restored in future update)"));
+
+    // Show MCTS root value if available
+    if let Some(root_value) = app.mcts_root_value {
+        stats_lines.push(Line::from(format!("Root Value: {:.3}", root_value)));
+        stats_lines.push(Line::from(""));
+    }
+
+    // Show grid-based statistics for Gomoku and Othello
+    if matches!(app.game, GameWrapper::Gomoku(_) | GameWrapper::Othello(_)) {
+        if let (Some(visits_grid), Some(values_grid), Some(wins_grid)) = (
+            &app.mcts_visits_grid,
+            &app.mcts_values_grid,
+            &app.mcts_wins_grid,
+        ) {
+            let board_size = visits_grid.len();
+            
+            // Show grids for board sizes up to 20x20
+            if board_size <= 20 {
+                // Helper function to find top 5 positions in a grid
+                let find_top_positions = |grid: &Vec<Vec<f64>>| -> Vec<(usize, usize)> {
+                    let mut positions = Vec::new();
+                    for r in 0..board_size {
+                        for c in 0..board_size {
+                            positions.push((r, c, grid[r][c]));
+                        }
+                    }
+                    positions.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                    positions.into_iter().take(5).map(|(r, c, _)| (r, c)).collect()
+                };
+
+                let find_top_visits = |grid: &Vec<Vec<i32>>| -> Vec<(usize, usize)> {
+                    let mut positions = Vec::new();
+                    for r in 0..board_size {
+                        for c in 0..board_size {
+                            positions.push((r, c, grid[r][c]));
+                        }
+                    }
+                    positions.sort_by(|a, b| b.2.cmp(&a.2));
+                    positions.into_iter().take(5).map(|(r, c, _)| (r, c)).collect()
+                };
+
+                let top_visits = find_top_visits(visits_grid);
+                let top_values = find_top_positions(values_grid);
+                let top_wins = find_top_positions(wins_grid);
+
+                // Get current board state for mark display
+                let current_board = app.game.get_board();
+                
+                // VISITS GRID
+                stats_lines.push(Line::from(vec![
+                    Span::styled("VISITS GRID (top 5 highlighted):", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                ]));
+                
+                // Add column headers
+                let mut header_spans = vec![Span::raw("    ")]; // Space for row numbers
+                for c in 0..board_size {
+                    header_spans.push(Span::raw(format!("{:9}", c)));
+                }
+                stats_lines.push(Line::from(header_spans));
+                
+                for r in 0..board_size {
+                    let mut line_spans = vec![Span::raw(format!("{:3} ", r))]; // Row number
+                    for c in 0..board_size {
+                        let visits = visits_grid[r][c];
+                        let is_top = top_visits.contains(&(r, c));
+                        
+                        if visits > 0 {
+                            let span = if is_top {
+                                Span::styled(format!("{:9}", visits), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                            } else {
+                                Span::styled(format!("{:9}", visits), Style::default().fg(Color::Green))
+                            };
+                            line_spans.push(span);
+                        } else {
+                            // Show actual board mark if position is occupied
+                            let cell_content = match current_board[r][c] {
+                                1 => "        X",
+                                -1 => "        O", 
+                                _ => "        .",
+                            };
+                            line_spans.push(Span::raw(cell_content));
+                        }
+                    }
+                    stats_lines.push(Line::from(line_spans));
+                }
+                
+                stats_lines.push(Line::from(""));
+                
+                // VALUES GRID (win rates)
+                stats_lines.push(Line::from(vec![
+                    Span::styled("VALUES GRID (win rates, top 5 highlighted):", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                ]));
+                
+                // Add column headers
+                let mut header_spans = vec![Span::raw("    ")]; // Space for row numbers
+                for c in 0..board_size {
+                    header_spans.push(Span::raw(format!("{:9}", c)));
+                }
+                stats_lines.push(Line::from(header_spans));
+                
+                for r in 0..board_size {
+                    let mut line_spans = vec![Span::raw(format!("{:3} ", r))]; // Row number
+                    for c in 0..board_size {
+                        let visits = visits_grid[r][c];
+                        let value = values_grid[r][c];
+                        let is_top = top_values.contains(&(r, c));
+                        
+                        if visits > 0 {
+                            let base_color = if value > 0.6 {
+                                Color::Green
+                            } else if value > 0.4 {
+                                Color::Yellow
+                            } else {
+                                Color::Red
+                            };
+                            
+                            let span = if is_top {
+                                Span::styled(format!("{:9.3}", value), Style::default().fg(base_color).add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED))
+                            } else {
+                                Span::styled(format!("{:9.3}", value), Style::default().fg(base_color))
+                            };
+                            line_spans.push(span);
+                        } else {
+                            // Show actual board mark if position is occupied
+                            let cell_content = match current_board[r][c] {
+                                1 => "        X",
+                                -1 => "        O", 
+                                _ => "        .",
+                            };
+                            line_spans.push(Span::raw(cell_content));
+                        }
+                    }
+                    stats_lines.push(Line::from(line_spans));
+                }
+                
+                stats_lines.push(Line::from(""));
+                
+                // WINS GRID
+                stats_lines.push(Line::from(vec![
+                    Span::styled("WINS GRID (absolute wins, top 5 highlighted):", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                ]));
+                
+                // Add column headers
+                let mut header_spans = vec![Span::raw("    ")]; // Space for row numbers
+                for c in 0..board_size {
+                    header_spans.push(Span::raw(format!("{:9}", c)));
+                }
+                stats_lines.push(Line::from(header_spans));
+                
+                for r in 0..board_size {
+                    let mut line_spans = vec![Span::raw(format!("{:3} ", r))]; // Row number
+                    for c in 0..board_size {
+                        let visits = visits_grid[r][c];
+                        let wins = wins_grid[r][c];
+                        let is_top = top_wins.contains(&(r, c));
+                        
+                        if visits > 0 {
+                            let span = if is_top {
+                                Span::styled(format!("{:9.0}", wins), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+                            } else {
+                                Span::styled(format!("{:9.0}", wins), Style::default().fg(Color::Red))
+                            };
+                            line_spans.push(span);
+                        } else {
+                            // Show actual board mark if position is occupied
+                            let cell_content = match current_board[r][c] {
+                                1 => "        X",
+                                -1 => "        O", 
+                                _ => "        .",
+                            };
+                            line_spans.push(Span::raw(cell_content));
+                        }
+                    }
+                    stats_lines.push(Line::from(line_spans));
+                }
+                
+                stats_lines.push(Line::from(""));
+                
+                // Summary of top moves
+                stats_lines.push(Line::from(vec![
+                    Span::styled("TOP 5 MOVES SUMMARY:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                ]));
+                
+                for (i, (r, c)) in top_visits.iter().enumerate() {
+                    let visits = visits_grid[*r][*c];
+                    let value = values_grid[*r][*c];
+                    let wins = wins_grid[*r][*c];
+                    
+                    let value_color = if value > 0.6 {
+                        Color::Green
+                    } else if value > 0.4 {
+                        Color::Yellow
+                    } else {
+                        Color::Red
+                    };
+                    
+                    stats_lines.push(Line::from(vec![
+                        Span::raw(format!("{}. ", i + 1)),
+                        Span::styled(format!("({},{}) ", r, c), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!("V:{} ", visits), Style::default().fg(Color::Green)),
+                        Span::styled(format!("Rate:{:.3} ", value), Style::default().fg(value_color)),
+                        Span::styled(format!("Wins:{:.0}", wins), Style::default().fg(Color::Red)),
+                    ]));
+                }
+                
+                stats_lines.push(Line::from(""));
+            } else {
+                stats_lines.push(Line::from("Board too large for grid display (max 20x20)"));
+                stats_lines.push(Line::from(""));
+            }
+        } else {
+            stats_lines.push(Line::from("Waiting for MCTS statistics..."));
+            stats_lines.push(Line::from(""));
+        }
+    }
+
+    // Show debug info if available
+    if let Some(debug_info) = &app.mcts_debug_info {
+        for line in debug_info.lines() {
+            stats_lines.push(Line::from(line));
+        }
+    }
     
     // Calculate content height and scrolling bounds with strict enforcement
     let content_height = stats_lines.len();
@@ -381,6 +597,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_board(f: &mut Frame, app: &App, area: Rect) {
     let board = app.game.get_board();
+    let last_move_coords = app.game.get_last_move().unwrap_or_default();
     let board_size = board.len();
     let game_title = match app.game_type.as_str() {
         "gomoku" => "Gomoku",
@@ -412,6 +629,11 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let mut style = Style::default().fg(player_color);
+
+            if last_move_coords.contains(&(r, c)) {
+                style = style.bg(Color::Cyan);
+            }
+
             if (r, c) == app.cursor && !app.ai_only {
                 style = style.bg(Color::Yellow).fg(Color::Black);
             }

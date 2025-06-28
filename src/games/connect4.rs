@@ -149,6 +149,10 @@ impl Connect4State {
     pub fn get_line_size(&self) -> usize {
         self.line_size
     }
+
+    pub fn is_legal(&self, mv: &Connect4Move) -> bool {
+        mv.0 < self.width && self.board[0][mv.0] == 0
+    }
 }
 
 impl FromStr for Connect4Move {

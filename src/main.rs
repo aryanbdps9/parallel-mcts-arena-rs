@@ -18,50 +18,93 @@ use ratatui::layout::Constraint;
 pub enum AIRequest {
     Search {
         game_state: GameWrapper,
-        iterations: i32,
-        stats_interval_secs: u64,
         timeout_secs: u64,
+        request_id: u64,
     },
-    AdvanceRoot { mv: MoveWrapper },
     UpdateSettings {
         exploration_parameter: f64,
         num_threads: usize,
         max_nodes: usize,
+        iterations: i32,
+        stats_interval_secs: u64,
     },
+    AdvanceRoot { last_move: MoveWrapper },
+    GetGridStats { board_size: usize },
+    GetDebugInfo,
     Stop,
 }
 
 #[derive(Debug)]
 pub enum AIResponse {
-    MoveReady(MoveWrapper),
-    Thinking,
+    MoveReady(MoveWrapper, u64), // move, request_id
+    Thinking(u64), // request_id
+    GridStats {
+        visits_grid: Vec<Vec<i32>>,
+        values_grid: Vec<Vec<f64>>,
+        wins_grid: Vec<Vec<f64>>,
+        root_value: f64,
+    },
+    DebugInfo(String),
     Error(String),
 }
 
 pub struct AIWorker {
     ai: MCTS<GameWrapper>,
+    iterations: i32,
+    stats_interval_secs: u64,
+    current_request_id: u64,
 }
 
 impl AIWorker {
     pub fn new(exploration_parameter: f64, num_threads: usize, max_nodes: usize) -> Self {
         Self {
             ai: MCTS::new(exploration_parameter, num_threads, max_nodes),
+            iterations: 10000,
+            stats_interval_secs: 0,
+            current_request_id: 0,
         }
     }
 
     pub fn run(mut self, rx: std::sync::mpsc::Receiver<AIRequest>, tx: std::sync::mpsc::Sender<AIResponse>) {
         while let Ok(request) = rx.recv() {
             match request {
-                AIRequest::Search { game_state, iterations, stats_interval_secs, timeout_secs } => {
-                    let _ = tx.send(AIResponse::Thinking);
-                    let best_move = self.ai.search(&game_state, iterations, stats_interval_secs, timeout_secs);
-                    let _ = tx.send(AIResponse::MoveReady(best_move));
+                AIRequest::Search { game_state, timeout_secs, request_id } => {
+                    // Update current request ID and ignore old requests
+                    if request_id < self.current_request_id {
+                        continue;
+                    }
+                    self.current_request_id = request_id;
+                    
+                    let _ = tx.send(AIResponse::Thinking(request_id));
+                    let best_move = self.ai.search(&game_state, self.iterations, self.stats_interval_secs, timeout_secs);
+                    
+                    // Only send response if this is still the current request
+                    if request_id == self.current_request_id {
+                        let _ = tx.send(AIResponse::MoveReady(best_move, request_id));
+                    }
                 }
-                AIRequest::AdvanceRoot { mv } => {
-                    self.ai.advance_root(&mv);
-                }
-                AIRequest::UpdateSettings { exploration_parameter, num_threads, max_nodes } => {
+                AIRequest::UpdateSettings { exploration_parameter, num_threads, max_nodes, iterations, stats_interval_secs } => {
                     self.ai = MCTS::new(exploration_parameter, num_threads, max_nodes);
+                    self.iterations = iterations;
+                    self.stats_interval_secs = stats_interval_secs;
+                }
+                AIRequest::AdvanceRoot { last_move } => {
+                    // Advance the MCTS tree to the node corresponding to the last move
+                    // This preserves the search tree instead of starting from scratch
+                    self.ai.advance_root(&last_move);
+                }
+                AIRequest::GetGridStats { board_size } => {
+                    let (visits_grid, values_grid, wins_grid, root_value) = self.ai.get_grid_stats(board_size);
+                    let _ = tx.send(AIResponse::GridStats {
+                        visits_grid,
+                        values_grid,
+                        wins_grid,
+                        root_value,
+                    });
+                }
+                AIRequest::GetDebugInfo => {
+                    let debug_info = self.ai.get_debug_info();
+                    let _ = tx.send(AIResponse::DebugInfo(debug_info));
                 }
                 AIRequest::Stop => break,
             }
@@ -126,6 +169,17 @@ pub struct App<'a> {
     pub is_dragging: bool,
     pub drag_boundary: Option<DragBoundary>,
     pub last_terminal_size: (u16, u16),
+    // MCTS statistics for display
+    pub mcts_visits_grid: Option<Vec<Vec<i32>>>,
+    pub mcts_values_grid: Option<Vec<Vec<f64>>>,
+    pub mcts_wins_grid: Option<Vec<Vec<f64>>>,
+    pub mcts_root_value: Option<f64>,
+    pub mcts_debug_info: Option<String>,
+    pub ai_thinking_start_time: Option<std::time::Instant>,
+    pub stats_request_counter: u32,
+    pub last_stats_request_time: Option<std::time::Instant>,
+    pub next_request_id: u64,
+    pub current_request_id: u64,
 }
 
 impl<'a> App<'a> {
@@ -184,8 +238,34 @@ impl<'a> App<'a> {
             is_dragging: false,
             drag_boundary: None,
             last_terminal_size: (0, 0),
+            // MCTS statistics for display
+            mcts_visits_grid: None,
+            mcts_values_grid: None,
+            mcts_wins_grid: None,
+            mcts_root_value: None,
+            mcts_debug_info: None,
+            ai_thinking_start_time: None,
+            stats_request_counter: 0,
+            last_stats_request_time: None,
+            next_request_id: 1,
+            current_request_id: 0,
         };
         app.update_settings_display();
+        
+        // Initialize AI worker with current game state and settings
+        let _ = app.ai_tx.send(AIRequest::UpdateSettings {
+            exploration_parameter: args.exploration_parameter,
+            num_threads: args.num_threads,
+            max_nodes: args.max_nodes,
+            iterations: args.iterations,
+            stats_interval_secs: args.stats_interval_secs,
+        });
+        
+        // If ai_only mode, automatically start playing
+        if app.ai_only {
+            app.state = AppState::Playing;
+        }
+        
         app
     }
 
@@ -239,37 +319,93 @@ impl<'a> App<'a> {
             exploration_parameter: self.exploration_parameter,
             num_threads: self.num_threads,
             max_nodes: self.max_nodes,
+            iterations: self.iterations,
+            stats_interval_secs: self.stats_interval_secs,
         });
     }
 
     pub fn tick(&mut self) {
-        // Check for AI responses
-        if let Ok(response) = self.ai_rx.try_recv() {
+        // Check for any messages from the AI thread
+        while let Ok(response) = self.ai_rx.try_recv() {
             match response {
-                AIResponse::MoveReady(mv) => {
-                    self.pending_ai_move = Some(mv);
-                    self.ai_state = AIState::Ready;
+                AIResponse::MoveReady(mv, request_id) => {
+                    if request_id == self.current_request_id {
+                        self.pending_ai_move = Some(mv);
+                        self.ai_state = AIState::Ready;
+                    }
                 }
-                AIResponse::Thinking => {
-                    self.ai_state = AIState::Thinking;
+                AIResponse::GridStats { visits_grid, values_grid, wins_grid, root_value } => {
+                    self.mcts_visits_grid = Some(visits_grid);
+                    self.mcts_values_grid = Some(values_grid);
+                    self.mcts_wins_grid = Some(wins_grid);
+                    self.mcts_root_value = Some(root_value);
                 }
-                AIResponse::Error(err) => {
-                    eprintln!("AI Error: {}", err);
+                AIResponse::DebugInfo(info) => {
+                    self.mcts_debug_info = Some(info);
+                }
+                AIResponse::Thinking(request_id) => {
+                    if request_id == self.current_request_id {
+                        self.ai_state = AIState::Thinking;
+                        self.ai_thinking_start_time = Some(std::time::Instant::now());
+                    }
+                }
+                AIResponse::Error(_) => {
                     self.ai_state = AIState::Idle;
                 }
             }
         }
 
-        // Apply pending AI move if ready
         if self.ai_state == AIState::Ready {
             if let Some(mv) = self.pending_ai_move.take() {
-                self.game.make_move(&mv);
-                let _ = self.ai_tx.send(AIRequest::AdvanceRoot { mv });
-                self.ai_state = AIState::Idle;
-                if self.game.is_terminal() {
-                    self.winner = self.game.get_winner();
-                    self.state = AppState::GameOver;
-                    return;
+                if self.game.is_legal(&mv) {
+                    // Apply the move to our game state
+                    self.game.make_move(&mv);
+                    
+                    // Only advance root in human vs AI mode to preserve tree between human moves
+                    // In AI vs AI mode, we start fresh each time to avoid state synchronization issues
+                    if !self.ai_only {
+                        let _ = self.ai_tx.send(AIRequest::AdvanceRoot { last_move: mv });
+                    }
+
+                    self.ai_state = AIState::Idle;
+                    self.ai_thinking_start_time = None;
+
+                    // After making a move, check if game is over
+                    if self.game.is_terminal() {
+                        self.winner = self.game.get_winner();
+                        self.state = AppState::GameOver;
+                    } else if self.ai_only {
+                        // In AI-only mode, request next move with the updated game state
+                        // The AI will start fresh from this position
+                        self.send_search_request(self.timeout_secs);
+                    }
+                } else {
+                    // The AI returned an illegal move. Reset state to allow for next move
+                    self.ai_state = AIState::Idle;
+                }
+            }
+        }
+
+        // Request MCTS statistics periodically for games that support grid display
+        // Use the stats_interval_secs parameter to control frequency
+        if self.ai_state == AIState::Thinking && self.stats_interval_secs > 0 {
+            let should_request_stats = if let Some(last_request) = self.last_stats_request_time {
+                last_request.elapsed().as_secs() >= self.stats_interval_secs
+            } else {
+                true // First request
+            };
+
+            if should_request_stats {
+                if matches!(self.game, GameWrapper::Gomoku(_) | GameWrapper::Othello(_)) {
+                    // Request grid stats
+                    let board_size = self.game.get_board_size();
+                    let _ = self.ai_tx.send(AIRequest::GetGridStats { board_size });
+                    
+                    // Request debug info
+                    let _ = self.ai_tx.send(AIRequest::GetDebugInfo);
+                    
+                    // Update last request time
+                    self.last_stats_request_time = Some(std::time::Instant::now());
                 }
             }
         }
@@ -277,12 +413,7 @@ impl<'a> App<'a> {
         // Request AI move if needed
         if self.state == AppState::Playing && self.ai_only && self.ai_state == AIState::Idle {
             if !self.game.is_terminal() {
-                let _ = self.ai_tx.send(AIRequest::Search {
-                    game_state: self.game.clone(),
-                    iterations: self.iterations,
-                    stats_interval_secs: self.stats_interval_secs,
-                    timeout_secs: self.timeout_secs,
-                });
+                self.send_search_request(self.timeout_secs);
             }
         }
     }
@@ -339,7 +470,10 @@ impl<'a> App<'a> {
                 GameWrapper::Othello(_) => MoveWrapper::Othello(OthelloMove(r, c)),
             };
             self.game.make_move(&player_move);
-            let _ = self.ai_tx.send(AIRequest::AdvanceRoot { mv: player_move });
+            
+            // Advance the AI's search tree to maintain context
+            let _ = self.ai_tx.send(AIRequest::AdvanceRoot { last_move: player_move });
+            
             if self.game.is_terminal() {
                 self.winner = self.game.get_winner();
                 self.state = AppState::GameOver;
@@ -347,12 +481,7 @@ impl<'a> App<'a> {
             }
 
             if !self.ai_only && self.ai_state == AIState::Idle {
-                let _ = self.ai_tx.send(AIRequest::Search {
-                    game_state: self.game.clone(),
-                    iterations: self.iterations,
-                    stats_interval_secs: self.stats_interval_secs,
-                    timeout_secs: self.timeout_secs,
-                });
+                self.send_search_request(self.timeout_secs);
             }
         }
     }
@@ -370,6 +499,8 @@ impl<'a> App<'a> {
             exploration_parameter: self.exploration_parameter,
             num_threads: self.num_threads,
             max_nodes: self.max_nodes,
+            iterations: self.iterations,
+            stats_interval_secs: self.stats_interval_secs,
         });
         self.ai_state = AIState::Idle;
         self.pending_ai_move = None;
@@ -564,11 +695,28 @@ impl<'a> App<'a> {
             exploration_parameter: self.exploration_parameter,
             num_threads: self.num_threads,
             max_nodes: self.max_nodes,
+            iterations: self.iterations,
+            stats_interval_secs: self.stats_interval_secs,
         });
     }
 
     pub fn is_ai_thinking(&self) -> bool {
         self.ai_state == AIState::Thinking
+    }
+
+    /// Get the time remaining for AI to move
+    pub fn get_ai_time_remaining(&self) -> Option<f64> {
+        if let Some(start_time) = self.ai_thinking_start_time {
+            if self.timeout_secs > 0 {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let remaining = self.timeout_secs as f64 - elapsed;
+                Some(remaining.max(0.0))
+            } else {
+                None // No timeout set
+            }
+        } else {
+            None // AI not thinking
+        }
     }
 
     /// Calculate the minimum height needed for the board section
@@ -722,6 +870,19 @@ impl<'a> App<'a> {
         let board_end = (terminal_height as f32 * self.board_height_percent as f32 / 100.0) as u16;
         let instructions_end = board_end + (terminal_height as f32 * self.instructions_height_percent as f32 / 100.0) as u16;
         (board_end.saturating_sub(1), instructions_end.saturating_sub(1))
+    }
+
+    /// Generate a new request ID and send a search request
+    fn send_search_request(&mut self, timeout_secs: u64) {
+        self.next_request_id += 1;
+        self.current_request_id = self.next_request_id;
+        self.ai_state = AIState::Thinking;  // Immediately set to thinking to prevent duplicate requests
+        
+        let _ = self.ai_tx.send(AIRequest::Search {
+            game_state: self.game.clone(),
+            timeout_secs,
+            request_id: self.current_request_id,
+        });
     }
 }
 

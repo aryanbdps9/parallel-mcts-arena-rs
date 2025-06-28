@@ -117,4 +117,14 @@ impl GameWrapper {
             GameWrapper::Othello(g) => g.get_last_move(),
         }
     }
+
+    pub fn is_legal(&self, mv: &MoveWrapper) -> bool {
+        match (self, mv) {
+            (GameWrapper::Gomoku(g), MoveWrapper::Gomoku(m)) => g.is_legal(m),
+            (GameWrapper::Connect4(g), MoveWrapper::Connect4(m)) => g.is_legal(m),
+            (GameWrapper::Blokus(g), MoveWrapper::Blokus(m)) => g.is_legal(m),
+            (GameWrapper::Othello(g), MoveWrapper::Othello(m)) => g.is_legal(m),
+            _ => false, // Or panic, but false is safer
+        }
+    }
 }

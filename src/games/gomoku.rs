@@ -31,6 +31,10 @@ impl GomokuState {
     pub fn get_line_size(&self) -> usize {
         self.line_size
     }
+
+    pub fn is_legal(&self, mv: &GomokuMove) -> bool {
+        mv.0 < self.board_size && mv.1 < self.board_size && self.board[mv.0][mv.1] == 0
+    }
 }
 
 impl GameState for GomokuState {

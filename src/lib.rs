@@ -749,6 +749,72 @@ impl<S: GameState> MCTS<S> {
             self.node_pool.return_nodes(pruned_nodes);
         }
     }
-}
 
-pub mod games;
+    /// Returns grid-based statistics for games like Gomoku and Othello
+    /// Returns (visits_grid, values_grid, wins_grid, root_value) where each grid is board_size x board_size
+    pub fn get_grid_stats(&self, board_size: usize) -> (Vec<Vec<i32>>, Vec<Vec<f64>>, Vec<Vec<f64>>, f64) {
+        let mut visits_grid = vec![vec![0; board_size]; board_size];
+        let mut values_grid = vec![vec![0.0; board_size]; board_size];
+        let mut wins_grid = vec![vec![0.0; board_size]; board_size];
+        
+        let children = self.root.children.read();
+        for (mv, node) in children.iter() {
+            let visits = node.visits.load(Ordering::Relaxed);
+            let wins = node.wins.load(Ordering::Relaxed) as f64;
+            let value = if visits > 0 { wins / (visits as f64) / 2.0 } else { 0.0 };
+            
+            // Extract coordinates based on move type
+            if let Some((r, c)) = self.extract_move_coordinates(mv, board_size) {
+                if r < board_size && c < board_size {
+                    visits_grid[r][c] = visits;
+                    values_grid[r][c] = value;
+                    wins_grid[r][c] = wins;
+                }
+            }
+        }
+        
+        let root_visits = self.root.visits.load(Ordering::Relaxed);
+        let root_wins = self.root.wins.load(Ordering::Relaxed) as f64;
+        let root_value = if root_visits > 0 { root_wins / (root_visits as f64) / 2.0 } else { 0.0 };
+        
+        (visits_grid, values_grid, wins_grid, root_value)
+    }
+    
+    /// Extract coordinates from a move for grid display (helper function)
+    fn extract_move_coordinates(&self, mv: &S::Move, _board_size: usize) -> Option<(usize, usize)> {
+        // This is a trait-based approach that will need to be implemented per game type
+        // For now, we'll use std::fmt::Debug to parse coordinates from the move string
+        let move_str = format!("{:?}", mv);
+        
+        // Try to parse coordinates from move string representations
+        // Handle MoveWrapper patterns like MoveWrapper::Gomoku(GomokuMove(r, c))
+        if move_str.contains("Gomoku(GomokuMove(") || move_str.contains("Othello(OthelloMove(") {
+            // Find the innermost parentheses with coordinates
+            if let Some(start) = move_str.rfind('(') {
+                if let Some(end) = move_str[start..].find(')') {
+                    let coords_str = &move_str[start + 1..start + end];
+                    let coords = coords_str.split(", ").collect::<Vec<_>>();
+                    if coords.len() == 2 {
+                        if let (Ok(r), Ok(c)) = (coords[0].parse::<usize>(), coords[1].parse::<usize>()) {
+                            return Some((r, c));
+                        }
+                    }
+                }
+            }
+        }
+        // Also handle direct move patterns for backward compatibility
+        else if move_str.starts_with("GomokuMove(") || move_str.starts_with("OthelloMove(") {
+            let coords = move_str.trim_start_matches(|c: char| c != '(')
+                                 .trim_start_matches('(')
+                                 .trim_end_matches(')')
+                                 .split(", ")
+                                 .collect::<Vec<_>>();
+            if coords.len() == 2 {
+                if let (Ok(r), Ok(c)) = (coords[0].parse::<usize>(), coords[1].parse::<usize>()) {
+                    return Some((r, c));
+                }
+            }
+        }
+        None
+    }
+}
