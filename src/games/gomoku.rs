@@ -32,6 +32,10 @@ impl GameState for GomokuState {
         &self.board
     }
 
+    fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
+        self.last_move.map(|(r, c)| vec![(r, c)])
+    }
+
     fn get_possible_moves(&self) -> Vec<Self::Move> {
         (0..self.board_size)
             .flat_map(|r| (0..self.board_size).map(move |c| (r, c)))

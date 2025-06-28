@@ -1,4 +1,5 @@
 use clap::Parser;
+use colored::*;
 use mcts::{
     games::{blokus::{self, BlokusState}, connect4::Connect4State, gomoku::GomokuState, othello::OthelloState},
     GameState, MCTS,
@@ -43,25 +44,71 @@ struct Args {
     shared_tree: bool,
 }
 
-fn print_board(board: &Vec<Vec<i32>>, _game: &str) {
+fn print_board<S: GameState>(state: &S, game: &str) {
+    let board = state.get_board();
+    let last_move_coords = state.get_last_move().unwrap_or_default();
+    let last_move_set: std::collections::HashSet<(usize, usize)> = last_move_coords.into_iter().collect();
+
+    // Header with more spacing
     print!("   ");
     if !board.is_empty() {
         for i in 0..board[0].len() {
-            print!("{:^3}", i);
+            print!("{:<2}", i);
         }
     }
     println!();
+
     for (i, row) in board.iter().enumerate() {
         print!("{:>2} ", i);
-        for &cell in row {
-            match cell {
-                1 => print!("X  "),
-                -1 => print!("O  "),
-                2 => print!("A  "),
-                3 => print!("B  "),
-                4 => print!("C  "),
-                _ => print!(".  "),
+        for (j, &cell) in row.iter().enumerate() {
+            let is_last_move = last_move_set.contains(&(i, j));
+
+            let (symbol, color) = match game {
+                "othello" => match cell {
+                    0 => ("  ", "white"),      // Empty space
+                    1 => (" ●", "white"),      // Player 1 is White
+                    -1 => (" ●", "bright_black"), // Player -1 is "Black" (grey)
+                    _ => (" ?", "white"),
+                },
+                "connect4" => match cell {
+                    0 => (" .", "white"),
+                    1 => (" ●", "yellow"),
+                    -1 => (" ●", "cyan"),
+                    _ => (" ?", "white"),
+                },
+                "blokus" => match cell {
+                    0 => (" .", "white"),
+                    1 => (" ■", "yellow"),
+                    2 => (" ■", "green"),
+                    3 => (" ■", "magenta"),
+                    4 => (" ■", "blue"),
+                    _ => (" ?", "white"),
+                },
+                _ => match cell { // Gomoku
+                    0 => (" .", "white"),
+                    1 => (" X", "yellow"),
+                    -1 => (" O", "cyan"),
+                    _ => (" ?", "white"),
+                },
+            };
+
+            let mut colored_symbol = match color {
+                "yellow" => symbol.yellow(),
+                "cyan" => symbol.cyan(),
+                "green" => symbol.green(),
+                "magenta" => symbol.magenta(),
+                "blue" => symbol.blue(),
+                "white" => symbol.white(),
+                "bright_black" => symbol.bright_black(),
+                _ => symbol.normal(),
+            };
+
+            if is_last_move {
+                // Highlight by reversing video
+                colored_symbol = colored_symbol.reversed();
             }
+            
+            print!("{}", colored_symbol);
         }
         println!();
     }
@@ -76,7 +123,7 @@ where
     let mut single_mcts = MCTS::new(args.exploration_parameter, args.num_threads, args.max_nodes);
 
     while !state.is_terminal() {
-        print_board(state.get_board(), game);
+        print_board(&state, game);
         let current_player = state.get_current_player();
 
         let is_human_turn = !args.ai_only && current_player == 1;
@@ -144,7 +191,7 @@ where
         }
     }
 
-    print_board(state.get_board(), game);
+    print_board(&state, game);
     match state.get_winner() {
         Some(1) => println!("Player 1 (X) wins!"),
         Some(-1) => println!("Player 2 (O) wins!"),

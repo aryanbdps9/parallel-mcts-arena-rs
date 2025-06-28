@@ -9,6 +9,7 @@ pub struct OthelloState {
     board: Vec<Vec<i32>>,
     current_player: i32,
     board_size: usize,
+    last_move: Option<(usize, usize)>,
 }
 
 impl GameState for OthelloState {
@@ -33,6 +34,7 @@ impl GameState for OthelloState {
     fn make_move(&mut self, mv: &Self::Move) {
         let (r, c) = (mv.0, mv.1);
         self.board[r][c] = self.current_player;
+        self.last_move = Some((r, c));
         self.flip_pieces(r, c);
         self.current_player = -self.current_player;
 
@@ -52,6 +54,10 @@ impl GameState for OthelloState {
             }
         }
         false
+    }
+
+    fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
+        self.last_move.map(|(r, c)| vec![(r, c)])
     }
 
     fn get_winner(&self) -> Option<i32> {
@@ -97,6 +103,7 @@ impl OthelloState {
             board,
             current_player: 1, // Black starts
             board_size,
+            last_move: None,
         }
     }
 

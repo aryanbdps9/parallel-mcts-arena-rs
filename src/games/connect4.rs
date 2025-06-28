@@ -21,6 +21,10 @@ impl GameState for Connect4State {
         &self.board
     }
 
+    fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
+        self.last_move.map(|(r, c)| vec![(r, c)])
+    }
+
     fn get_possible_moves(&self) -> Vec<Self::Move> {
         (0..self.width).filter(|&c| self.board[0][c] == 0).map(Connect4Move).collect()
     }

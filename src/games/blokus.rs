@@ -75,6 +75,7 @@ pub struct BlokusState {
     player_pieces: Vec<Vec<Piece>>,
     is_first_move: [bool; 4],
     passed_players: [bool; 4],
+    last_move_coords: Option<Vec<(usize, usize)>>,
 }
 
 impl GameState for BlokusState {
@@ -107,25 +108,40 @@ impl GameState for BlokusState {
     }
 
     fn make_move(&mut self, mv: &Self::Move) {
+        let player_idx = (self.current_player - 1) as usize;
         if mv.0 == 999 { // Pass move
-            self.passed_players[(self.current_player - 1) as usize] = true;
+            self.passed_players[player_idx] = true;
+            self.last_move_coords = None;
         } else {
-            let (piece_idx, trans_idx, r, c) = (mv.0, mv.1, mv.2, mv.3);
-            let player_idx = (self.current_player - 1) as usize;
-            let piece = &self.player_pieces[player_idx][piece_idx];
-            let shape = &piece.transformations[trans_idx];
-
-            for (dr, dc) in shape {
-                self.board[(r as i32 + dr) as usize][(c as i32 + dc) as usize] = self.current_player;
+            let piece = &self.player_pieces[player_idx][mv.0];
+            let shape = &piece.transformations[mv.1];
+            let mut coords = Vec::new();
+            for &(dr, dc) in shape {
+                let r = (mv.2 as i32 + dr) as usize;
+                let c = (mv.3 as i32 + dc) as usize;
+                self.board[r][c] = self.current_player;
+                coords.push((r, c));
             }
-
-            self.player_pieces[player_idx].remove(piece_idx);
+            self.last_move_coords = Some(coords);
+            self.player_pieces[player_idx].remove(mv.0);
             self.is_first_move[player_idx] = false;
+            self.passed_players[player_idx] = false;
         }
 
-        self.current_player = (self.current_player % 4) + 1;
-        while self.passed_players[(self.current_player - 1) as usize] && !self.is_terminal() {
-            self.current_player = (self.current_player % 4) + 1;
+        // Advance to the next player who hasn't passed
+        let mut next_player_found = false;
+        for i in 1..=4 {
+            let next_player = (self.current_player % 4) + i;
+            let next_player_idx = (next_player - 1) as usize;
+            if !self.passed_players[next_player_idx] {
+                self.current_player = next_player;
+                next_player_found = true;
+                break;
+            }
+        }
+        if !next_player_found {
+            // All players have passed, game ends
+            self.current_player = -1; // Or some other indicator
         }
     }
 
@@ -153,6 +169,10 @@ impl GameState for BlokusState {
         }
     }
 
+    fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
+        self.last_move_coords.clone()
+    }
+
     fn get_current_player(&self) -> i32 {
         self.current_player
     }
@@ -160,13 +180,18 @@ impl GameState for BlokusState {
 
 impl BlokusState {
     pub fn new() -> Self {
-        let pieces = get_blokus_pieces();
         BlokusState {
             board: vec![vec![0; 20]; 20],
             current_player: 1,
-            player_pieces: vec![pieces.clone(); 4],
+            player_pieces: vec![
+                get_blokus_pieces(),
+                get_blokus_pieces(),
+                get_blokus_pieces(),
+                get_blokus_pieces(),
+            ],
             is_first_move: [true; 4],
             passed_players: [false; 4],
+            last_move_coords: None,
         }
     }
 

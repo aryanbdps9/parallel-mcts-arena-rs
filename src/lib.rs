@@ -51,6 +51,9 @@ pub trait GameState: Clone + Send + Sync {
     /// Returns the board state.
     fn get_board(&self) -> &Vec<Vec<i32>>;
 
+    /// Returns the last move made as a set of coordinates, if applicable.
+    fn get_last_move(&self) -> Option<Vec<(usize, usize)>> { None }
+
     /// Returns a vector of all possible moves from the current state.
     fn get_possible_moves(&self) -> Vec<Self::Move>;
     /// Applies a move to the state, modifying it.
