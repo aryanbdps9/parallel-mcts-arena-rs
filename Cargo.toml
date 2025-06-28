@@ -10,6 +10,8 @@ rayon = "1.10.0"
 parking_lot = "0.12.3"
 colored = "2.1.0"
 rand_xoshiro = "0.6"
+ratatui = { version = "0.26.0", features = ["crossterm"] }
+crossterm = "0.27.0"
 
 [lib]
 name = "mcts"

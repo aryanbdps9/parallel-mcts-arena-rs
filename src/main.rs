@@ -1,11 +1,191 @@
+pub mod tui;
+
+pub mod games;
+pub mod game_wrapper;
+
 use clap::Parser;
-use colored::*;
-use mcts::{
-    games::{blokus::{self, BlokusState}, connect4::Connect4State, gomoku::GomokuState, othello::OthelloState},
-    GameState, MCTS,
-};
 use std::io;
-use std::collections::HashMap;
+use mcts::{GameState, MCTS};
+use crate::games::gomoku::{GomokuMove, GomokuState};
+use crate::games::connect4::{Connect4Move, Connect4State};
+use crate::games::blokus::{BlokusMove, BlokusState};
+use crate::games::othello::{OthelloMove, OthelloState};
+use crate::game_wrapper::{GameWrapper, MoveWrapper};
+
+#[derive(PartialEq)]
+pub enum AppState {
+    Menu,
+    Playing,
+    GameOver,
+}
+
+pub struct App<'a> {
+    pub titles: Vec<&'a str>,
+    pub index: usize,
+    pub state: AppState,
+    pub game_type: String,
+    pub game: GameWrapper,
+    pub cursor: (usize, usize),
+    pub winner: Option<i32>,
+    pub ai: MCTS<GameWrapper>,
+    pub ai_only: bool,
+    pub iterations: i32,
+    pub num_threads: usize,
+    pub stats_interval_secs: u64,
+    pub timeout_secs: u64,
+}
+
+impl<'a> App<'a> {
+    fn new(args: Args) -> App<'a> {
+        let game = match args.game.as_str() {
+            "gomoku" => GameWrapper::Gomoku(GomokuState::new(args.board_size, args.line_size)),
+            "connect4" => GameWrapper::Connect4(Connect4State::new(7, 6, 4)),
+            "blokus" => GameWrapper::Blokus(BlokusState::new()),
+            "othello" => GameWrapper::Othello(OthelloState::new(8)),
+            _ => panic!("Unknown game type"),
+        };
+        let ai = MCTS::new(args.exploration_parameter, args.num_threads, args.max_nodes);
+        App {
+            titles: vec!["Gomoku", "Connect4", "Blokus", "Othello", "Quit"],
+            index: 0,
+            state: AppState::Menu,
+            game_type: args.game,
+            game,
+            cursor: (0, 0),
+            winner: None,
+            ai,
+            ai_only: args.ai_only,
+            iterations: args.iterations,
+            num_threads: args.num_threads,
+            stats_interval_secs: args.stats_interval_secs,
+            timeout_secs: args.timeout_secs,
+        }
+    }
+
+    pub fn set_game(&mut self, index: usize) {
+        self.game_type = self.titles[index].to_lowercase();
+        self.game = match self.game_type.as_str() {
+            "gomoku" => GameWrapper::Gomoku(GomokuState::new(19, 5)),
+            "connect4" => GameWrapper::Connect4(Connect4State::new(7, 6, 4)), // 7 width, 6 height, 4 line_size
+            "blokus" => GameWrapper::Blokus(BlokusState::new()),
+            "othello" => GameWrapper::Othello(OthelloState::new(8)), // 8x8 board
+            _ => panic!("Unknown game type"),
+        };
+        // Set cursor position based on game type
+        self.cursor = match self.game_type.as_str() {
+            "gomoku" => (9, 9), // Center of 19x19 board
+            "connect4" => (0, 3), // Top row, center column
+            "blokus" => (10, 10), // Center of 20x20 board
+            "othello" => (3, 3), // Starting position for Othello (near center)
+            _ => (0, 0),
+        };
+    }
+
+    pub fn tick(&mut self) {
+        if self.state == AppState::Playing && self.ai_only {
+            if !self.game.is_terminal() {
+                let mv = self.ai.search(&self.game, self.iterations, self.stats_interval_secs, self.timeout_secs);
+                self.game.make_move(&mv);
+                self.ai.advance_root(&mv);
+                if self.game.is_terminal() {
+                    self.winner = self.game.get_winner();
+                    self.state = AppState::GameOver;
+                }
+            }
+        }
+    }
+
+    pub fn next(&mut self) {
+        self.index = (self.index + 1) % self.titles.len();
+    }
+
+    pub fn previous(&mut self) {
+        if self.index > 0 {
+            self.index -= 1;
+        } else {
+            self.index = self.titles.len() - 1;
+        }
+    }
+
+    pub fn move_cursor_down(&mut self) {
+        let board_size = self.game.get_board().len();
+        if self.cursor.0 < board_size - 1 {
+            self.cursor.0 += 1;
+        }
+    }
+
+    pub fn move_cursor_up(&mut self) {
+        if self.cursor.0 > 0 {
+            self.cursor.0 -= 1;
+        }
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        if self.cursor.1 > 0 {
+            self.cursor.1 -= 1;
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        let board_size = self.game.get_board().len();
+        if self.cursor.1 < board_size - 1 {
+            self.cursor.1 += 1;
+        }
+    }
+
+    pub fn make_move(&mut self) {
+        let (r, c) = self.cursor;
+        if self.game.get_board()[r][c] == 0 {
+            let player_move = match self.game {
+                GameWrapper::Gomoku(_) => MoveWrapper::Gomoku(GomokuMove(r, c)),
+                GameWrapper::Connect4(_) => MoveWrapper::Connect4(Connect4Move(c)),
+                GameWrapper::Blokus(_) => {
+                    // For Blokus, we'll use the first available piece and transformation as a placeholder
+                    // This is a simplified move selection for UI purposes
+                    MoveWrapper::Blokus(BlokusMove(0, 0, r, c))
+                },
+                GameWrapper::Othello(_) => MoveWrapper::Othello(OthelloMove(r, c)),
+            };
+            self.game.make_move(&player_move);
+            self.ai.advance_root(&player_move);
+            if self.game.is_terminal() {
+                self.winner = self.game.get_winner();
+                self.state = AppState::GameOver;
+                return;
+            }
+
+            if !self.ai_only {
+                let ai_move = self.ai.search(&self.game, self.iterations, self.stats_interval_secs, self.timeout_secs);
+                self.game.make_move(&ai_move);
+                self.ai.advance_root(&ai_move);
+                if self.game.is_terminal() {
+                    self.winner = self.game.get_winner();
+                    self.state = AppState::GameOver;
+                }
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.state = AppState::Menu;
+        self.game = match self.game_type.as_str() {
+            "gomoku" => GameWrapper::Gomoku(GomokuState::new(19, 5)),
+            "connect4" => GameWrapper::Connect4(Connect4State::new(7, 6, 4)),
+            "blokus" => GameWrapper::Blokus(BlokusState::new()),
+            "othello" => GameWrapper::Othello(OthelloState::new(8)),
+            _ => panic!("Unknown game type"),
+        };
+        self.ai = MCTS::new(self.ai.get_exploration_parameter(), self.num_threads, self.ai.get_max_nodes());
+        self.winner = None;
+        self.cursor = match self.game_type.as_str() {
+            "gomoku" => (9, 9), // Center of 19x19 board
+            "connect4" => (0, 3), // Top row, center column
+            "blokus" => (10, 10), // Center of 20x20 board
+            "othello" => (3, 3), // Starting position for Othello
+            _ => (0, 0),
+        };
+    }
+}
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -44,198 +224,8 @@ struct Args {
     shared_tree: bool,
 }
 
-fn print_board<S: GameState>(state: &S, game: &str) {
-    let board = state.get_board();
-    let last_move_coords = state.get_last_move().unwrap_or_default();
-    let last_move_set: std::collections::HashSet<(usize, usize)> = last_move_coords.into_iter().collect();
-
-    // Header with more spacing
-    print!("   ");
-    if !board.is_empty() {
-        for i in 0..board[0].len() {
-            print!("{:<2}", i);
-        }
-    }
-    println!();
-
-    for (i, row) in board.iter().enumerate() {
-        print!("{:>2} ", i);
-        for (j, &cell) in row.iter().enumerate() {
-            let is_last_move = last_move_set.contains(&(i, j));
-
-            let (symbol, color) = match game {
-                "othello" => match cell {
-                    0 => ("  ", "white"),      // Empty space
-                    1 => (" ●", "white"),      // Player 1 is White
-                    -1 => (" ●", "bright_black"), // Player -1 is "Black" (grey)
-                    _ => (" ?", "white"),
-                },
-                "connect4" => match cell {
-                    0 => (" .", "white"),
-                    1 => (" ●", "yellow"),
-                    -1 => (" ●", "cyan"),
-                    _ => (" ?", "white"),
-                },
-                "blokus" => match cell {
-                    0 => (" .", "white"),
-                    1 => (" ■", "yellow"),
-                    2 => (" ■", "green"),
-                    3 => (" ■", "magenta"),
-                    4 => (" ■", "blue"),
-                    _ => (" ?", "white"),
-                },
-                _ => match cell { // Gomoku
-                    0 => (" .", "white"),
-                    1 => (" X", "yellow"),
-                    -1 => (" O", "cyan"),
-                    _ => (" ?", "white"),
-                },
-            };
-
-            let mut colored_symbol = match color {
-                "yellow" => symbol.yellow(),
-                "cyan" => symbol.cyan(),
-                "green" => symbol.green(),
-                "magenta" => symbol.magenta(),
-                "blue" => symbol.blue(),
-                "white" => symbol.white(),
-                "bright_black" => symbol.bright_black(),
-                _ => symbol.normal(),
-            };
-
-            if is_last_move {
-                // Highlight by reversing video
-                colored_symbol = colored_symbol.reversed();
-            }
-            
-            print!("{}", colored_symbol);
-        }
-        println!();
-    }
-}
-
-fn run_game<S: GameState>(mut state: S, args: Args, game: &str)
-where
-    S::Move: std::str::FromStr,
-    <S::Move as std::str::FromStr>::Err: std::fmt::Debug,
-{
-    let mut mcts_map = HashMap::new();
-    let mut single_mcts = MCTS::new(args.exploration_parameter, args.num_threads, args.max_nodes);
-
-    while !state.is_terminal() {
-        print_board(&state, game);
-        let current_player = state.get_current_player();
-
-        let is_human_turn = !args.ai_only && current_player == 1;
-
-        let mv = if is_human_turn {
-            // Human player
-            let mut input = String::new();
-            match game {
-                "gomoku" | "othello" => {
-                    println!("Enter your move as 'row,col' (e.g., '5,5'):");
-                }
-                "connect4" => {
-                    println!("Enter the column to drop your piece (0-6):");
-                }
-                "blokus" => {
-                    println!("Enter your move as '(piece_idx,trans_idx,row,col)' or 'pass':");
-                }
-                _ => {
-                    println!("Enter your move:");
-                }
-            }
-            io::stdin().read_line(&mut input).unwrap();
-            if game == "blokus" && input.trim() == "pass" {
-                // A special move to signify passing
-                "(999,0,0,0)".parse().unwrap()
-            } else {
-                input.trim().parse().unwrap()
-            }
-        } else {
-            // AI player
-            println!("Player {} (AI) is thinking...", current_player);
-            let mcts_instance = if args.shared_tree {
-                &mut single_mcts
-            } else {
-                mcts_map.entry(current_player).or_insert_with(|| {
-                    MCTS::new(args.exploration_parameter, args.num_threads, args.max_nodes)
-                })
-            };
-            mcts_instance.search(
-                &state,
-                args.iterations,
-                args.stats_interval_secs,
-                args.timeout_secs,
-            )
-        };
-
-        if !state.get_possible_moves().contains(&mv) {
-            println!("Invalid move!");
-            continue;
-        }
-
-        state.make_move(&mv);
-
-        if args.shared_tree {
-            single_mcts.advance_root(&mv);
-        } else {
-            // When not sharing, all players have their own tree, so we advance all of them
-            for mcts_instance in mcts_map.values_mut() {
-                mcts_instance.advance_root(&mv);
-            }
-            // Also advance the single_mcts instance if it's not a fully AI game
-            if !args.ai_only {
-                single_mcts.advance_root(&mv);
-            }
-        }
-    }
-
-    print_board(&state, game);
-    match state.get_winner() {
-        Some(1) => println!("Player 1 (X) wins!"),
-        Some(-1) => println!("Player 2 (O) wins!"),
-        Some(2) => println!("Player 2 (A) wins!"),
-        Some(3) => println!("Player 3 (B) wins!"),
-        Some(4) => println!("Player 4 (C) wins!"),
-        _ => println!("It's a draw!"),
-    }
-}
-
-fn main() {
+fn main() -> io::Result<()> {
     let args = Args::parse();
-    let game = args.game.clone();
-
-    match game.as_str() {
-        "gomoku" => {
-            let state = GomokuState::new(args.board_size, args.line_size);
-            run_game(state, args, &game);
-        }
-        "othello" => {
-            let board_size = 8;
-            println!("Using default Othello settings: {}x{} board.", board_size, board_size);
-            let state = OthelloState::new(board_size);
-            run_game(state, args, &game);
-        }
-        "connect4" => {
-            let width = 7;
-            let height = 6;
-            let line_size = 4;
-            println!("Using default Connect4 settings: {}x{} board, {} in a row to win.", width, height, line_size);
-            let state = Connect4State::new(width, height, line_size);
-            run_game(state, args, &game);
-        }
-        "blokus" => {
-            println!("Using default Blokus settings: 20x20 board.");
-            println!("Available pieces and their transformation counts (trans_idx):");
-            for (id, count) in blokus::get_piece_info() {
-                println!("  Piece {} (piece_idx): {} transformations", id, count);
-            }
-            let state = BlokusState::new();
-            run_game(state, args, &game);
-        }
-        _ => {
-            println!("Unknown game: {}", args.game);
-        }
-    }
+    let mut app = App::new(args);
+    tui::run_tui(&mut app)
 }

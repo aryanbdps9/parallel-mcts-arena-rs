@@ -230,6 +230,14 @@ impl<S: GameState> MCTS<S> {
         }
     }
 
+    pub fn get_exploration_parameter(&self) -> f64 {
+        self.exploration_parameter
+    }
+
+    pub fn get_max_nodes(&self) -> usize {
+        self.max_nodes
+    }
+
     /// Advances the root of the tree to the node corresponding to the given move.
     /// This version recycles unused subtrees to reduce memory allocation/deallocation.
     pub fn advance_root(&mut self, mv: &S::Move) {

@@ -195,6 +195,10 @@ impl BlokusState {
         }
     }
 
+    pub fn get_line_size(&self) -> usize {
+        1 // Blokus doesn't have a line size concept, return 1 as default
+    }
+
     fn is_valid_move(&self, player_idx: usize, shape: &[(i32, i32)], r: usize, c: usize) -> bool {
         let player_id = (player_idx + 1) as i32;
         let mut corner_touch = false;

@@ -107,6 +107,10 @@ impl OthelloState {
         }
     }
 
+    pub fn get_line_size(&self) -> usize {
+        1 // Othello doesn't have a line size concept, return 1 as default
+    }
+
     fn is_valid_move(&self, mv: (usize, usize)) -> bool {
         let (r, c) = mv;
         if self.board[r][c] != 0 {

@@ -23,6 +23,14 @@ impl GomokuState {
             last_move: None,
         }
     }
+
+    pub fn get_board_size(&self) -> usize {
+        self.board_size
+    }
+
+    pub fn get_line_size(&self) -> usize {
+        self.line_size
+    }
 }
 
 impl GameState for GomokuState {

@@ -145,6 +145,10 @@ impl Connect4State {
             last_move: None,
         }
     }
+
+    pub fn get_line_size(&self) -> usize {
+        self.line_size
+    }
 }
 
 impl FromStr for Connect4Move {
