@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use parking_lot::{RwLock, Mutex};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // Thread-local storage for move generation to avoid allocations
 thread_local! {
@@ -46,6 +47,9 @@ impl<M: Clone + Eq + std::hash::Hash> NodePool<M> {
 pub trait GameState: Clone + Send + Sync {
     /// The type of a move in the game.
     type Move: Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync;
+
+    /// Returns the board state.
+    fn get_board(&self) -> &Vec<Vec<i32>>;
 
     /// Returns a vector of all possible moves from the current state.
     fn get_possible_moves(&self) -> Vec<Self::Move>;
@@ -107,7 +111,7 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
             let children = self.children.read();
             stack.extend(children.values().cloned());
         }
-        
+
         while let Some(current) = stack.pop() {
             // Add the current node to the result
             nodes.push(current.clone());
@@ -367,47 +371,61 @@ impl<S: GameState> MCTS<S> {
     /// # Arguments
     /// * `state` - The current state of the game.
     /// * `iterations` - The total number of simulations to run.
-    pub fn search(&mut self, state: &S, iterations: i32) -> S::Move {
+    /// * `stats_interval_secs` - Interval in seconds to print statistics (0 = no periodic stats).
+    /// * `timeout_secs` - The maximum time in seconds to search for. 0 means no timeout.
+    pub fn search(&mut self, state: &S, iterations: i32, stats_interval_secs: u64, timeout_secs: u64) -> S::Move {
         // Ensure root node is fully expanded before starting parallel search
         self.ensure_root_expanded(state);
-        
-        // Run simulations in parallel with periodic pruning
-        let prune_interval = std::cmp::max(1000, iterations / 10); // Prune every 10% of iterations or at least every 1000
-        
-        if iterations > prune_interval {
-            // Split search into chunks with periodic pruning
-            let chunks = iterations / prune_interval;
-            let remainder = iterations % prune_interval;
-            
-            for _ in 0..chunks {
-                self.pool.install(|| {
-                    (0..prune_interval).into_par_iter().for_each(|_| {
-                        self.run_simulation(state);
-                    });
-                });
-                // Prune after each chunk - remove children with < 3% of max visits
-                self.prune_children_by_percentage(0.03);
-            }
-            
-            // Run remaining iterations
-            if remainder > 0 {
-                self.pool.install(|| {
-                    (0..remainder).into_par_iter().for_each(|_| {
-                        self.run_simulation(state);
-                    });
-                });
-            }
-        } else {
-            // Run all iterations at once if too few iterations
-            self.pool.install(|| {
-                (0..iterations).into_par_iter().for_each(|_| {
-                    self.run_simulation(state);
-                });
-            });
-        }
 
-        // Don't auto-prune immediately after search to preserve statistics for display
-        // The pruning will be done later via explicit call or on next search
+        let start_time = Instant::now();
+        let timeout = if timeout_secs > 0 { Some(Duration::from_secs(timeout_secs)) } else { None };
+
+        let stats_interval = if stats_interval_secs > 0 { Some(Duration::from_secs(stats_interval_secs)) } else { None };
+        let last_stats_time = Arc::new(Mutex::new(Instant::now()));
+        let iterations_done = Arc::new(AtomicUsize::new(0));
+        let stop_search = Arc::new(AtomicBool::new(false));
+
+        self.pool.install(|| {
+            let _ = (0..iterations).into_par_iter().try_for_each(|_| -> Result<(), ()> {
+                if stop_search.load(Ordering::Relaxed) {
+                    return Err(()); // Stop this thread
+                }
+
+                self.run_simulation(state);
+                let current_iter = iterations_done.fetch_add(1, Ordering::Relaxed) + 1;
+
+                if let Some(t) = timeout {
+                    if start_time.elapsed() >= t {
+                        stop_search.store(true, Ordering::Relaxed);
+                        return Err(()); // Stop this thread and signal others
+                    }
+                }
+
+                if let Some(interval) = stats_interval {
+                    let mut last_time = last_stats_time.lock();
+                    if last_time.elapsed() >= interval {
+                        println!("--- MCTS Stats ---");
+                        let root_stats = self.get_root_stats();
+                        let root_value = if root_stats.1 > 0 { root_stats.0 / root_stats.1 as f64 / 2.0 } else { 0.0 };
+                        println!("Root -> Visits: {}, Value: {:.4}", root_stats.1, root_value);
+                        
+                        let children_stats = self.get_root_children_stats();
+                        let mut sorted_children: Vec<_> = children_stats.into_iter().collect();
+                        sorted_children.sort_by_key(|k| -k.1.1); // Sort by visits descending
+
+                        for (mv, (wins, visits)) in sorted_children.iter().take(5) { // Print top 5
+                            let value = if *visits > 0 { wins / *visits as f64 / 2.0 } else { 0.0 };
+                            println!("  Move {:?} -> Visits: {}, Wins: {}, Value: {:.4}", mv, visits, wins, value);
+                        }
+                        
+                        println!("Iterations completed: {} / {}", current_iter, iterations);
+                        println!("------------------");
+                        *last_time = Instant::now();
+                    }
+                }
+                Ok(())
+            });
+        });
 
         // After all simulations, the best move is the one most visited.
         let children = self.root.children.read();
@@ -498,7 +516,7 @@ impl<S: GameState> MCTS<S> {
         let mut path: Vec<Arc<Node<S::Move>>> = Vec::with_capacity(64); // Pre-allocate reasonable capacity
         path.push(self.root.clone());
         let mut current_node = self.root.clone();
-        
+
         // Calculate board capacity based on initial move count for better memory allocation
         let board_capacity = current_state.get_possible_moves().len();
         let mut moves_cache = Vec::with_capacity(board_capacity);
@@ -554,7 +572,7 @@ impl<S: GameState> MCTS<S> {
 
             // Apply virtual loss to the selected node
             next_node.apply_virtual_loss();
-            
+
             current_state.make_move(&best_move);
             current_node = next_node;
             path.push(current_node.clone());
@@ -706,3 +724,5 @@ impl<S: GameState> MCTS<S> {
         }
     }
 }
+
+pub mod games;
