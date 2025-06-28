@@ -1,5 +1,6 @@
 use crate::{App, AppState, DragBoundary};
-use crate::game_wrapper::GameWrapper;
+use crate::game_wrapper::{GameWrapper, MoveWrapper};
+use crate::games::connect4::Connect4Move;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind},
     execute,
@@ -102,14 +103,14 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                     KeyCode::Down => {
                                         if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
                                             app.scroll_move_history_down();
-                                        } else if !app.ai_only {
+                                        } else if !app.ai_only && app.game_type != "connect4" {
                                             app.move_cursor_down();
                                         }
                                     },
                                     KeyCode::Up => {
                                         if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
                                             app.scroll_move_history_up();
-                                        } else if !app.ai_only {
+                                        } else if !app.ai_only && app.game_type != "connect4" {
                                             app.move_cursor_up();
                                         }
                                     },
@@ -232,9 +233,17 @@ fn ui(f: &mut Frame, app: &mut App) {
                     }
                 } else {
                     if app.is_ai_thinking() {
-                        "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
+                        if app.game_type == "connect4" {
+                            "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
+                        } else {
+                            "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
+                        }
                     } else {
-                        "Arrow keys to move, Enter to place, or click on board. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
+                        if app.game_type == "connect4" {
+                            "Left/Right arrows to select column, Enter to drop piece, or click column numbers. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
+                        } else {
+                            "Arrow keys to move, Enter to place, or click on board. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
+                        }
                     }
                 }
             } else {
@@ -675,7 +684,8 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
 fn draw_board(f: &mut Frame, app: &App, area: Rect) {
     let board = app.game.get_board();
     let last_move_coords = app.game.get_last_move().unwrap_or_default();
-    let board_size = board.len();
+    let board_height = board.len();
+    let board_width = if board_height > 0 { board[0].len() } else { 0 };
     let game_title = match app.game_type.as_str() {
         "gomoku" => "Gomoku",
         "connect4" => "Connect4",
@@ -686,18 +696,97 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default().title(game_title).borders(Borders::ALL);
     f.render_widget(block, area);
 
-    let board_area = Layout::default()
+    // Determine if we need row labels and column labels
+    let show_row_labels = app.game_type != "connect4";
+    let show_col_labels = true; // All games get column labels
+    
+    // Calculate space needed for labels
+    let row_label_width = if show_row_labels { 3 } else { 0 }; // Space for row numbers like "  1"
+    let col_label_height = if show_col_labels { 1 } else { 0 }; // Height for column labels
+    
+    // Create the main board layout with space for labels
+    let board_with_labels_area = Layout::default()
         .margin(1)
-        .constraints(vec![Constraint::Length(2); board_size])
+        .constraints(if show_col_labels {
+            vec![Constraint::Length(col_label_height), Constraint::Min(0)]
+        } else {
+            vec![Constraint::Min(0)]
+        })
         .split(area);
+    
+    let content_area = if show_col_labels { board_with_labels_area[1] } else { board_with_labels_area[0] };
+    
+    // Draw column labels if needed
+    if show_col_labels {
+        let col_label_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints({
+                let mut constraints = vec![];
+                if show_row_labels {
+                    constraints.push(Constraint::Length(row_label_width));
+                }
+                for _ in 0..board_width {
+                    constraints.push(Constraint::Length(4));
+                }
+                constraints
+            })
+            .split(board_with_labels_area[0]);
+        
+        let start_idx = if show_row_labels { 1 } else { 0 };
+        for c in 0..board_width {
+            let col_label = if app.game_type == "connect4" {
+                format!("{}", c + 1) // Connect4 uses 1-based column numbers
+            } else {
+                format!("{}", c) // Other games use 0-based
+            };
+            
+            // Highlight the selected column for Connect4
+            let style = if app.game_type == "connect4" && c == app.cursor.1 && !app.ai_only {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            
+            let paragraph = Paragraph::new(col_label)
+                .style(style)
+                .alignment(Alignment::Center);
+            f.render_widget(paragraph, col_label_area[start_idx + c]);
+        }
+    }
+    
+    // Create row layout
+    let board_area = Layout::default()
+        .constraints(vec![Constraint::Length(2); board_height])
+        .split(content_area);
 
-    for r in 0..board_size {
+    for r in 0..board_height {
+        let row_constraints = {
+            let mut constraints = vec![];
+            if show_row_labels {
+                constraints.push(Constraint::Length(row_label_width));
+            }
+            for _ in 0..board_width {
+                constraints.push(Constraint::Length(4));
+            }
+            constraints
+        };
+        
         let row_area = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Length(4); board_size])
+            .constraints(row_constraints)
             .split(board_area[r]);
 
-        for c in 0..board_size {
+        // Draw row label if needed
+        if show_row_labels {
+            let row_label = format!("{:>2}", r);
+            let paragraph = Paragraph::new(row_label)
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Right);
+            f.render_widget(paragraph, row_area[0]);
+        }
+
+        let start_idx = if show_row_labels { 1 } else { 0 };
+        for c in 0..board_width {
             let player = board[r][c];
             let (symbol, player_color) = match app.game {
                 GameWrapper::Blokus(_) => {
@@ -733,7 +822,7 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
             let paragraph = Paragraph::new(symbol)
                 .style(style)
                 .alignment(Alignment::Center);
-            f.render_widget(paragraph, row_area[c]);
+            f.render_widget(paragraph, row_area[start_idx + c]);
         }
     }
 }
@@ -843,28 +932,59 @@ fn handle_menu_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
 }
 
 fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
-    let board_size = app.game.get_board().len();
+    let board = app.game.get_board();
+    let board_height = board.len();
+    let board_width = if board_height > 0 { board[0].len() } else { 0 };
     
     // Calculate the game board area based on the dynamic layout
     let main_area_height = (terminal_size.height as f32 * app.board_height_percent as f32 / 100.0) as u16;
     
     // Check if click is within the board area
     if row < main_area_height {
-        // Calculate board position
-        // The board area has a block border, then margin(1) creates the content area
-        // So content starts at: border (1) + margin (1) = row 1 for columns, row 1 for rows
-        let board_start_col = 1; // Border + margin
-        let board_start_row = 1; // Border + margin
+        // Determine if we need row labels and column labels
+        let show_row_labels = app.game_type != "connect4";
+        let show_col_labels = true;
+        
+        // Calculate space needed for labels
+        let row_label_width = if show_row_labels { 3 } else { 0 };
+        let col_label_height = if show_col_labels { 1 } else { 0 };
+        
+        // Check if click is on column labels for Connect4
+        if app.game_type == "connect4" && row >= 1 && row < 1 + col_label_height {
+            let col_start = 1 + row_label_width;
+            if col >= col_start {
+                let clicked_col = ((col - col_start) / 4) as usize;
+                if clicked_col < board_width {
+                    // Set cursor to this column and update the row position
+                    app.cursor.1 = clicked_col;
+                    app.update_connect4_cursor_row();
+                    
+                    // Check if the column is not full and make the move
+                    let connect4_move = MoveWrapper::Connect4(Connect4Move(clicked_col));
+                    if app.game.is_legal(&connect4_move) {
+                        app.submit_move();
+                    }
+                }
+            }
+            return;
+        }
+        
+        // For Connect4, ignore board cell clicks - only column labels are clickable
+        if app.game_type == "connect4" {
+            return;
+        }
+        
+        // The board area has borders and labels
+        let board_start_col = 1 + row_label_width; // Border + row label space
+        let board_start_row = 1 + col_label_height; // Border + column label space
         
         if col >= board_start_col && row >= board_start_row {
             let board_col = ((col - board_start_col) / 4) as usize;
-            // Each board cell occupies 2 terminal rows
             let board_row = ((row - board_start_row) / 2) as usize;
             
-            if board_row < board_size && board_col < board_size {
-                // Check if the position is valid (empty)
-                if app.game.get_board()[board_row][board_col] == 0 {
-                    // Update cursor position and make move
+            if board_row < board_height && board_col < board_width {
+                // For other games, exact cell positioning matters
+                if board[board_row][board_col] == 0 {
                     app.cursor = (board_row, board_col);
                     app.submit_move();
                 }

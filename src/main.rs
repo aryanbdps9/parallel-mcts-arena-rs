@@ -356,11 +356,16 @@ impl<'a> App<'a> {
         // Set cursor position based on game type and board size
         self.cursor = match self.game_type.as_str() {
             "gomoku" => (self.gomoku_board_size / 2, self.gomoku_board_size / 2), // Center of board
-            "connect4" => (0, self.connect4_width / 2), // Top row, center column
+            "connect4" => (0, self.connect4_width / 2), // Top row, center column - will be updated below
             "blokus" => (10, 10), // Center of 20x20 board
             "othello" => (self.othello_board_size / 2 - 1, self.othello_board_size / 2 - 1), // Starting position for Othello
             _ => (0, 0),
         };
+        
+        // For Connect4, update cursor to the correct row position
+        if self.game_type == "connect4" {
+            self.update_connect4_cursor_row();
+        }
         self.debug_scroll_offset = 0;
         self.move_history.clear();
         self.move_counter = 0;
@@ -538,15 +543,35 @@ impl<'a> App<'a> {
     }
 
     pub fn move_cursor_left(&mut self) {
-        if self.cursor.1 > 0 {
-            self.cursor.1 -= 1;
+        if self.game_type == "connect4" {
+            // For Connect4, only move horizontally between columns
+            if self.cursor.1 > 0 {
+                self.cursor.1 -= 1;
+                // Update cursor row to the lowest empty row in the new column
+                self.update_connect4_cursor_row();
+            }
+        } else {
+            if self.cursor.1 > 0 {
+                self.cursor.1 -= 1;
+            }
         }
     }
 
     pub fn move_cursor_right(&mut self) {
-        let board_size = self.game.get_board().len();
-        if self.cursor.1 < board_size - 1 {
-            self.cursor.1 += 1;
+        if self.game_type == "connect4" {
+            // For Connect4, only move horizontally between columns
+            let board = self.game.get_board();
+            let board_width = if board.len() > 0 { board[0].len() } else { 0 };
+            if self.cursor.1 < board_width - 1 {
+                self.cursor.1 += 1;
+                // Update cursor row to the lowest empty row in the new column
+                self.update_connect4_cursor_row();
+            }
+        } else {
+            let board_size = self.game.get_board().len();
+            if self.cursor.1 < board_size - 1 {
+                self.cursor.1 += 1;
+            }
         }
     }
 
@@ -642,8 +667,6 @@ impl<'a> App<'a> {
         }
     }
 
-    // ...existing code...
-
     pub fn settings_next(&mut self) {
         self.settings_index = (self.settings_index + 1) % self.settings_titles.len();
     }
@@ -666,36 +689,54 @@ impl<'a> App<'a> {
                 if self.gomoku_board_size < 25 {
                     self.gomoku_board_size += 2; // Keep odd for center positioning
                     self.update_settings_display();
+                    if self.game_type == "gomoku" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             2 => { // Gomoku Line Size
                 if self.gomoku_line_size < 10 {
                     self.gomoku_line_size += 1;
                     self.update_settings_display();
+                    if self.game_type == "gomoku" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             3 => { // Connect4 Width
                 if self.connect4_width < 12 {
                     self.connect4_width += 1;
                     self.update_settings_display();
+                    if self.game_type == "connect4" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             4 => { // Connect4 Height
                 if self.connect4_height < 10 {
                     self.connect4_height += 1;
                     self.update_settings_display();
+                    if self.game_type == "connect4" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             5 => { // Connect4 Line Size
                 if self.connect4_line_size < 8 {
                     self.connect4_line_size += 1;
                     self.update_settings_display();
+                    if self.game_type == "connect4" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             6 => { // Othello Board Size
                 if self.othello_board_size < 12 {
                     self.othello_board_size += 2; // Keep even for othello
                     self.update_settings_display();
+                    if self.game_type == "othello" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             7 => { // AI Iterations
@@ -732,36 +773,54 @@ impl<'a> App<'a> {
                 if self.gomoku_board_size > 9 {
                     self.gomoku_board_size -= 2; // Keep odd for center positioning
                     self.update_settings_display();
+                    if self.game_type == "gomoku" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             2 => { // Gomoku Line Size
                 if self.gomoku_line_size > 3 {
                     self.gomoku_line_size -= 1;
                     self.update_settings_display();
+                    if self.game_type == "gomoku" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             3 => { // Connect4 Width
                 if self.connect4_width > 4 {
                     self.connect4_width -= 1;
                     self.update_settings_display();
+                    if self.game_type == "connect4" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             4 => { // Connect4 Height
                 if self.connect4_height > 4 {
                     self.connect4_height -= 1;
                     self.update_settings_display();
+                    if self.game_type == "connect4" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             5 => { // Connect4 Line Size
                 if self.connect4_line_size > 3 {
                     self.connect4_line_size -= 1;
                     self.update_settings_display();
+                    if self.game_type == "connect4" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             6 => { // Othello Board Size
                 if self.othello_board_size > 6 {
                     self.othello_board_size -= 2; // Keep even for othello
                     self.update_settings_display();
+                    if self.game_type == "othello" {
+                        self.refresh_current_game();
+                    }
                 }
             }
             7 => { // AI Iterations
@@ -1041,6 +1100,57 @@ impl<'a> App<'a> {
             timeout_secs,
             request_id: self.current_request_id,
         });
+    }
+
+    fn refresh_current_game(&mut self) {
+        // If we're currently playing this game type, refresh the game state with new settings
+        if matches!(self.state, AppState::Playing | AppState::GameOver) {
+            self.game = match self.game_type.as_str() {
+                "gomoku" => GameWrapper::Gomoku(GomokuState::new(self.gomoku_board_size, self.gomoku_line_size)),
+                "connect4" => GameWrapper::Connect4(Connect4State::new(self.connect4_width, self.connect4_height, self.connect4_line_size)),
+                "blokus" => GameWrapper::Blokus(BlokusState::new()),
+                "othello" => GameWrapper::Othello(OthelloState::new(self.othello_board_size)),
+                _ => return,
+            };
+            
+            // Reset cursor position based on new dimensions
+            self.cursor = match self.game_type.as_str() {
+                "gomoku" => (self.gomoku_board_size / 2, self.gomoku_board_size / 2),
+                "connect4" => (0, self.connect4_width / 2),
+                "blokus" => (10, 10),
+                "othello" => (self.othello_board_size / 2 - 1, self.othello_board_size / 2 - 1),
+                _ => (0, 0),
+            };
+            
+            // Reset game state
+            self.state = AppState::Playing;
+            self.winner = None;
+            self.move_history.clear();
+            self.move_counter = 0;
+            self.move_history_scroll_offset = 0;
+            self.moves_in_current_round = 0;
+            self.ai_state = AIState::Idle;
+            self.pending_ai_move = None;
+        }
+    }
+
+    // Helper method to update cursor row for Connect4 to the lowest empty row in the current column
+    pub fn update_connect4_cursor_row(&mut self) {
+        if self.game_type == "connect4" {
+            let board = self.game.get_board();
+            let board_height = board.len();
+            let col = self.cursor.1;
+            
+            // Find the lowest empty row in this column
+            for r in (0..board_height).rev() {
+                if board[r][col] == 0 {
+                    self.cursor.0 = r;
+                    return;
+                }
+            }
+            // If column is full, keep cursor at the top
+            self.cursor.0 = 0;
+        }
     }
 }
 
