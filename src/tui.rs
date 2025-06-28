@@ -838,33 +838,58 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
         let start_idx = if show_row_labels { 1 } else { 0 };
         for c in 0..board_width {
             let player = board[r][c];
-            let (symbol, player_color) = match app.game {
-                GameWrapper::Blokus(_) => {
-                    // Blokus uses player numbers 1-4
+            
+            // Different visual styles based on game type
+            let (symbol, player_color, bg_color) = match app.game {
+                GameWrapper::Gomoku(_) => {
+                    // Keep Gomoku as is with X and O
                     match player {
-                        1 => ("1", Color::Red),
-                        2 => ("2", Color::Blue),
-                        3 => ("3", Color::Green),
-                        4 => ("4", Color::Yellow),
-                        _ => (".", Color::White),
+                        1 => ("X", Color::Red, None),
+                        -1 => ("O", Color::Blue, None),
+                        _ => (".", Color::White, None),
                     }
                 }
-                _ => {
-                    // 2-player games use X and O
+                GameWrapper::Othello(_) => {
+                    // Use filled circles for Othello with circular borders
                     match player {
-                        1 => ("X", Color::Red),
-                        -1 => ("O", Color::Blue),
-                        _ => (".", Color::White),
+                        1 => ("⚫", Color::White, None), // Black player: black circle with white/light border
+                        -1 => ("⚪", Color::White, None), // White player: white circle with dark border
+                        _ => ("·", Color::DarkGray, None), // Empty positions with subtle dot
+                    }
+                }
+                GameWrapper::Connect4(_) => {
+                    // Use larger colored circles for Connect4
+                    match player {
+                        1 => ("🔴", Color::Red, None),
+                        -1 => ("🟡", Color::Yellow, None),
+                        _ => ("·", Color::DarkGray, None),
+                    }
+                }
+                GameWrapper::Blokus(_) => {
+                    // Use filled squares with player numbers in darker shade
+                    match player {
+                        1 => ("1", Color::Black, Some(Color::Red)), // Player 1: Black text on red background
+                        2 => ("2", Color::Black, Some(Color::Blue)), // Player 2: Black text on blue background
+                        3 => ("3", Color::Black, Some(Color::Green)), // Player 3: Black text on green background
+                        4 => ("4", Color::Black, Some(Color::Yellow)), // Player 4: Black text on yellow background
+                        _ => ("·", Color::DarkGray, None),
                     }
                 }
             };
 
             let mut style = Style::default().fg(player_color);
+            
+            // Apply background color if specified (for Blokus squares)
+            if let Some(bg) = bg_color {
+                style = style.bg(bg);
+            }
 
+            // Highlight last move
             if last_move_coords.contains(&(r, c)) {
                 style = style.bg(Color::Cyan);
             }
 
+            // Highlight cursor position
             if (r, c) == app.cursor && !app.ai_only {
                 style = style.bg(Color::Yellow).fg(Color::Black);
             }
