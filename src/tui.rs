@@ -682,6 +682,9 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_board(f: &mut Frame, app: &App, area: Rect) {
+    // Draw the game board with automatic sizing to prevent large boards from taking too much screen space.
+    // For large boards (e.g., Blokus 20x20), the display is made more compact to fit within reasonable bounds.
+    
     let board = app.game.get_board();
     let last_move_coords = app.game.get_last_move().unwrap_or_default();
     let board_height = board.len();
@@ -714,6 +717,23 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
         })
         .split(area);
     
+    // Calculate column width based on board size and available space to keep board compact
+    let max_board_width = (f.size().width * 2 / 3).max(20); // Don't take more than 2/3 screen width, minimum 20
+    let col_width = if board_width > 0 {
+        // Calculate optimal width per column
+        let calculated_width = (max_board_width / board_width as u16).max(1);
+        
+        // Use different width based on board size for optimal display
+        match board_width {
+            1..=10 => calculated_width.min(5),    // Small boards: up to 5 chars per cell
+            11..=15 => calculated_width.min(4),   // Medium boards: up to 4 chars per cell
+            16..=25 => calculated_width.min(3),   // Large boards: up to 3 chars per cell
+            _ => calculated_width.min(2).max(1)   // Very large boards: 1-2 chars per cell
+        }
+    } else {
+        4
+    };
+    
     let content_area = if show_col_labels { board_with_labels_area[1] } else { board_with_labels_area[0] };
     
     // Draw column labels if needed
@@ -726,7 +746,7 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
                     constraints.push(Constraint::Length(row_label_width));
                 }
                 for _ in 0..board_width {
-                    constraints.push(Constraint::Length(4));
+                    constraints.push(Constraint::Length(col_width));
                 }
                 constraints
             })
@@ -735,9 +755,17 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
         let start_idx = if show_row_labels { 1 } else { 0 };
         for c in 0..board_width {
             let col_label = if app.game_type == "connect4" {
-                format!("{}", c + 1) // Connect4 uses 1-based column numbers
+                if col_width <= 2 && c >= 10 {
+                    format!("{}", (c % 10)) // For very compact displays, show only last digit for 10+
+                } else {
+                    format!("{}", c + 1) // Connect4 uses 1-based column numbers
+                }
             } else {
-                format!("{}", c) // Other games use 0-based
+                if col_width <= 2 && c >= 10 {
+                    format!("{}", (c % 10)) // For very compact displays, show only last digit for 10+
+                } else {
+                    format!("{}", c) // Other games use 0-based
+                }
             };
             
             // Highlight the selected column for Connect4
@@ -754,9 +782,27 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
         }
     }
     
-    // Create row layout
+    // Calculate row height based on board size and available space to keep board compact
+    let max_board_height = (f.size().height / 2).max(8); // Don't take more than half screen, minimum 8
+    
+    let row_height = if board_height > 0 {
+        // Calculate optimal height per row
+        let calculated_height = (max_board_height / board_height as u16).max(1);
+        
+        // Use different height based on board size for optimal display
+        match board_height {
+            1..=8 => calculated_height.min(3),    // Small boards: up to 3 rows per cell
+            9..=15 => calculated_height.min(2),   // Medium boards: up to 2 rows per cell  
+            16..=25 => calculated_height.min(1),  // Large boards: 1 row per cell
+            _ => 1                                // Very large boards: always 1 row per cell
+        }
+    } else {
+        2
+    };
+    
+    // Create row layout with dynamic height
     let board_area = Layout::default()
-        .constraints(vec![Constraint::Length(2); board_height])
+        .constraints(vec![Constraint::Length(row_height); board_height])
         .split(content_area);
 
     for r in 0..board_height {
@@ -766,7 +812,7 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
                 constraints.push(Constraint::Length(row_label_width));
             }
             for _ in 0..board_width {
-                constraints.push(Constraint::Length(4));
+                constraints.push(Constraint::Length(col_width));
             }
             constraints
         };
@@ -778,7 +824,11 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
 
         // Draw row label if needed
         if show_row_labels {
-            let row_label = format!("{:>2}", r);
+            let row_label = if row_height == 1 && r >= 10 {
+                format!("{}", r % 10) // For very compact displays, show only last digit for 10+
+            } else {
+                format!("{:>2}", r)
+            };
             let paragraph = Paragraph::new(row_label)
                 .style(Style::default().fg(Color::Gray))
                 .alignment(Alignment::Right);
@@ -949,11 +999,39 @@ fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
         let row_label_width = if show_row_labels { 3 } else { 0 };
         let col_label_height = if show_col_labels { 1 } else { 0 };
         
+        // Calculate actual column width based on board size (same logic as draw_board)
+        let max_board_width = (terminal_size.width * 2 / 3).max(20);
+        let col_width = if board_width > 0 {
+            let calculated_width = (max_board_width / board_width as u16).max(1);
+            match board_width {
+                1..=10 => calculated_width.min(5),
+                11..=15 => calculated_width.min(4),
+                16..=25 => calculated_width.min(3),
+                _ => calculated_width.min(2).max(1)
+            }
+        } else {
+            4
+        };
+        
+        // Calculate actual row height based on board size (same logic as draw_board)
+        let max_board_height = (terminal_size.height / 2).max(8);
+        let row_height = if board_height > 0 {
+            let calculated_height = (max_board_height / board_height as u16).max(1);
+            match board_height {
+                1..=8 => calculated_height.min(3),
+                9..=15 => calculated_height.min(2),
+                16..=25 => calculated_height.min(1),
+                _ => 1
+            }
+        } else {
+            2
+        };
+        
         // Check if click is on column labels for Connect4
         if app.game_type == "connect4" && row >= 1 && row < 1 + col_label_height {
             let col_start = 1 + row_label_width;
             if col >= col_start {
-                let clicked_col = ((col - col_start) / 4) as usize;
+                let clicked_col = ((col - col_start) / col_width) as usize;
                 if clicked_col < board_width {
                     // Set cursor to this column and update the row position
                     app.cursor.1 = clicked_col;
@@ -979,8 +1057,8 @@ fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
         let board_start_row = 1 + col_label_height; // Border + column label space
         
         if col >= board_start_col && row >= board_start_row {
-            let board_col = ((col - board_start_col) / 4) as usize;
-            let board_row = ((row - board_start_row) / 2) as usize;
+            let board_col = ((col - board_start_col) / col_width) as usize;
+            let board_row = ((row - board_start_row) / row_height) as usize;
             
             if board_row < board_height && board_col < board_width {
                 // For other games, exact cell positioning matters
@@ -1169,9 +1247,9 @@ fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
     // Create the paragraph with scrollable content
     let drag_indicator = if app.is_dragging { "🔀" } else { "↔" };
     let title = if max_scroll > 0 {
-        format!("{} Move History (scroll: {}/{}) - {}%", drag_indicator, scroll_offset, max_scroll, 100 - app.stats_width_percent)
+        format!("{} Move History (scroll: {}/{}) - {}%", drag_indicator, scroll_offset, max_scroll, 100 - app.stats_height_percent)
     } else {
-        format!("{} Move History - {}%", drag_indicator, 100 - app.stats_width_percent)
+        format!("{} Move History - {}%", drag_indicator, 100 - app.stats_height_percent)
     };
     
     // Split area for content and scrollbar
