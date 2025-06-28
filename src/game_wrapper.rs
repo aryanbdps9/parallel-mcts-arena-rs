@@ -3,6 +3,7 @@ use crate::games::gomoku::{GomokuMove, GomokuState};
 use crate::games::blokus::{BlokusMove, BlokusState};
 use crate::games::othello::{OthelloMove, OthelloState};
 use mcts::GameState;
+use std::fmt;
 
 #[derive(Debug, Clone)]
 pub enum GameWrapper {
@@ -18,6 +19,17 @@ pub enum MoveWrapper {
     Connect4(Connect4Move),
     Blokus(BlokusMove),
     Othello(OthelloMove),
+}
+
+impl fmt::Display for MoveWrapper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MoveWrapper::Gomoku(m) => write!(f, "G({},{})", m.0, m.1),
+            MoveWrapper::Connect4(m) => write!(f, "C4({})", m.0),
+            MoveWrapper::Blokus(m) => write!(f, "B({})", m),
+            MoveWrapper::Othello(m) => write!(f, "O({},{})", m.0, m.1),
+        }
+    }
 }
 
 impl GameState for GameWrapper {

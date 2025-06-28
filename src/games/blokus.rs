@@ -1,6 +1,9 @@
 use crate::GameState;
 use std::collections::HashSet;
 use std::str::FromStr;
+use std::fmt;
+
+const PASS_MOVE: BlokusMove = BlokusMove(usize::MAX, 0, 0, 0);
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Piece {
@@ -68,14 +71,24 @@ pub fn get_piece_info() -> Vec<(usize, usize)> {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct BlokusMove(pub usize, pub usize, pub usize, pub usize);
 
+impl fmt::Display for BlokusMove {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self == PASS_MOVE {
+            write!(f, "PASS")
+        } else {
+            write!(f, "P{}T{}@({},{})", self.0, self.1, self.2, self.3)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BlokusState {
     board: Vec<Vec<i32>>,
     current_player: i32,
     player_pieces: Vec<Vec<Piece>>,
     is_first_move: [bool; 4],
-    passed_players: [bool; 4],
     last_move_coords: Option<Vec<(usize, usize)>>,
+    consecutive_passes: u8,
 }
 
 impl GameState for BlokusState {
@@ -86,69 +99,109 @@ impl GameState for BlokusState {
     }
 
     fn get_possible_moves(&self) -> Vec<Self::Move> {
-        let mut moves = Vec::new();
         let player_idx = (self.current_player - 1) as usize;
-
-        if self.passed_players[player_idx] {
-            return moves;
+        let available_pieces = &self.player_pieces[player_idx];
+        
+        // Early check: if player has no pieces left, they must pass
+        if available_pieces.is_empty() {
+            return vec![PASS_MOVE];
         }
 
-        for (piece_idx, piece) in self.player_pieces[player_idx].iter().enumerate() {
+        let mut moves = Vec::new();
+
+        for piece in available_pieces {
             for (trans_idx, shape) in piece.transformations.iter().enumerate() {
-                for r in 0..20 {
-                    for c in 0..20 {
+                for r in 0..self.get_board_size() {
+                    for c in 0..self.get_board_size() {
                         if self.is_valid_move(player_idx, shape, r, c) {
-                            moves.push(BlokusMove(piece_idx, trans_idx, r, c));
+                            moves.push(BlokusMove(piece.id, trans_idx, r, c));
                         }
                     }
                 }
             }
         }
-        
-        // If no valid piece placements exist, add a pass move
+
         if moves.is_empty() {
-            moves.push(BlokusMove(999, 0, 0, 0)); // Pass move
+            vec![PASS_MOVE]
+        } else {
+            moves
         }
-        
-        moves
     }
 
     fn make_move(&mut self, mv: &Self::Move) {
-        let player_idx = (self.current_player - 1) as usize;
-        if mv.0 == 999 { // Pass move
-            self.passed_players[player_idx] = true;
+        if *mv == PASS_MOVE {
+            self.consecutive_passes += 1;
             self.last_move_coords = None;
         } else {
-            let piece = &self.player_pieces[player_idx][mv.0];
-            let shape = &piece.transformations[mv.1];
-            let mut coords = Vec::new();
+            let player_idx = (self.current_player - 1) as usize;
+            let piece_id = mv.0;
+            let trans_idx = mv.1;
+            let r = mv.2;
+            let c = mv.3;
+
+            let piece_index = self.player_pieces[player_idx]
+                .iter()
+                .position(|p| p.id == piece_id)
+                .expect("Piece not found");
+            let shape = &self.player_pieces[player_idx][piece_index].transformations[trans_idx];
+
+            let mut move_coords = Vec::new();
             for &(dr, dc) in shape {
-                let r = (mv.2 as i32 + dr) as usize;
-                let c = (mv.3 as i32 + dc) as usize;
-                self.board[r][c] = self.current_player;
-                coords.push((r, c));
+                let board_r = (r as i32 + dr) as usize;
+                let board_c = (c as i32 + dc) as usize;
+                self.board[board_r][board_c] = self.current_player;
+                move_coords.push((board_r, board_c));
             }
-            self.last_move_coords = Some(coords);
-            self.player_pieces[player_idx].remove(mv.0);
+
+            self.player_pieces[player_idx].remove(piece_index);
             self.is_first_move[player_idx] = false;
-            self.passed_players[player_idx] = false;
+            self.last_move_coords = Some(move_coords);
+            self.consecutive_passes = 0;
         }
 
-        // Advance to the next player who hasn't passed
-        for i in 1..=4 {
-            let next_player = ((self.current_player - 1 + i) % 4) + 1;
-            let next_player_idx = (next_player - 1) as usize;
-            if !self.passed_players[next_player_idx] {
-                self.current_player = next_player;
-                return;
-            }
-        }
-        // All players have passed, keep current player but game will be terminal
-        // Don't set to -1 as it breaks the game flow
+        // Advance to the next player
+        self.current_player = (self.current_player % 4) + 1;
     }
 
     fn is_terminal(&self) -> bool {
-        self.passed_players.iter().all(|&p| p)
+        // Game ends when all 4 players pass consecutively
+        if self.consecutive_passes >= 4 {
+            return true;
+        }
+        
+        // Additional safety check: if all players have no pieces left, game is over
+        if self.player_pieces.iter().all(|pieces| pieces.is_empty()) {
+            return true;
+        }
+        
+        // Additional safety check: if no player can make any move, game is over
+        // This prevents infinite loops in case of bugs
+        if self.consecutive_passes >= 3 {
+            // Check if the current player can make any move
+            let player_idx = (self.current_player - 1) as usize;
+            let available_pieces = &self.player_pieces[player_idx];
+            
+            if available_pieces.is_empty() {
+                return true; // Current player has no pieces, will pass, making it 4 consecutive passes
+            }
+            
+            // Quick check if current player has any valid moves
+            let has_valid_moves = available_pieces.iter().any(|piece| {
+                piece.transformations.iter().any(|shape| {
+                    (0..20).any(|r| {
+                        (0..20).any(|c| {
+                            self.is_valid_move(player_idx, shape, r, c)
+                        })
+                    })
+                })
+            });
+            
+            if !has_valid_moves {
+                return true; // Current player will be forced to pass, making it 4 consecutive passes
+            }
+        }
+        
+        false
     }
 
     fn get_winner(&self) -> Option<i32> {
@@ -167,7 +220,10 @@ impl GameState for BlokusState {
         if winners.len() == 1 {
             Some((winners[0].0 + 1) as i32)
         } else {
-            None // Draw
+            // In case of a tie, MCTS framework doesn't support multiple winners.
+            // Returning None for a draw, or the first winner.
+            // For now, let's return the first winner's ID.
+            Some((winners[0].0 + 1) as i32)
         }
     }
 
@@ -182,19 +238,25 @@ impl GameState for BlokusState {
 
 impl BlokusState {
     pub fn new() -> Self {
+        let board = vec![vec![0; 20]; 20];
+        let player_pieces = vec![
+            get_blokus_pieces(),
+            get_blokus_pieces(),
+            get_blokus_pieces(),
+            get_blokus_pieces(),
+        ];
         BlokusState {
-            board: vec![vec![0; 20]; 20],
+            board,
             current_player: 1,
-            player_pieces: vec![
-                get_blokus_pieces(),
-                get_blokus_pieces(),
-                get_blokus_pieces(),
-                get_blokus_pieces(),
-            ],
+            player_pieces,
             is_first_move: [true; 4],
-            passed_players: [false; 4],
             last_move_coords: None,
+            consecutive_passes: 0,
         }
+    }
+
+    pub fn get_board_size(&self) -> usize {
+        20 // Blokus board is 20x20
     }
 
     pub fn get_line_size(&self) -> usize {
@@ -202,11 +264,18 @@ impl BlokusState {
     }
 
     pub fn is_legal(&self, mv: &BlokusMove) -> bool {
+        // Handle pass move - always legal
+        if *mv == PASS_MOVE {
+            return true;
+        }
+        
         let player_idx = (self.current_player - 1) as usize;
-        if player_idx >= self.player_pieces.len() || mv.0 >= self.player_pieces[player_idx].len() {
+        if player_idx >= self.player_pieces.len() {
             return false;
         }
-        let piece = &self.player_pieces[player_idx][mv.0];
+        let Some(piece) = self.player_pieces[player_idx].iter().find(|p| p.id == mv.0) else {
+            return false;
+        };
         if mv.1 >= piece.transformations.len() {
             return false;
         }
@@ -218,59 +287,56 @@ impl BlokusState {
         let player_id = (player_idx + 1) as i32;
         let mut corner_touch = false;
 
-        if self.is_first_move[player_idx] {
-            let target_corners = [(0, 0), (0, 19), (19, 19), (19, 0)];
-            let target = target_corners[player_idx];
-            let mut covers_corner = false;
-            for (dr, dc) in shape {
-                if (r as i32 + dr, c as i32 + dc) == target {
-                    covers_corner = true;
-                    break;
-                }
-            }
-            if !covers_corner {
-                return false;
-            }
-        } 
-
+        // Check if all pieces of the shape fit on the board and are on empty spots
         for (dr, dc) in shape {
             let nr = r as i32 + dr;
             let nc = c as i32 + dc;
 
+            // Out of bounds or occupied cell
             if nr < 0 || nr >= 20 || nc < 0 || nc >= 20 || self.board[nr as usize][nc as usize] != 0 {
                 return false;
             }
-
-            if !self.is_first_move[player_idx] {
-                let neighbors = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-                for (nnr, nnc) in &neighbors {
-                    let ar = nr + nnr;
-                    let ac = nc + nnc;
-                    if ar >= 0 && ar < 20 && ac >= 0 && ac < 20 && self.board[ar as usize][ac as usize] == player_id {
-                        return false;
-                    }
-                }
-            }
         }
 
-        if !self.is_first_move[player_idx] {
-            let corners = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+        // For first move, must cover the corner
+        if self.is_first_move[player_idx] {
+            let target_corners = [(0, 0), (0, 19), (19, 19), (19, 0)];
+            let target = target_corners[player_idx];
             for (dr, dc) in shape {
-                let nr = r as i32 + dr;
-                let nc = c as i32 + dc;
-                for (cnr, cnc) in &corners {
-                    let ar = nr + cnr;
-                    let ac = nc + cnc;
-                    if ar >= 0 && ar < 20 && ac >= 0 && ac < 20 && self.board[ar as usize][ac as usize] == player_id {
-                        corner_touch = true;
-                        break;
-                    }
+                if (r as i32 + dr, c as i32 + dc) == target {
+                    return true; // First move only needs to cover corner
                 }
-                if corner_touch { break; }
+            }
+            return false;
+        }
+
+        // For subsequent moves, check adjacency rules
+        for (dr, dc) in shape {
+            let nr = r as i32 + dr;
+            let nc = c as i32 + dc;
+
+            // Check that no edge is adjacent to same player
+            let neighbors = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+            for (nnr, nnc) in &neighbors {
+                let ar = nr + nnr;
+                let ac = nc + nnc;
+                if ar >= 0 && ar < 20 && ac >= 0 && ac < 20 && self.board[ar as usize][ac as usize] == player_id {
+                    return false;
+                }
+            }
+
+            // Check for corner touch with same player
+            let corners = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+            for (cnr, cnc) in &corners {
+                let ar = nr + cnr;
+                let ac = nc + cnc;
+                if ar >= 0 && ar < 20 && ac >= 0 && ac < 20 && self.board[ar as usize][ac as usize] == player_id {
+                    corner_touch = true;
+                }
             }
         }
 
-        self.is_first_move[player_idx] || corner_touch
+        corner_touch
     }
 }
 

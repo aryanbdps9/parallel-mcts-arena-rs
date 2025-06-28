@@ -414,29 +414,50 @@ impl<S: GameState> MCTS<S> {
     /// * `stats_interval_secs` - Interval in seconds to print statistics (0 = no periodic stats).
     /// * `timeout_secs` - The maximum time in seconds to search for. 0 means no timeout.
     pub fn search(&mut self, state: &S, iterations: i32, stats_interval_secs: u64, timeout_secs: u64) -> S::Move {
-        // Ensure root node is fully expanded before starting parallel search
-        self.ensure_root_expanded(state);
-
         let start_time = Instant::now();
         let timeout = if timeout_secs > 0 { Some(Duration::from_secs(timeout_secs)) } else { None };
 
+        self.ensure_root_expanded(state);
+
+        let possible_moves = state.get_possible_moves();
+        if possible_moves.len() == 1 {
+            return possible_moves[0].clone();
+        }
+        
+        if possible_moves.is_empty() {
+            // This case should ideally be handled by get_possible_moves returning a pass move.
+            // If we get here, it means the game ended, but is_terminal was false.
+            // We are in an inconsistent state, but we must return a move.
+            // The Blokus implementation should return a pass move.
+            // If another game does not, this will be a problem.
+            // For now, let's check the root's children. If there's one, it must be the pass move.
+            let children = self.root.children.read();
+            if children.len() == 1 {
+                return children.keys().next().unwrap().clone();
+            }
+            // If there are no children and no possible moves, we are stuck.
+            // This indicates a logic error in the game state implementation.
+            panic!("MCTS search: No possible moves and no children in root node. Game logic may be flawed.");
+        }
+
+        let completed_iterations = Arc::new(AtomicUsize::new(0));
+        let stop_searching = Arc::new(AtomicBool::new(false));
+
         let stats_interval = if stats_interval_secs > 0 { Some(Duration::from_secs(stats_interval_secs)) } else { None };
         let last_stats_time = Arc::new(Mutex::new(Instant::now()));
-        let iterations_done = Arc::new(AtomicUsize::new(0));
-        let stop_search = Arc::new(AtomicBool::new(false));
 
         self.pool.install(|| {
             let _ = (0..iterations).into_par_iter().try_for_each(|_| -> Result<(), ()> {
-                if stop_search.load(Ordering::Relaxed) {
+                if stop_searching.load(Ordering::Relaxed) {
                     return Err(()); // Stop this thread
                 }
 
                 self.run_simulation(state);
-                iterations_done.fetch_add(1, Ordering::Relaxed);
+                completed_iterations.fetch_add(1, Ordering::Relaxed);
 
                 if let Some(t) = timeout {
                     if start_time.elapsed() >= t {
-                        stop_search.store(true, Ordering::Relaxed);
+                        stop_searching.store(true, Ordering::Relaxed);
                         return Err(()); // Stop this thread and signal others
                     }
                 }
@@ -681,16 +702,28 @@ impl<S: GameState> MCTS<S> {
         // --- Simulation Phase ---
         // Run a random playout from the new node to the end of the game.
         let mut sim_state = current_state.clone();
-        while !sim_state.is_terminal() {
+        let mut simulation_moves = 0;
+        const MAX_SIMULATION_MOVES: usize = 1000; // Safeguard against infinite loops
+        
+        while !sim_state.is_terminal() && simulation_moves < MAX_SIMULATION_MOVES {
             moves_cache.clear();
             moves_cache.extend(sim_state.get_possible_moves());
             if moves_cache.is_empty() {
+                // This should not happen if get_possible_moves() is implemented correctly
+                // but we break to prevent infinite loops
                 break;
             }
             let mv = &moves_cache[rand::thread_rng().gen_range(0..moves_cache.len())];
             sim_state.make_move(mv);
+            simulation_moves += 1;
         }
-        let winner = sim_state.get_winner();
+        
+        // If we hit the simulation limit, treat it as a draw
+        let winner = if simulation_moves >= MAX_SIMULATION_MOVES {
+            None // Treat as draw/timeout
+        } else {
+            sim_state.get_winner()
+        };
 
         // --- Backpropagation Phase with Virtual Loss Removal ---
         // Update the visit counts and win statistics for all nodes in the path.
