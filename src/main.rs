@@ -146,6 +146,7 @@ pub struct App<'a> {
     pub ai_rx: std::sync::mpsc::Receiver<AIResponse>,
     pub pending_ai_move: Option<MoveWrapper>,
     pub ai_only: bool,
+    pub shared_tree: bool,
     pub iterations: i32,
     pub num_threads: usize,
     pub stats_interval_secs: u64,
@@ -215,6 +216,7 @@ impl<'a> App<'a> {
             ai_rx,
             pending_ai_move: None,
             ai_only: args.ai_only,
+            shared_tree: args.shared_tree,
             iterations: args.iterations,
             num_threads: args.num_threads,
             stats_interval_secs: args.stats_interval_secs,
@@ -361,9 +363,8 @@ impl<'a> App<'a> {
                     // Apply the move to our game state
                     self.game.make_move(&mv);
                     
-                    // Only advance root in human vs AI mode to preserve tree between human moves
-                    // In AI vs AI mode, we start fresh each time to avoid state synchronization issues
-                    if !self.ai_only {
+                    // If not in AI-only mode, or if in AI-only mode with a shared tree, advance the root.
+                    if !self.ai_only || self.shared_tree {
                         let _ = self.ai_tx.send(AIRequest::AdvanceRoot { last_move: mv });
                     }
 
@@ -376,7 +377,6 @@ impl<'a> App<'a> {
                         self.state = AppState::GameOver;
                     } else if self.ai_only {
                         // In AI-only mode, request next move with the updated game state
-                        // The AI will start fresh from this position
                         self.send_search_request(self.timeout_secs);
                     }
                 } else {
@@ -878,6 +878,11 @@ impl<'a> App<'a> {
         self.current_request_id = self.next_request_id;
         self.ai_state = AIState::Thinking;  // Immediately set to thinking to prevent duplicate requests
         
+        // In AI vs AI mode with non-shared tree, reset the MCTS tree for the new player's turn.
+        if self.ai_only && !self.shared_tree {
+            self.update_ai_settings();
+        }
+
         let _ = self.ai_tx.send(AIRequest::Search {
             game_state: self.game.clone(),
             timeout_secs,
