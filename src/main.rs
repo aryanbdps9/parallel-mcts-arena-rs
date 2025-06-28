@@ -15,7 +15,7 @@ use ratatui::layout::Constraint;
 use std::sync::mpsc::{Receiver, Sender};
 
 // Centralized move processing
-enum GameRequest {
+pub enum GameRequest {
     MakeMove(MoveWrapper),
 }
 
