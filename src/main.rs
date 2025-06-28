@@ -177,16 +177,35 @@ impl<'a> App<'a> {
             othello_board_size: 8,
             exploration_parameter: args.exploration_parameter,
             max_nodes: args.max_nodes,
-            // Responsive layout fields
-            board_height_percent: 50,
-            instructions_height_percent: 20,
-            stats_height_percent: 30,
+            // Responsive layout fields - will be set by initialize_layout
+            board_height_percent: 50, // Temporary default, will be overridden
+            instructions_height_percent: 20, // Temporary default, will be overridden
+            stats_height_percent: 30, // Temporary default, will be overridden
             is_dragging: false,
             drag_boundary: None,
             last_terminal_size: (0, 0),
         };
         app.update_settings_display();
         app
+    }
+
+    /// Initialize layout percentages based on minimum content requirements
+    pub fn initialize_layout(&mut self, terminal_height: u16) {
+        let min_board_percent = self.get_minimum_board_height(terminal_height);
+        let min_instructions_percent = self.get_minimum_instructions_height(terminal_height);
+        let min_stats_percent = 5u16;
+        
+        // Set initial layout with minimum heights as default (no extra space)
+        self.board_height_percent = min_board_percent;
+        self.instructions_height_percent = min_instructions_percent;
+        self.stats_height_percent = 100 - self.board_height_percent - self.instructions_height_percent;
+        
+        // Ensure stats has at least its minimum
+        if self.stats_height_percent < min_stats_percent {
+            self.stats_height_percent = min_stats_percent;
+            // Adjust board height if needed, but keep instructions at minimum
+            self.board_height_percent = 100 - self.instructions_height_percent - self.stats_height_percent;
+        }
     }
 
     pub fn set_game(&mut self, index: usize) {
@@ -209,6 +228,12 @@ impl<'a> App<'a> {
         self.debug_scroll_offset = 0;
         self.ai_state = AIState::Idle;
         self.pending_ai_move = None;
+        
+        // Initialize layout based on the new game's requirements
+        if self.last_terminal_size.1 > 0 {
+            self.initialize_layout(self.last_terminal_size.1);
+        }
+        
         // Update AI with current settings
         let _ = self.ai_tx.send(AIRequest::UpdateSettings {
             exploration_parameter: self.exploration_parameter,
@@ -546,11 +571,71 @@ impl<'a> App<'a> {
         self.ai_state == AIState::Thinking
     }
 
+    /// Calculate the minimum height needed for the board section
+    pub fn get_minimum_board_height(&self, terminal_height: u16) -> u16 {
+        let board_size = self.game.get_board().len();
+        // Board needs: border (2) + margin (2) + (board_size * 2 rows per cell)
+        let absolute_min = (board_size * 2 + 4) as u16;
+        // Convert to percentage, ensuring we don't exceed reasonable bounds
+        let min_percent = ((absolute_min as f32 / terminal_height as f32) * 100.0).ceil() as u16;
+        min_percent.clamp(25, 70) // Reasonable bounds even for very small/large terminals
+    }
+
+    /// Calculate the minimum height needed for the instructions section
+    pub fn get_minimum_instructions_height(&self, terminal_height: u16) -> u16 {
+        // Instructions need: border (2) + content (1) = 3 lines minimum
+        let absolute_min = 3u16;
+        // Convert to percentage
+        let min_percent = ((absolute_min as f32 / terminal_height as f32) * 100.0).ceil() as u16;
+        min_percent.clamp(5, 15) // Reasonable bounds
+    }
+
     // Responsive layout methods
     pub fn handle_window_resize(&mut self, width: u16, height: u16) {
         self.last_terminal_size = (width, height);
         // Reset scroll if content might have changed
         self.debug_scroll_offset = 0;
+        
+        // Recalculate layout to ensure minimum heights are respected
+        // Get current game's minimum requirements
+        let min_board_percent = self.get_minimum_board_height(height);
+        let min_instructions_percent = self.get_minimum_instructions_height(height);
+        let min_stats_percent = 5u16;
+        
+        // Only adjust if current percentages are below minimums
+        let needs_board_adjustment = self.board_height_percent < min_board_percent;
+        let needs_instructions_adjustment = self.instructions_height_percent < min_instructions_percent;
+        
+        if needs_board_adjustment || needs_instructions_adjustment {
+            // Ensure total is 100% and all sections have minimum space
+            let total_min_required = min_board_percent + min_instructions_percent + min_stats_percent;
+            
+            if total_min_required <= 100 {
+                // We can fit all minimums - set sections to minimum and distribute remaining to stats
+                self.board_height_percent = min_board_percent;
+                self.instructions_height_percent = min_instructions_percent;
+                self.stats_height_percent = 100 - min_board_percent - min_instructions_percent;
+            } else {
+                // Very constrained space - use absolute minimums even if they exceed 100%
+                self.board_height_percent = min_board_percent;
+                self.instructions_height_percent = min_instructions_percent;
+                self.stats_height_percent = min_stats_percent;
+            }
+        } else {
+            // Current layout is valid, just ensure total is 100%
+            let total_used = self.board_height_percent + self.instructions_height_percent;
+            self.stats_height_percent = (100u16).saturating_sub(total_used).max(min_stats_percent);
+            
+            // If stats was forced to minimum, adjust the others proportionally
+            if self.stats_height_percent == min_stats_percent && total_used > 100 - min_stats_percent {
+                let available = 100 - min_stats_percent;
+                let current_total = self.board_height_percent + self.instructions_height_percent;
+                if current_total > 0 {
+                    self.board_height_percent = (self.board_height_percent * available / current_total).max(min_board_percent);
+                    self.instructions_height_percent = (available - self.board_height_percent).max(min_instructions_percent);
+                }
+            }
+        }
     }
 
     pub fn start_drag(&mut self, boundary: DragBoundary) {
@@ -573,16 +658,34 @@ impl<'a> App<'a> {
         let boundary = self.drag_boundary.unwrap();
         let row_percent = ((mouse_row as f32 / terminal_height as f32) * 100.0) as u16;
 
+        // Calculate minimum heights based on content requirements
+        let min_board_percent = self.get_minimum_board_height(terminal_height);
+        let min_instructions_percent = self.get_minimum_instructions_height(terminal_height);
+        let min_stats_percent = 5u16; // Stats section can be very small (scrollable)
+
         match boundary {
             DragBoundary::BoardInstructions => {
-                // Ensure reasonable bounds (30-80% for board)
-                let new_board_percent = row_percent.clamp(30, 80);
+                // Ensure board doesn't go below its minimum height or above reasonable maximum
+                let max_board_percent = 100 - min_instructions_percent - min_stats_percent;
+                let new_board_percent = row_percent.clamp(min_board_percent, max_board_percent);
                 let remaining = 100 - new_board_percent;
-                // Maintain the relative ratio between instructions and stats
+                
+                // Maintain the relative ratio between instructions and stats, respecting minimums
                 let instructions_ratio = self.instructions_height_percent as f32 / (self.instructions_height_percent + self.stats_height_percent) as f32;
-                self.board_height_percent = new_board_percent;
-                self.instructions_height_percent = (remaining as f32 * instructions_ratio) as u16;
-                self.stats_height_percent = remaining - self.instructions_height_percent;
+                let desired_instructions = (remaining as f32 * instructions_ratio) as u16;
+                let desired_stats = remaining - desired_instructions;
+                
+                // Ensure both sections meet their minimum requirements
+                if desired_instructions >= min_instructions_percent && desired_stats >= min_stats_percent {
+                    self.board_height_percent = new_board_percent;
+                    self.instructions_height_percent = desired_instructions;
+                    self.stats_height_percent = desired_stats;
+                } else {
+                    // Adjust to meet minimums
+                    self.board_height_percent = new_board_percent;
+                    self.instructions_height_percent = min_instructions_percent.max(desired_instructions);
+                    self.stats_height_percent = remaining - self.instructions_height_percent;
+                }
             }
             DragBoundary::InstructionsStats => {
                 // Calculate which part of the non-board area we're in
@@ -590,9 +693,17 @@ impl<'a> App<'a> {
                 if row_percent > non_board_start {
                     let non_board_percent = 100 - self.board_height_percent;
                     let relative_pos = row_percent - non_board_start;
-                    let instructions_percent = relative_pos.clamp(5, non_board_percent - 5);
-                    self.instructions_height_percent = instructions_percent;
-                    self.stats_height_percent = non_board_percent - instructions_percent;
+                    
+                    // Ensure instructions doesn't go below its minimum
+                    let max_instructions = non_board_percent - min_stats_percent;
+                    let instructions_percent = relative_pos.clamp(min_instructions_percent, max_instructions);
+                    let stats_percent = non_board_percent - instructions_percent;
+                    
+                    // Only update if both sections meet their minimums
+                    if instructions_percent >= min_instructions_percent && stats_percent >= min_stats_percent {
+                        self.instructions_height_percent = instructions_percent;
+                        self.stats_height_percent = stats_percent;
+                    }
                 }
             }
         }

@@ -36,14 +36,14 @@ All instruction text includes hints about the drag functionality:
 ### 4. Layout Constraints
 
 #### Default Layout:
-- **Board**: 50% of screen height
-- **Instructions**: 20% of screen height  
-- **Stats**: 30% of screen height
+- **Board**: Minimum height based on board size + some extra space
+- **Instructions**: Minimum 3 lines + some extra space
+- **Stats**: Remaining space (minimum 5% of screen)
 
 #### Resize Limits:
-- **Board**: 30% - 80% of screen height
-- **Instructions**: 5% - remaining height
-- **Stats**: 5% - remaining height
+- **Board**: Cannot be reduced below minimum height needed for game board
+- **Instructions**: Cannot be reduced below minimum height needed for text display  
+- **Stats**: Cannot be reduced below 5% of screen height (scrollable content)
 
 ### 5. State Persistence
 - Layout percentages are maintained when switching between game states
@@ -69,17 +69,26 @@ All instruction text includes hints about the drag functionality:
 
 ## Usage Examples
 
+### Initial Layout:
+- The application automatically calculates minimum heights based on content
+- Board height is set to accommodate the full game board plus borders
+- Instructions height is set to the minimum needed for text display
+- Stats area gets the remaining space for debug information
+
 ### Maximizing Board View:
-1. Drag the board-instructions boundary down to ~80%
-2. Drag the instructions-stats boundary to minimize stats area
+1. Drag the board-instructions boundary down to expand board area
+2. Board cannot be reduced below the minimum size needed for gameplay
+3. Drag the instructions-stats boundary to minimize stats area
 
 ### Maximizing Debug Info:
 1. Drag the instructions-stats boundary up 
 2. Stats area will expand to show more debug information
+3. Instructions section cannot be reduced below minimum readable height
 
-### Balanced Layout:
-1. Use default 50%|20%|30% for balanced gameplay and debugging
-2. Adjust as needed based on terminal size and preferences
+### Adaptive Behavior:
+- Switching between games automatically adjusts minimum heights
+- Gomoku 15x15 needs more space than Connect4 7x6
+- Window resizing respects content requirements and maintains usability
 
 ## Compatibility
 
