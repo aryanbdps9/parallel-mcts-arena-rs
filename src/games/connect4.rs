@@ -4,7 +4,7 @@ use std::str::FromStr;
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Connect4Move(pub usize);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Connect4State {
     board: Vec<Vec<i32>>,
     current_player: i32,

@@ -4,7 +4,7 @@ use std::str::FromStr;
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct GomokuMove(pub usize, pub usize);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct GomokuState {
     pub board: Vec<Vec<i32>>,
     pub current_player: i32,

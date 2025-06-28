@@ -4,7 +4,7 @@ use crate::games::blokus::{BlokusMove, BlokusState};
 use crate::games::othello::{OthelloMove, OthelloState};
 use mcts::GameState;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum GameWrapper {
     Gomoku(GomokuState),
     Connect4(Connect4State),
@@ -106,6 +106,15 @@ impl GameWrapper {
             GameWrapper::Connect4(g) => g.get_line_size(),
             GameWrapper::Blokus(g) => g.get_line_size(),
             GameWrapper::Othello(g) => g.get_line_size(),
+        }
+    }
+
+    pub fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
+        match self {
+            GameWrapper::Gomoku(g) => g.get_last_move(),
+            GameWrapper::Connect4(g) => g.get_last_move(),
+            GameWrapper::Blokus(g) => g.get_last_move(),
+            GameWrapper::Othello(g) => g.get_last_move(),
         }
     }
 }

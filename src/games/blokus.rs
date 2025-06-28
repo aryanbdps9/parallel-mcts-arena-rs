@@ -68,7 +68,7 @@ pub fn get_piece_info() -> Vec<(usize, usize)> {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct BlokusMove(pub usize, pub usize, pub usize, pub usize);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BlokusState {
     board: Vec<Vec<i32>>,
     current_player: i32,

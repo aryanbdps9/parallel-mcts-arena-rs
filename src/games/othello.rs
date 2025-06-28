@@ -4,7 +4,7 @@ use std::str::FromStr;
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct OthelloMove(pub usize, pub usize);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct OthelloState {
     board: Vec<Vec<i32>>,
     current_player: i32,

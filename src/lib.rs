@@ -345,10 +345,39 @@ impl<S: GameState> MCTS<S> {
         let node_count = self.node_count.load(Ordering::Relaxed);
         let children_count = self.root.children.read().len();
         
-        format!(
-            "MCTS Debug - Root: {} visits, {} wins, {} children, {} total nodes in tree",
-            root_visits, root_wins, children_count, node_count
-        )
+        let mut debug_lines = vec![
+            "MCTS Debug Info:".to_string(),
+            format!("Root: {} visits, {} wins, {:.3} rate", 
+                   root_visits, root_wins, 
+                   if root_visits > 0 { root_wins as f64 / root_visits as f64 / 2.0 } else { 0.0 }),
+            format!("Tree: {} nodes ({} children, max {})", 
+                   node_count, children_count, self.max_nodes),
+            format!("Exploration: {:.3}, Threads: {}", 
+                   self.exploration_parameter, self.pool.current_num_threads()),
+        ];
+
+        // Add top child statistics (limited to prevent UI overflow)
+        let children = self.root.children.read();
+        if !children.is_empty() {
+            debug_lines.push("Top moves:".to_string());
+            let mut sorted_children: Vec<_> = children.iter().collect();
+            sorted_children.sort_by_key(|(_, node)| -node.visits.load(Ordering::Relaxed));
+            
+            for (mv, node) in sorted_children.iter().take(5) {
+                let visits = node.visits.load(Ordering::Relaxed);
+                let wins = node.wins.load(Ordering::Relaxed);
+                let win_rate = if visits > 0 { wins as f64 / visits as f64 / 2.0 } else { 0.0 };
+                debug_lines.push(format!("  {:?}: {} visits, {:.3} rate", mv, visits, win_rate));
+            }
+            
+            if sorted_children.len() > 5 {
+                debug_lines.push(format!("  ... and {} more moves", sorted_children.len() - 5));
+            }
+        } else {
+            debug_lines.push("No moves evaluated yet".to_string());
+        }
+        
+        debug_lines.join("\n")
     }
 
     /// Ensures the root node is fully expanded with all possible moves.
@@ -403,7 +432,7 @@ impl<S: GameState> MCTS<S> {
                 }
 
                 self.run_simulation(state);
-                let current_iter = iterations_done.fetch_add(1, Ordering::Relaxed) + 1;
+                iterations_done.fetch_add(1, Ordering::Relaxed);
 
                 if let Some(t) = timeout {
                     if start_time.elapsed() >= t {
@@ -415,22 +444,8 @@ impl<S: GameState> MCTS<S> {
                 if let Some(interval) = stats_interval {
                     let mut last_time = last_stats_time.lock();
                     if last_time.elapsed() >= interval {
-                        println!("--- MCTS Stats ---");
-                        let root_stats = self.get_root_stats();
-                        let root_value = if root_stats.1 > 0 { root_stats.0 / root_stats.1 as f64 / 2.0 } else { 0.0 };
-                        println!("Root -> Visits: {}, Value: {:.4}", root_stats.1, root_value);
-                        
-                        let children_stats = self.get_root_children_stats();
-                        let mut sorted_children: Vec<_> = children_stats.into_iter().collect();
-                        sorted_children.sort_by_key(|k| -k.1.1); // Sort by visits descending
-
-                        for (mv, (wins, visits)) in sorted_children.iter().take(5) { // Print top 5
-                            let value = if *visits > 0 { wins / *visits as f64 / 2.0 } else { 0.0 };
-                            println!("  Move {:?} -> Visits: {}, Wins: {}, Value: {:.4}", mv, visits, wins, value);
-                        }
-                        
-                        println!("Iterations completed: {} / {}", current_iter, iterations);
-                        println!("------------------");
+                        // Stats are now displayed in the TUI debug panel instead of console output
+                        // to prevent interference with the TUI display
                         *last_time = Instant::now();
                     }
                 }

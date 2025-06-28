@@ -7,7 +7,7 @@ use crossterm::{
 use mcts::GameState;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use std::io;
 use std::time::{Duration, Instant};
@@ -66,13 +66,28 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                 KeyCode::Down => app.next(),
                                 KeyCode::Up => app.previous(),
                                 KeyCode::Enter => {
-                                    if app.index == app.titles.len() - 1 {
+                                    if app.index == app.titles.len() - 1 { // Quit
                                         return Ok(());
+                                    } else if app.index == app.titles.len() - 2 { // Settings
+                                        app.state = AppState::Settings;
                                     } else {
                                         app.state = AppState::Playing;
                                         app.set_game(app.index);
                                     }
                                 }
+                                _ => {}
+                            },
+                            AppState::Settings => match key.code {
+                                KeyCode::Down => app.settings_next(),
+                                KeyCode::Up => app.settings_previous(),
+                                KeyCode::Left => app.decrease_setting(),
+                                KeyCode::Right => app.increase_setting(),
+                                KeyCode::Enter => {
+                                    if app.settings_index == app.settings_titles.len() - 1 { // Back to Menu
+                                        app.state = AppState::Menu;
+                                    }
+                                }
+                                KeyCode::Char('m') => app.state = AppState::Menu,
                                 _ => {}
                             },
                             AppState::Playing => {
@@ -83,12 +98,16 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                     KeyCode::Right => if !app.ai_only { app.move_cursor_right(); },
                                     KeyCode::Enter => if !app.ai_only { app.make_move(); },
                                     KeyCode::Char('m') => app.state = AppState::Menu,
+                                    KeyCode::PageUp => app.scroll_debug_up(),
+                                    KeyCode::PageDown => app.scroll_debug_down(),
                                     _ => {}
                                 }
                             }
                             AppState::GameOver => match key.code {
                                 KeyCode::Char('r') => app.reset(),
                                 KeyCode::Char('m') => app.state = AppState::Menu,
+                                KeyCode::PageUp => app.scroll_debug_up(),
+                                KeyCode::PageDown => app.scroll_debug_down(),
                                 _ => {}
                             },
                         }
@@ -96,8 +115,17 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                        handle_mouse_click(app, mouse.column, mouse.row, terminal.size()?);
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            handle_mouse_click(app, mouse.column, mouse.row, terminal.size()?);
+                        }
+                        MouseEventKind::ScrollUp => {
+                            handle_mouse_scroll(app, mouse.column, mouse.row, terminal.size()?, true);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            handle_mouse_scroll(app, mouse.column, mouse.row, terminal.size()?, false);
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -108,14 +136,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
 
 fn ui(f: &mut Frame, app: &mut App) {
     let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
-        .split(f.size());
-
-    let game_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(90), Constraint::Percentage(10)].as_ref())
-        .split(main_chunks[0]);
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(15), Constraint::Percentage(15)].as_ref())
+        .split(f.size());
 
     match app.state {
         AppState::Menu => {
@@ -131,112 +154,198 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .highlight_symbol("> ");
             let mut list_state = ListState::default();
             list_state.select(Some(app.index));
-            f.render_stateful_widget(list, game_chunks[0], &mut list_state);
+            f.render_stateful_widget(list, main_chunks[0], &mut list_state);
 
             let instructions =
                 Paragraph::new("Use arrow keys to navigate, Enter to select, or click with mouse. 'q' or Esc to quit.")
                     .block(Block::default().title("Instructions").borders(Borders::ALL));
-            f.render_widget(instructions, game_chunks[1]);
+            f.render_widget(instructions, main_chunks[1]);
+        }
+        AppState::Settings => {
+            let settings_items: Vec<ListItem> = app
+                .settings_titles
+                .iter()
+                .map(|t| ListItem::new(t.as_str()))
+                .collect();
+
+            let list = List::new(settings_items)
+                .block(Block::default().title("Settings").borders(Borders::ALL))
+                .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+                .highlight_symbol("> ");
+            let mut list_state = ListState::default();
+            list_state.select(Some(app.settings_index));
+            f.render_stateful_widget(list, main_chunks[0], &mut list_state);
+
+            let instructions = Paragraph::new(
+                "Use arrow keys to navigate, Left/Right to change values, Enter to select 'Back to Menu', or 'm' for menu. 'q' or Esc to quit."
+            )
+            .block(Block::default().title("Instructions").borders(Borders::ALL));
+            f.render_widget(instructions, main_chunks[1]);
         }
         AppState::Playing | AppState::GameOver => {
-            draw_board(f, app, game_chunks[0]);
-            draw_stats(f, app, main_chunks[1]);
+            draw_board(f, app, main_chunks[0]);
 
             let instructions_text = if !app.game.is_terminal() {
                 if app.ai_only {
-                    "AI vs AI mode - Press 'm' for menu, 'q' or Esc to quit.".to_string()
-                } else {
-                    "Arrow keys to move, Enter to place, or click on board. 'm' for menu, 'q' or Esc to quit.".to_string()
-                }
-            } else {
-                let winner_text = if let Some(winner) = app.winner {
-                    if winner == 1 {
-                        "Player X wins!"
+                    if app.is_ai_thinking() {
+                        "AI vs AI mode - AI is thinking... Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info.".to_string()
                     } else {
-                        "Player O wins!"
+                        "AI vs AI mode - Press 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info.".to_string()
                     }
                 } else {
-                    "It's a draw!"
+                    if app.is_ai_thinking() {
+                        "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info.".to_string()
+                    } else {
+                        "Arrow keys to move, Enter to place, or click on board. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info.".to_string()
+                    }
+                }
+            } else {
+                let (winner_text, winner_color) = if let Some(winner) = app.winner {
+                    if winner == 1 {
+                        ("Player X wins!", Color::Red)
+                    } else {
+                        ("Player O wins!", Color::Blue)
+                    }
+                } else {
+                    ("It's a draw!", Color::Yellow)
                 };
-                format!("{} Press 'r' to play again, 'm' for menu, 'q' or Esc to quit.", winner_text)
+                
+                // Create styled instruction text for game over
+                let instruction_spans = vec![
+                    Span::styled(winner_text, Style::default().fg(winner_color).add_modifier(Modifier::BOLD)),
+                    Span::raw(" Press 'r' to play again, 'm' for menu, 'q' or Esc to quit. PageUp/PageDown or scroll to navigate debug info."),
+                ];
+                
+                let instructions = Paragraph::new(Line::from(instruction_spans))
+                    .block(Block::default().title("Game Over").borders(Borders::ALL));
+                f.render_widget(instructions, main_chunks[1]);
+                
+                draw_stats(f, app, main_chunks[2]);
+                return;
             };
 
             let instructions = Paragraph::new(instructions_text)
                 .block(Block::default().title("Instructions").borders(Borders::ALL));
-            f.render_widget(instructions, game_chunks[1]);
+            f.render_widget(instructions, main_chunks[1]);
+            
+            draw_stats(f, app, main_chunks[2]);
         }
     }
 }
 
 fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
-    let (root_wins, root_visits) = app.ai.get_root_stats();
-    let root_value = if root_visits > 0 {
-        root_wins as f64 / root_visits as f64 / 2.0
+    // Early return if area is too small
+    if area.height < 3 || area.width < 10 {
+        let paragraph = Paragraph::new("Area too small")
+            .block(Block::default().title("Debug Statistics").borders(Borders::ALL));
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    // Note: AI stats temporarily disabled due to threaded AI implementation
+    if app.state == AppState::GameOver {
+        let paragraph = Paragraph::new("Game Over - Debug info not available")
+            .block(Block::default().title("Debug Statistics").borders(Borders::ALL));
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let current_player = app.game.get_current_player();
+    let (player_symbol, player_color) = if current_player == 1 {
+        ("X", Color::Red)
     } else {
-        0.0
+        ("O", Color::Blue)
     };
 
-    let mut stats_text = vec![
-        Line::from(format!("Current Player: {}", if app.game.get_current_player() == 1 { "X" } else { "O" })),
-        Line::from(format!("Root Visits: {}", root_visits)),
-        Line::from(format!("Root Wins: {}", root_wins)),
-        Line::from(format!("Root Value: {:.3}", root_value)),
-        Line::from(format!("Threads: {}", app.num_threads)),
+    let mut stats_lines = vec![
+        Line::from(vec![
+            Span::raw("Current Player: "),
+            Span::styled(player_symbol, Style::default().fg(player_color).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(format!("AI State: {:?} | Threads: {}", app.ai_state, app.num_threads)),
         Line::from(""),
     ];
 
-    // Calculate available lines for moves (subtract header lines, borders, and padding)
-    let available_height = area.height.saturating_sub(10); // Conservative estimate for headers + borders
-    let max_moves_to_show = (available_height as usize / 2).min(5); // Limit to 5 moves or available space
-    
-    if max_moves_to_show > 0 {
-        stats_text.push(Line::from(format!("Top {} moves:", max_moves_to_show)));
-        
-        let children_stats = app.ai.get_root_children_stats();
-        if !children_stats.is_empty() {
-            let mut sorted_children: Vec<_> = children_stats.into_iter().collect();
-            sorted_children.sort_by(|a, b| b.1.1.cmp(&a.1.1));
-            
-            for (mv, (wins, visits)) in sorted_children.iter().take(max_moves_to_show) {
-                let value = if *visits > 0 {
-                    *wins as f64 / *visits as f64 / 2.0
-                } else {
-                    0.0
-                };
-                // Truncate move display to prevent overflow
-                let move_str = format!("{:?}", mv);
-                let truncated_move = if move_str.len() > 10 {
-                    format!("{}...", &move_str[..7])
-                } else {
-                    move_str
-                };
-                stats_text.push(Line::from(format!(
-                    "{} -> V:{}, Q:{:.3}",
-                    truncated_move, visits, value
-                )));
-            }
-        } else {
-            stats_text.push(Line::from("No moves evaluated yet"));
-        }
+    // Show AI thinking status
+    if app.is_ai_thinking() {
+        stats_lines.push(Line::from(vec![
+            Span::styled("🤔 AI is thinking...", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]));
+    } else {
+        stats_lines.push(Line::from("AI ready"));
     }
     
-    // Add debug info only if there's space
-    if area.height > 15 {
-        stats_text.push(Line::from(""));
-        let debug_info = app.ai.get_debug_info();
-        // Truncate debug info if it's too long
-        let truncated_debug = if debug_info.len() > 80 {
-            format!("{}...", &debug_info[..77])
-        } else {
-            debug_info
-        };
-        stats_text.push(Line::from(truncated_debug));
-    }
+    stats_lines.push(Line::from(""));
+    stats_lines.push(Line::from("AI Stats temporarily unavailable in threaded mode"));
+    stats_lines.push(Line::from("(Stats will be restored in future update)"));
+    
+    // Calculate content height and scrolling bounds with strict enforcement
+    let content_height = stats_lines.len();
+    let visible_height = (area.height.saturating_sub(2) as usize).min(20); // Hard limit to prevent overflow
+    let max_scroll = content_height.saturating_sub(visible_height);
+    
+    // Constrain scroll offset to valid range and update the app if needed
+    let corrected_scroll_offset = app.debug_scroll_offset.min(max_scroll);
+    
+    // Note: We can't modify app here since we have an immutable reference,
+    // but the UI will display the corrected offset
+    let scroll_offset = corrected_scroll_offset;
 
-    let paragraph = Paragraph::new(stats_text)
-        .block(Block::default().title("Statistics").borders(Borders::ALL))
-        .wrap(Wrap { trim: true });
-    f.render_widget(paragraph, area);
+    // Create the visible portion of content - ensure we don't exceed bounds
+    // Be very strict about the number of lines we show
+    let visible_lines: Vec<Line> = if content_height > visible_height && scroll_offset < content_height {
+        let start_idx = scroll_offset;
+        stats_lines.into_iter()
+            .skip(start_idx)
+            .take(visible_height) // Hard limit on visible lines
+            .collect()
+    } else {
+        // If content fits in visible area or scroll is out of bounds, show from start
+        stats_lines.into_iter()
+            .take(visible_height) // Hard limit on visible lines
+            .collect()
+    };
+
+    // Create the paragraph with scrollable content
+    let title = if max_scroll > 0 {
+        format!("Debug Statistics (scroll: {}/{})", scroll_offset, max_scroll)
+    } else {
+        "Debug Statistics".to_string()
+    };
+    
+    // Split area for content and scrollbar with minimum space check
+    let chunks = if area.width > 5 { // Only show scrollbar if we have enough width
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area)
+    } else {
+        // Use full area if too narrow for scrollbar
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100)])
+            .split(area)
+    };
+    
+    let paragraph = Paragraph::new(visible_lines)
+        .block(Block::default().title(title).borders(Borders::ALL));
+    
+    f.render_widget(paragraph, chunks[0]);
+    
+    // Render scrollbar if content is scrollable and we have space for it
+    if max_scroll > 0 && chunks.len() > 1 && chunks[1].height > 2 {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(content_height)
+            .viewport_content_length(visible_height)
+            .position(scroll_offset);
+        
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        
+        f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
+    }
 }
 
 fn draw_board(f: &mut Frame, app: &App, area: Rect) {
@@ -265,13 +374,13 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
 
         for c in 0..board_size {
             let player = board[r][c];
-            let symbol = match player {
-                1 => "X",
-                -1 => "O",
-                _ => ".",
+            let (symbol, player_color) = match player {
+                1 => ("X", Color::Red),
+                -1 => ("O", Color::Blue),
+                _ => (".", Color::White),
             };
 
-            let mut style = Style::default();
+            let mut style = Style::default().fg(player_color);
             if (r, c) == app.cursor && !app.ai_only {
                 style = style.bg(Color::Yellow).fg(Color::Black);
             }
@@ -289,6 +398,9 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
         AppState::Menu => {
             handle_menu_click(app, col, row, terminal_size);
         }
+        AppState::Settings => {
+            handle_settings_click(app, col, row, terminal_size);
+        }
         AppState::Playing => {
             if !app.ai_only {
                 handle_board_click(app, col, row, terminal_size);
@@ -300,13 +412,12 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     }
 }
 
-fn handle_menu_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
-    // Calculate the menu area based on the layout
-    let main_chunks_width = (terminal_size.width as f32 * 0.6) as u16;
-    let game_chunks_height = (terminal_size.height as f32 * 0.9) as u16;
+fn handle_menu_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
+    // Calculate the menu area based on the new vertical layout
+    let main_area_height = (terminal_size.height as f32 * 0.7) as u16;
     
-    // Check if click is within the menu area (left 60% of screen, top 90% of that)
-    if col < main_chunks_width && row < game_chunks_height {
+    // Check if click is within the menu area (top 70% of screen)
+    if row < main_area_height {
         // Calculate which menu item was clicked
         // The menu starts at row 1 (border) and each item takes roughly 1 row
         let menu_start_row = 2; // Account for border and title
@@ -330,12 +441,11 @@ fn handle_menu_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
 fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     let board_size = app.game.get_board().len();
     
-    // Calculate the game board area based on the layout
-    let main_chunks_width = (terminal_size.width as f32 * 0.6) as u16;
-    let game_chunks_height = (terminal_size.height as f32 * 0.9) as u16;
+    // Calculate the game board area based on the new vertical layout
+    let main_area_height = (terminal_size.height as f32 * 0.7) as u16;
     
-    // Check if click is within the board area
-    if col < main_chunks_width && row < game_chunks_height {
+    // Check if click is within the board area (top 70% of screen)
+    if row < main_area_height {
         // Calculate board position
         // The board starts at position (1, 1) due to borders and each cell is about 4 characters wide and 2 high
         let board_start_col = 1;
@@ -353,6 +463,52 @@ fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
                     app.make_move();
                 }
             }
+        }
+    }
+}
+
+fn handle_settings_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
+    // Calculate the settings area based on the vertical layout
+    let main_area_height = (terminal_size.height as f32 * 0.7) as u16;
+    
+    // Check if click is within the settings area (top 70% of screen)
+    if row < main_area_height {
+        // Calculate which settings item was clicked
+        // Account for the borders and spacing
+        let settings_area_start = 1; // Top border
+        
+        if row >= settings_area_start {
+            let clicked_index = (row - settings_area_start) as usize;
+            if clicked_index < app.settings_titles.len() {
+                app.settings_index = clicked_index;
+                
+                // If clicking on "Back to Menu", switch to menu
+                if app.settings_index == app.settings_titles.len() - 1 {
+                    app.state = AppState::Menu;
+                }
+            }
+        }
+    }
+}
+
+fn handle_mouse_scroll(app: &mut App, _col: u16, row: u16, terminal_size: Rect, scroll_up: bool) {
+    // Only handle scrolling when in Playing or GameOver state
+    match app.state {
+        AppState::Playing | AppState::GameOver => {
+            // Calculate the stats area position (bottom 15% of screen)
+            let stats_area_start = (terminal_size.height as f32 * 0.85) as u16;
+            
+            // Check if the mouse is in the stats area
+            if row >= stats_area_start {
+                if scroll_up {
+                    app.scroll_debug_up();
+                } else {
+                    app.scroll_debug_down();
+                }
+            }
+        }
+        _ => {
+            // No scrolling for other states
         }
     }
 }
