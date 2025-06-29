@@ -498,7 +498,7 @@ impl<'a> App<'a> {
         });
         
         let mut app = App {
-            titles: vec!["Gomoku", "Connect4", "Othello", "Blokus"],
+            titles: vec!["Gomoku", "Connect4", "Othello", "Blokus", "Settings", "Quit"],
             index: 0,
             state: if should_start_playing { AppState::PlayerConfig } else { AppState::Menu },
             game_type,

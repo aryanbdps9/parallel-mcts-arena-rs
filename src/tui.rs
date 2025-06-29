@@ -1717,8 +1717,12 @@ fn handle_menu_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
                 if clicked_item == app.titles.len() - 1 {
                     // Quit was clicked
                     std::process::exit(0);
+                } else if clicked_item == app.titles.len() - 2 {
+                    // Settings was clicked
+                    app.state = AppState::Settings;
                 } else {
-                    app.state = AppState::Playing;
+                    // A game was clicked
+                    app.state = AppState::PlayerConfig;
                     app.set_game(app.index);
                 }
             }
