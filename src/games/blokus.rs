@@ -10,10 +10,10 @@
 //! - Pieces cannot touch edge-to-edge with the same player's pieces
 //! - Goal is to place as many pieces as possible
 
-use crate::GameState;
+use mcts::GameState;
 use std::collections::HashSet;
-use std::str::FromStr;
 use std::fmt;
+use std::str::FromStr;
 
 /// Special constant representing a pass move in Blokus
 const PASS_MOVE: BlokusMove = BlokusMove(usize::MAX, 0, 0, 0);
@@ -157,8 +157,28 @@ pub struct BlokusState {
     consecutive_passes: u8,
 }
 
+impl fmt::Display for BlokusState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for row in &self.board {
+            for &cell in row {
+                if cell == 0 {
+                    write!(f, ". ")?;
+                } else {
+                    write!(f, "{} ", cell)?;
+                }
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+
 impl GameState for BlokusState {
-    type Move = BlokusMove; // piece_idx, transformation_idx, row, col
+    type Move = BlokusMove;
+
+    fn get_num_players(&self) -> i32 {
+        4
+    }
 
     fn get_board(&self) -> &Vec<Vec<i32>> {
         &self.board

@@ -10,7 +10,8 @@
 //! - The line can be horizontal, vertical, or diagonal
 //! - Game is a draw if the board fills up with no winner
 
-use crate::GameState;
+use mcts::GameState;
+use std::fmt;
 use std::str::FromStr;
 
 /// Represents a move in Gomoku
@@ -40,15 +41,8 @@ pub struct GomokuState {
 
 impl GomokuState {
     /// Creates a new Gomoku game with the specified configuration
-    /// 
-    /// # Arguments
-    /// * `board_size` - Size of the board (NxN)
-    /// * `line_size` - Number of pieces needed in a row to win
-    /// 
-    /// # Returns
-    /// A new GomokuState ready to play
     pub fn new(board_size: usize, line_size: usize) -> Self {
-        GomokuState {
+        Self {
             board: vec![vec![0; board_size]; board_size],
             current_player: 1,
             board_size,
@@ -81,8 +75,29 @@ impl GomokuState {
     }
 }
 
+impl fmt::Display for GomokuState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for row in &self.board {
+            for &cell in row {
+                let symbol = match cell {
+                    1 => "X",
+                    -1 => "O",
+                    _ => ".",
+                };
+                write!(f, "{} ", symbol)?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+
 impl GameState for GomokuState {
     type Move = GomokuMove;
+
+    fn get_num_players(&self) -> i32 {
+        2
+    }
 
     fn get_board(&self) -> &Vec<Vec<i32>> {
         &self.board

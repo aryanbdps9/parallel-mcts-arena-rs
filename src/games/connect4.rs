@@ -10,7 +10,8 @@
 //! - First player to get 4 pieces in a row wins
 //! - Game is a draw if the board fills up with no winner
 
-use crate::GameState;
+use mcts::GameState;
+use std::fmt;
 use std::str::FromStr;
 
 /// Represents a move in Connect 4
@@ -40,8 +41,29 @@ pub struct Connect4State {
     last_move: Option<(usize, usize)>,
 }
 
+impl fmt::Display for Connect4State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for row in &self.board {
+            for &cell in row {
+                let symbol = match cell {
+                    1 => "X",
+                    -1 => "O",
+                    _ => ".",
+                };
+                write!(f, "{} ", symbol)?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+
 impl GameState for Connect4State {
     type Move = Connect4Move; // Column to drop a piece
+
+    fn get_num_players(&self) -> i32 {
+        2
+    }
 
     fn get_board(&self) -> &Vec<Vec<i32>> {
         &self.board
@@ -161,17 +183,9 @@ impl GameState for Connect4State {
 }
 
 impl Connect4State {
-    /// Creates a new Connect 4 game with specified dimensions
-    /// 
-    /// # Arguments
-    /// * `width` - Number of columns (typically 7)
-    /// * `height` - Number of rows (typically 6) 
-    /// * `line_size` - Number of pieces needed in a row to win (typically 4)
-    /// 
-    /// # Returns
-    /// A new Connect4State ready to play
+    /// Creates a new Connect 4 game with the specified configuration
     pub fn new(width: usize, height: usize, line_size: usize) -> Self {
-        Connect4State {
+        Self {
             board: vec![vec![0; width]; height],
             current_player: 1,
             width,
@@ -181,20 +195,10 @@ impl Connect4State {
         }
     }
 
-    /// Returns the number of pieces needed in a row to win
     pub fn get_line_size(&self) -> usize {
         self.line_size
     }
 
-    /// Checks if a move is legal in the current game state
-    /// 
-    /// A move is legal if the specified column exists and is not full.
-    /// 
-    /// # Arguments
-    /// * `mv` - The move to check
-    /// 
-    /// # Returns
-    /// True if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &Connect4Move) -> bool {
         mv.0 < self.width && self.board[0][mv.0] == 0
     }

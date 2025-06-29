@@ -15,18 +15,18 @@ The AI uses a massively parallel implementation of Monte Carlo Tree Search (MCTS
 ## Games You Can Play
 
 ### Gomoku
-- **Goal**: Get 5 pieces in a row to win. This line size is configurable (you can change it to 4, for example).
-- **Board**: 19×19 (can be changed).
+- **Goal**: Get 5 pieces in a row to win.
+- **Board**: 15×15.
 - **Players**: Human vs AI, or AI vs AI.
 
 ### Connect 4
-- **Goal**: Get 4 pieces in a row to win. This line size is configurable.
-- **Board**: 7×6 (configurable).
+- **Goal**: Get 4 pieces in a row to win.
+- **Board**: 7×6.
 - **Players**: Human vs AI, or AI vs AI.
 
 ### Othello
 - **Goal**: Have the most pieces on the board when the game ends.
-- **Board**: 8×8 (configurable).
+- **Board**: 8×8.
 - **Players**: Human vs AI, or AI vs AI.
 
 ### Blokus
@@ -50,7 +50,7 @@ The AI uses a massively parallel implementation of Monte Carlo Tree Search (MCTS
 - **AI Settings**: You can change how the AI works, like how long it can think.
 
 ### UI Features
-- **Resizable Window**: Drag the borders to change the size of the panels.
+- **Resizable Window**: The UI adapts to the terminal size.
 - **Live AI Info**: See real-time data from the AI.
 - **Mouse and Keyboard**: Use your mouse or keyboard to play.
 - **Debug View**: A special view to see details about the AI's search.
@@ -94,14 +94,7 @@ You can also run the program with options from the command line.
 
 | Option | Short | Default | Description |
 |---|---|---|---|
-| `--game` | `-g` | (menu) | Choose a game to play (`gomoku`, `connect4`, `othello`, `blokus`). |
-| `--board-size` | `-b` | 9 | Sets the board size (for Gomoku and Othello). |
-| `--line-size` | `-l` | 4 | Sets the number of pieces in a row to win (for Gomoku and Connect 4). |
-| `--num-threads` | `-n` | 8 | Number of CPU threads for the AI to use. |
-| `--exploration-parameter` | `-e` | 4.0 | How much the AI should explore new moves. |
-| `--iterations` | `-i` | 1,000,000 | How many simulations the AI runs for each move. |
-| `--max-nodes` | `-m` | 1,000,000 | The maximum number of nodes in the AI's search tree. |
-| `--timeout-secs` | | 60 | How many seconds the AI has to think for a move. |
-| `--stats-interval-secs` | | 20 | How often to update the stats in the UI. |
-| `--ai-only` | | (off) | Set all players to AI. |
-| `--shared-tree` | | (on) | All AI players use the same search tree. |
+| `--exploration-factor` | `-e` | 1.4 | The exploration factor for the MCTS algorithm. |
+| `--search-iterations` | `-s` | 10000 | The number of search iterations for the MCTS algorithm. |
+| `--max-nodes` | `-m` | 1000000 | The maximum number of nodes in the MCTS search tree. |
+| `--num-threads` | `-n` | (number of logical cores) | Number of CPU threads for the AI to use. |

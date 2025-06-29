@@ -61,6 +61,17 @@ impl fmt::Display for MoveWrapper {
     }
 }
 
+impl fmt::Display for GameWrapper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GameWrapper::Gomoku(g) => write!(f, "{}", g),
+            GameWrapper::Connect4(g) => write!(f, "{}", g),
+            GameWrapper::Blokus(g) => write!(f, "{}", g),
+            GameWrapper::Othello(g) => write!(f, "{}", g),
+        }
+    }
+}
+
 impl GameState for GameWrapper {
     type Move = MoveWrapper;
 
@@ -70,6 +81,15 @@ impl GameState for GameWrapper {
             GameWrapper::Connect4(g) => g.get_current_player(),
             GameWrapper::Blokus(g) => g.get_current_player(),
             GameWrapper::Othello(g) => g.get_current_player(),
+        }
+    }
+
+    fn get_num_players(&self) -> i32 {
+        match self {
+            GameWrapper::Gomoku(g) => g.get_num_players(),
+            GameWrapper::Connect4(g) => g.get_num_players(),
+            GameWrapper::Blokus(g) => g.get_num_players(),
+            GameWrapper::Othello(g) => g.get_num_players(),
         }
     }
 

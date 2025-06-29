@@ -12,7 +12,8 @@
 //! - Game ends when neither player can make a move
 //! - Winner is determined by who has more pieces on the board
 
-use crate::GameState;
+use mcts::GameState;
+use std::fmt;
 use std::str::FromStr;
 
 /// Represents a move in Othello
@@ -38,8 +39,29 @@ pub struct OthelloState {
     last_move: Option<(usize, usize)>,
 }
 
+impl fmt::Display for OthelloState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for row in &self.board {
+            for &cell in row {
+                let symbol = match cell {
+                    1 => "X",
+                    -1 => "O",
+                    _ => ".",
+                };
+                write!(f, "{} ", symbol)?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+
 impl GameState for OthelloState {
     type Move = OthelloMove;
+
+    fn get_num_players(&self) -> i32 {
+        2
+    }
 
     fn get_board(&self) -> &Vec<Vec<i32>> {
         &self.board
@@ -118,27 +140,26 @@ impl GameState for OthelloState {
 }
 
 impl OthelloState {
-    /// Creates a new Othello game with the standard starting position
-    /// 
+    /// Creates a new Othello game with the specified board size
+    ///
     /// Sets up the board with 4 pieces in the center in the traditional pattern.
     /// Black (player 1) starts first.
-    /// 
-    /// # Arguments
-    /// * `board_size` - Size of the board (NxN), typically 8
-    /// 
+    ///
     /// # Returns
     /// A new OthelloState ready to play
     pub fn new(board_size: usize) -> Self {
+        assert!(board_size > 0 && board_size % 2 == 0, "Board size must be a positive even number.");
         let mut board = vec![vec![0; board_size]; board_size];
         let center = board_size / 2;
-        board[center - 1][center - 1] = -1; // White
-        board[center - 1][center] = 1;     // Black
-        board[center][center - 1] = 1;     // Black
-        board[center][center] = -1; // White
-        OthelloState {
+        board[center - 1][center - 1] = -1;
+        board[center][center] = -1;
+        board[center - 1][center] = 1;
+        board[center][center - 1] = 1;
+
+        Self {
             board,
-            current_player: 1, // Black starts
-            board_size,
+            current_player: 1,
+            board_size: board_size,
             last_move: None,
         }
     }

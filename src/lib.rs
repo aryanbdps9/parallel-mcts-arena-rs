@@ -26,6 +26,16 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Statistics about the MCTS search
+#[derive(Debug, Clone, Default)]
+pub struct SearchStatistics {
+    pub total_nodes: i32,
+    pub root_visits: i32,
+    pub root_wins: f64,
+    pub root_value: f64,
+    pub children_stats: HashMap<String, (f64, i32)>,
+}
+
 // Thread-local storage for move generation to avoid allocations
 // Each thread maintains its own buffer for generating possible moves,
 // which reduces memory allocations during hot path execution.
@@ -105,10 +115,10 @@ pub trait GameState: Clone + Send + Sync {
     /// have coordinate-based moves, so this can return None.
     fn get_last_move(&self) -> Option<Vec<(usize, usize)>> { None }
 
-    /// Returns a vector of all possible moves from the current state.
-    /// 
-    /// This is called frequently during MCTS search, so it should be efficient.
-    /// The order of moves can affect search performance (better moves first).
+    /// Returns the number of players in the game.
+    fn get_num_players(&self) -> i32;
+
+    /// Returns a list of all possible moves for the current player.
     fn get_possible_moves(&self) -> Vec<Self::Move>;
     
     /// Applies a move to the state, modifying it.
@@ -325,7 +335,7 @@ pub struct MCTS<S: GameState> {
     pool: ThreadPool,
     /// Node pool for recycling nodes
     node_pool: NodePool<S::Move>,
-    /// Maximum number of nodes allowed in the tree
+    /// Maximum number of nodes in the tree
     max_nodes: usize,
     /// Current number of nodes in the tree (approximate)
     node_count: Arc<AtomicI32>,
@@ -539,7 +549,7 @@ impl<S: GameState> MCTS<S> {
     /// * `iterations` - The total number of simulations to run.
     /// * `stats_interval_secs` - Interval in seconds to print statistics (0 = no periodic stats).
     /// * `timeout_secs` - The maximum time in seconds to search for. 0 means no timeout.
-    pub fn search(&mut self, state: &S, iterations: i32, stats_interval_secs: u64, timeout_secs: u64) -> S::Move {
+    pub fn search(&mut self, state: &S, iterations: i32, stats_interval_secs: u64, timeout_secs: u64) -> (S::Move, SearchStatistics) {
         let start_time = Instant::now();
         let timeout = if timeout_secs > 0 { Some(Duration::from_secs(timeout_secs)) } else { None };
 
@@ -547,7 +557,7 @@ impl<S: GameState> MCTS<S> {
 
         let possible_moves = state.get_possible_moves();
         if possible_moves.len() == 1 {
-            return possible_moves[0].clone();
+            return (possible_moves[0].clone(), SearchStatistics::default());
         }
         
         if possible_moves.is_empty() {
@@ -559,7 +569,7 @@ impl<S: GameState> MCTS<S> {
             // For now, let's check the root's children. If there's one, it must be the pass move.
             let children = self.root.children.read();
             if children.len() == 1 {
-                return children.keys().next().unwrap().clone();
+                return (children.keys().next().unwrap().clone(), SearchStatistics::default());
             }
             // If there are no children and no possible moves, we are stuck.
             // This indicates a logic error in the game state implementation.
@@ -602,7 +612,7 @@ impl<S: GameState> MCTS<S> {
 
         // After all simulations, the best move is the one most visited.
         let children = self.root.children.read();
-        if children.is_empty() {
+        let best_move = if children.is_empty() {
             // Fallback: if no children exist, return a random valid move
             // This should rarely happen with the improved expansion logic
             let possible_moves = state.get_possible_moves();
@@ -616,7 +626,19 @@ impl<S: GameState> MCTS<S> {
                 .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
                 .map(|(mv, _)| mv.clone())
                 .expect("Root node has children but max_by_key failed")
-        }
+        };
+
+        let root_visits = self.root.visits.load(Ordering::Relaxed);
+        let root_wins = self.root.wins.load(Ordering::Relaxed) as f64;
+        let stats = SearchStatistics {
+            total_nodes: self.node_count.load(Ordering::Relaxed),
+            root_visits,
+            root_wins,
+            root_value: if root_visits > 0 { root_wins / root_visits as f64 / 2.0 } else { 0.0 },
+            children_stats: self.get_root_children_stats().into_iter().map(|(m, (w, v))| (format!("{:?}", m), (w, v))).collect(),
+        };
+
+        (best_move, stats)
     }
 
     /// Performs a parallel MCTS search with custom pruning interval.
@@ -626,47 +648,43 @@ impl<S: GameState> MCTS<S> {
     /// * `state` - The current state of the game.
     /// * `iterations` - The total number of simulations to run.
     /// * `prune_interval` - How often to prune the tree (0 = no pruning during search).
-    pub fn search_with_pruning(&mut self, state: &S, iterations: i32, prune_interval: i32) -> S::Move {
+    pub fn search_with_pruning(&mut self, state: &S, iterations: i32, prune_interval: i32) -> (S::Move, SearchStatistics) {
         // Ensure root node is fully expanded before starting parallel search
         self.ensure_root_expanded(state);
-        
+
+        let run_iterations = |this: &MCTS<S>, iters: i32| {
+            this.pool.install(|| {
+                (0..iters).into_par_iter().for_each(|_| {
+                    this.run_simulation(state);
+                });
+            });
+        };
+
         if prune_interval > 0 && iterations > prune_interval {
             // Split search into chunks with pruning
             let chunks = iterations / prune_interval;
             let remainder = iterations % prune_interval;
             
             for _ in 0..chunks {
-                self.pool.install(|| {
-                    (0..prune_interval).into_par_iter().for_each(|_| {
-                        self.run_simulation(state);
-                    });
-                });
-                // Prune after each chunk - remove children with < 3% of max visits
-                self.prune_children_by_percentage(0.03);
+                run_iterations(self, prune_interval);
+                // Prune after each chunk
+                self.auto_prune();
             }
             
             // Run remaining iterations
             if remainder > 0 {
-                self.pool.install(|| {
-                    (0..remainder).into_par_iter().for_each(|_| {
-                        self.run_simulation(state);
-                    });
-                });
+                run_iterations(self, remainder);
             }
         } else {
             // Run all iterations at once
-            self.pool.install(|| {
-                (0..iterations).into_par_iter().for_each(|_| {
-                    self.run_simulation(state);
-                });
-            });
+            run_iterations(self, iterations);
         }
 
         // Don't do final pruning here - let it be done explicitly after statistics are displayed
 
         // Return the best move
         let children = self.root.children.read();
-        if children.is_empty() {
+        let best_move = if children.is_empty() {
             // Fallback: if no children exist, return a random valid move
             // This should rarely happen with the improved expansion logic
             let possible_moves = state.get_possible_moves();
@@ -680,7 +698,19 @@ impl<S: GameState> MCTS<S> {
                 .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
                 .map(|(mv, _)| mv.clone())
                 .expect("Root node has children but max_by_key failed")
-        }
+        };
+
+        let root_visits = self.root.visits.load(Ordering::Relaxed);
+        let root_wins = self.root.wins.load(Ordering::Relaxed) as f64;
+        let stats = SearchStatistics {
+            total_nodes: self.node_count.load(Ordering::Relaxed),
+            root_visits,
+            root_wins,
+            root_value: if root_visits > 0 { root_wins / root_visits as f64 / 2.0 } else { 0.0 },
+            children_stats: self.get_root_children_stats().into_iter().map(|(m, (w, v))| (format!("{:?}", m), (w, v))).collect(),
+        };
+
+        (best_move, stats)
     }
 
     /// Runs a single MCTS simulation with virtual loss support.
