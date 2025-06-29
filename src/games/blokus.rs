@@ -30,12 +30,16 @@ impl Piece {
 
         Piece {
             id,
-            transformations: unique_transformations.into_iter().collect(),
+            transformations: {
+                let mut sorted_transformations: Vec<Vec<(i32, i32)>> = unique_transformations.into_iter().collect();
+                sorted_transformations.sort();
+                sorted_transformations
+            },
         }
     }
 }
 
-fn get_blokus_pieces() -> Vec<Piece> {
+pub fn get_blokus_pieces() -> Vec<Piece> {
     vec![
         Piece::new(0, &[(0, 0)]), // 1
         Piece::new(1, &[(0, 0), (0, 1)]), // 2
@@ -337,6 +341,26 @@ impl BlokusState {
         }
 
         corner_touch
+    }
+
+    pub fn get_available_pieces(&self, player: i32) -> Vec<usize> {
+        let player_idx = (player - 1) as usize;
+        if player_idx < self.player_pieces.len() {
+            self.player_pieces[player_idx].iter().map(|p| p.id).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn get_player_pieces(&self, player: i32) -> &Vec<Piece> {
+        let player_idx = (player - 1) as usize;
+        if player_idx < self.player_pieces.len() {
+            &self.player_pieces[player_idx]
+        } else {
+            // Return reference to a static empty vector
+            static EMPTY_PIECES: Vec<Piece> = Vec::new();
+            &EMPTY_PIECES
+        }
     }
 }
 

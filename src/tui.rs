@@ -43,8 +43,8 @@ pub fn run_tui(app: &mut App) -> io::Result<()> {
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
     let mut last_key_event = Instant::now();
-    let debounce_duration = Duration::from_millis(100); // 100ms debounce
-
+    let mut last_movement_key_event = Instant::now();
+    
     loop {
         // Check for terminal size changes
         let terminal_size = terminal.size()?;
@@ -55,7 +55,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
         terminal.draw(|f| ui(f, app))?;
         app.tick();
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
                     // Always check for 'q' to quit, regardless of state and debounce
@@ -68,7 +68,18 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                         return Ok(());
                     }
                     
-                    if last_key_event.elapsed() > debounce_duration {
+                    // Apply aggressive debouncing for movement keys to prevent double-moves
+                    let is_movement_key = matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right);
+                    let movement_debounce = Duration::from_millis(200); // 200ms for movement keys
+                    let general_debounce = Duration::from_millis(50);   // 50ms for other keys
+                    
+                    let should_process = if is_movement_key {
+                        last_movement_key_event.elapsed() > movement_debounce
+                    } else {
+                        last_key_event.elapsed() > general_debounce
+                    };
+                    
+                    if should_process {
                         match app.state {
                             AppState::Menu => match key.code {
                                 KeyCode::Down => app.next(),
@@ -104,19 +115,82 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                         if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
                                             app.scroll_move_history_down();
                                         } else if !app.ai_only && app.game_type != "connect4" {
-                                            app.move_cursor_down();
+                                            if app.game_type == "blokus" {
+                                                app.blokus_move_preview(1, 0);
+                                            } else {
+                                                app.move_cursor_down();
+                                            }
                                         }
                                     },
                                     KeyCode::Up => {
                                         if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
                                             app.scroll_move_history_up();
                                         } else if !app.ai_only && app.game_type != "connect4" {
-                                            app.move_cursor_up();
+                                            if app.game_type == "blokus" {
+                                                app.blokus_move_preview(-1, 0);
+                                            } else {
+                                                app.move_cursor_up();
+                                            }
                                         }
                                     },
-                                    KeyCode::Left => if !app.ai_only { app.move_cursor_left(); },
-                                    KeyCode::Right => if !app.ai_only { app.move_cursor_right(); },
-                                    KeyCode::Enter => if !app.ai_only { app.submit_move(); },
+                                    KeyCode::Left => {
+                                        if !app.ai_only {
+                                            if app.game_type == "blokus" {
+                                                app.blokus_move_preview(0, -1);
+                                            } else {
+                                                app.move_cursor_left();
+                                            }
+                                        }
+                                    },
+                                    KeyCode::Right => {
+                                        if !app.ai_only {
+                                            if app.game_type == "blokus" {
+                                                app.blokus_move_preview(0, 1);
+                                            } else {
+                                                app.move_cursor_right();
+                                            }
+                                        }
+                                    },
+                                    KeyCode::Enter => {
+                                        if !app.ai_only {
+                                            if app.game_type == "blokus" {
+                                                app.blokus_place_piece();
+                                            } else {
+                                                app.submit_move();
+                                            }
+                                        }
+                                    },
+                                    KeyCode::Char('r') => {
+                                        if app.game_type == "blokus" {
+                                            app.blokus_rotate_piece();
+                                        }
+                                    },
+                                    KeyCode::Char('f') => {
+                                        if app.game_type == "blokus" {
+                                            app.blokus_flip_piece();
+                                        }
+                                    },
+                                    KeyCode::Tab => {
+                                        if app.game_type == "blokus" {
+                                            app.blokus_cycle_pieces(true);
+                                        }
+                                    },
+                                    KeyCode::BackTab => {
+                                        if app.game_type == "blokus" {
+                                            app.blokus_cycle_pieces(false);
+                                        }
+                                    },
+                                    // Number keys for piece selection
+                                    KeyCode::Char('1') => if app.game_type == "blokus" { app.blokus_select_piece(0); },
+                                    KeyCode::Char('2') => if app.game_type == "blokus" { app.blokus_select_piece(1); },
+                                    KeyCode::Char('3') => if app.game_type == "blokus" { app.blokus_select_piece(2); },
+                                    KeyCode::Char('4') => if app.game_type == "blokus" { app.blokus_select_piece(3); },
+                                    KeyCode::Char('5') => if app.game_type == "blokus" { app.blokus_select_piece(4); },
+                                    KeyCode::Char('6') => if app.game_type == "blokus" { app.blokus_select_piece(5); },
+                                    KeyCode::Char('7') => if app.game_type == "blokus" { app.blokus_select_piece(6); },
+                                    KeyCode::Char('8') => if app.game_type == "blokus" { app.blokus_select_piece(7); },
+                                    KeyCode::Char('9') => if app.game_type == "blokus" { app.blokus_select_piece(8); },
+                                    KeyCode::Char('0') => if app.game_type == "blokus" { app.blokus_select_piece(9); },
                                     KeyCode::Char('m') => app.state = AppState::Menu,
                                     KeyCode::PageUp => app.scroll_debug_up(),
                                     KeyCode::PageDown => app.scroll_debug_down(),
@@ -140,6 +214,10 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                 },
                                 _ => {}
                             },
+                        }
+                        // Update timing variables based on key type
+                        if is_movement_key {
+                            last_movement_key_event = Instant::now();
                         }
                         last_key_event = Instant::now();
                     }
@@ -222,7 +300,11 @@ fn ui(f: &mut Frame, app: &mut App) {
             f.render_widget(instructions, main_chunks[1]);
         }
         AppState::Playing | AppState::GameOver => {
-            draw_board(f, app, main_chunks[0]);
+            if app.game_type == "blokus" {
+                draw_blokus_ui(f, app, main_chunks[0]);
+            } else {
+                draw_board(f, app, main_chunks[0]);
+            }
 
             let instructions_text = if !app.game.is_terminal() {
                 if app.ai_only {
@@ -235,12 +317,16 @@ fn ui(f: &mut Frame, app: &mut App) {
                     if app.is_ai_thinking() {
                         if app.game_type == "connect4" {
                             "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
+                        } else if app.game_type == "blokus" {
+                            "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
                         } else {
                             "AI is thinking... Please wait. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
                         }
                     } else {
                         if app.game_type == "connect4" {
                             "Left/Right arrows to select column, Enter to drop piece, or click column numbers. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
+                        } else if app.game_type == "blokus" {
+                            "Arrow keys to move ghost piece, 1-9,0 to select pieces, R to rotate, F to flip, Tab/Shift+Tab to cycle pieces, Enter to place. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
                         } else {
                             "Arrow keys to move, Enter to place, or click on board. 'm' for menu, 'q' or Esc to quit. PageUp/PageDown to scroll debug info, Shift+Up/Down to scroll move history. Drag boundaries to resize panes.".to_string()
                         }
@@ -900,6 +986,313 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(paragraph, row_area[start_idx + c]);
         }
     }
+}
+
+fn draw_blokus_ui(f: &mut Frame, app: &App, area: Rect) {
+    // Create a 3-column layout for Blokus: piece selection | game board | piece preview
+    let horizontal_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(25),      // Piece selection panel
+            Constraint::Min(40),         // Game board (expandable)
+            Constraint::Length(20),      // Piece preview panel
+        ])
+        .split(area);
+
+    // Draw piece selection panel
+    draw_blokus_piece_selection(f, app, horizontal_chunks[0]);
+    
+    // Draw game board with ghost piece overlay
+    draw_blokus_board(f, app, horizontal_chunks[1]);
+    
+    // Draw piece preview panel
+    draw_blokus_piece_preview(f, app, horizontal_chunks[2]);
+}
+
+fn draw_blokus_piece_selection(f: &mut Frame, app: &App, area: Rect) {
+    use crate::games::blokus::get_blokus_pieces;
+    use crate::game_wrapper::GameWrapper;
+    
+    let block = Block::default().title("Available Pieces").borders(Borders::ALL);
+    f.render_widget(block, area);
+    
+    let inner_area = Layout::default()
+        .margin(1)
+        .constraints([Constraint::Min(0)])
+        .split(area)[0];
+    
+    if let GameWrapper::Blokus(blokus_state) = &app.game {
+        let current_player = app.game.get_current_player();
+        let pieces = get_blokus_pieces();
+        let available_pieces = blokus_state.get_available_pieces(current_player);
+        
+        let mut piece_items = Vec::new();
+        
+        for (display_idx, piece_idx) in available_pieces.iter().enumerate() {
+            let piece = &pieces[*piece_idx];
+            let is_selected = app.blokus_selected_piece_idx == Some(*piece_idx);
+            
+            // Create a simple representation of the piece
+            let piece_shape = if !piece.transformations.is_empty() {
+                &piece.transformations[0] // Use first transformation for display
+            } else {
+                continue;
+            };
+            
+            // Convert piece shape to visual representation
+            let piece_visual = format_piece_shape(piece_shape);
+            
+            let key_number = if display_idx < 9 { (display_idx + 1).to_string() } else if display_idx == 9 { "0".to_string() } else { "".to_string() };
+            
+            let piece_text = if is_selected {
+                format!("[{}] {}", key_number, piece_visual)
+            } else {
+                format!(" {} {}", key_number, piece_visual)
+            };
+            
+            let style = if is_selected {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            
+            piece_items.push(ListItem::new(piece_text).style(style));
+        }
+        
+        let list = List::new(piece_items)
+            .style(Style::default().fg(Color::White));
+        f.render_widget(list, inner_area);
+    }
+}
+
+fn draw_blokus_board(f: &mut Frame, app: &App, area: Rect) {
+    use crate::games::blokus::get_blokus_pieces;
+    use crate::game_wrapper::GameWrapper;
+    
+    // Draw the regular board first
+    draw_board(f, app, area);
+    
+    // Then overlay the ghost piece if we have a selected piece and preview is enabled
+    if app.blokus_show_piece_preview {
+        if let (Some(piece_idx), GameWrapper::Blokus(_)) = (app.blokus_selected_piece_idx, &app.game) {
+            let pieces = get_blokus_pieces();
+            if let Some(piece) = pieces.get(piece_idx) {
+                if let Some(transformation) = piece.transformations.get(app.blokus_selected_transformation) {
+                    draw_blokus_ghost_piece(f, app, area, transformation);
+                }
+            }
+        }
+    }
+}
+
+fn draw_blokus_ghost_piece(f: &mut Frame, app: &App, area: Rect, piece_shape: &[(i32, i32)]) {
+    let board = app.game.get_board();
+    let board_height = board.len();
+    let board_width = if board_height > 0 { board[0].len() } else { 0 };
+    
+    // Calculate the same layout parameters as draw_board
+    let show_row_labels = true;
+    let _show_col_labels = true;
+    let row_label_width = 3;
+    let col_label_height = 1;
+    
+    let board_with_labels_area = Layout::default()
+        .margin(1)
+        .constraints(vec![Constraint::Length(col_label_height), Constraint::Min(0)])
+        .split(area);
+    
+    let content_area = board_with_labels_area[1];
+    
+    // Calculate column and row dimensions (same as draw_board)
+    let max_board_width = (f.size().width * 2 / 3).max(20);
+    let col_width = if board_width > 0 {
+        let calculated_width = (max_board_width / board_width as u16).max(1);
+        match board_width {
+            1..=10 => calculated_width.min(5),
+            11..=15 => calculated_width.min(4),
+            16..=25 => calculated_width.min(3),
+            _ => calculated_width.min(2).max(1)
+        }
+    } else {
+        4
+    };
+    
+    let max_board_height = (f.size().height / 2).max(8);
+    let row_height = if board_height > 0 {
+        let calculated_height = (max_board_height / board_height as u16).max(1);
+        match board_height {
+            1..=8 => calculated_height.min(3),
+            9..=15 => calculated_height.min(2),
+            16..=25 => calculated_height.min(1),
+            _ => 1
+        }
+    } else {
+        2
+    };
+    
+    let board_area = Layout::default()
+        .constraints(vec![Constraint::Length(row_height); board_height])
+        .split(content_area);
+    
+    // Get the current player color for the ghost piece
+    let current_player = app.game.get_current_player();
+    let ghost_color = match current_player {
+        1 => Color::Red,
+        2 => Color::Blue,
+        3 => Color::Green,
+        4 => Color::Yellow,
+        _ => Color::White,
+    };
+    
+    // Draw ghost piece at preview position
+    let (preview_row, preview_col) = app.blokus_piece_preview_pos;
+    for &(dr, dc) in piece_shape {
+        let r = preview_row as i32 + dr;
+        let c = preview_col as i32 + dc;
+        
+        if r >= 0 && r < board_height as i32 && c >= 0 && c < board_width as i32 {
+            let r = r as usize;
+            let c = c as usize;
+            
+            // Only draw ghost piece on empty squares
+            if board[r][c] == 0 {
+                let row_constraints = {
+                    let mut constraints = vec![];
+                    if show_row_labels {
+                        constraints.push(Constraint::Length(row_label_width));
+                    }
+                    for _ in 0..board_width {
+                        constraints.push(Constraint::Length(col_width));
+                    }
+                    constraints
+                };
+                
+                let row_area = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints(row_constraints)
+                    .split(board_area[r]);
+                
+                let start_idx = if show_row_labels { 1 } else { 0 };
+                let cell_area = row_area[start_idx + c];
+                
+                // Draw the ghost piece symbol
+                let ghost_symbol = "▢"; // Hollow square for ghost piece
+                let paragraph = Paragraph::new(ghost_symbol)
+                    .style(Style::default().fg(ghost_color).add_modifier(Modifier::BOLD))
+                    .alignment(Alignment::Center);
+                f.render_widget(paragraph, cell_area);
+            }
+        }
+    }
+}
+
+fn draw_blokus_piece_preview(f: &mut Frame, app: &App, area: Rect) {
+    use crate::games::blokus::get_blokus_pieces;
+    
+    let block = Block::default().title("Piece Preview").borders(Borders::ALL);
+    f.render_widget(block, area);
+    
+    let inner_area = Layout::default()
+        .margin(1)
+        .constraints([Constraint::Min(0)])
+        .split(area)[0];
+    
+    if let Some(piece_idx) = app.blokus_selected_piece_idx {
+        let pieces = get_blokus_pieces();
+        if let Some(piece) = pieces.get(piece_idx) {
+            if let Some(transformation) = piece.transformations.get(app.blokus_selected_transformation) {
+                // Create a visual representation of the current piece transformation
+                let piece_visual = create_piece_preview(transformation);
+                
+                // Show piece information
+                let mut lines = vec![
+                    Line::from(format!("Piece ID: {}", piece.id)),
+                    Line::from(format!("Orientation: {}/{}", app.blokus_selected_transformation + 1, piece.transformations.len())),
+                    Line::from(""),
+                ];
+                
+                // Add the visual representation
+                for line in piece_visual {
+                    lines.push(Line::from(line));
+                }
+                
+                lines.push(Line::from(""));
+                lines.push(Line::from("R: Rotate"));
+                lines.push(Line::from("F: Flip"));
+                lines.push(Line::from("Tab: Next piece"));
+                
+                let paragraph = Paragraph::new(lines)
+                    .style(Style::default().fg(Color::White));
+                f.render_widget(paragraph, inner_area);
+            }
+        }
+    } else {
+        let lines = vec![
+            Line::from("No piece selected"),
+            Line::from(""),
+            Line::from("Press 1-9,0 to"),
+            Line::from("select a piece"),
+        ];
+        
+        let paragraph = Paragraph::new(lines)
+            .style(Style::default().fg(Color::Gray));
+        f.render_widget(paragraph, inner_area);
+    }
+}
+
+fn format_piece_shape(shape: &[(i32, i32)]) -> String {
+    if shape.is_empty() {
+        return "∘".to_string();
+    }
+    
+    // For small pieces, create a compact visual representation
+    let min_r = shape.iter().map(|p| p.0).min().unwrap_or(0);
+    let max_r = shape.iter().map(|p| p.0).max().unwrap_or(0);
+    let min_c = shape.iter().map(|p| p.1).min().unwrap_or(0);
+    let max_c = shape.iter().map(|p| p.1).max().unwrap_or(0);
+    
+    let height = (max_r - min_r + 1) as usize;
+    let width = (max_c - min_c + 1) as usize;
+    
+    // For very small shapes, use simple symbols
+    if shape.len() == 1 {
+        return "■".to_string();
+    } else if shape.len() <= 4 && width <= 2 && height <= 2 {
+        // Use compact representation for small pieces
+        match shape.len() {
+            2 => "■■".to_string(),
+            3 => "■■■".to_string(),
+            4 => "■■■■".to_string(),
+            _ => format!("{}×{}", width, height),
+        }
+    } else {
+        // For larger pieces, show dimensions
+        format!("{}×{}", width, height)
+    }
+}
+
+fn create_piece_preview(shape: &[(i32, i32)]) -> Vec<String> {
+    if shape.is_empty() {
+        return vec!["∘".to_string()];
+    }
+    
+    let min_r = shape.iter().map(|p| p.0).min().unwrap_or(0);
+    let max_r = shape.iter().map(|p| p.0).max().unwrap_or(0);
+    let min_c = shape.iter().map(|p| p.1).min().unwrap_or(0);
+    let max_c = shape.iter().map(|p| p.1).max().unwrap_or(0);
+    
+    let height = (max_r - min_r + 1) as usize;
+    let width = (max_c - min_c + 1) as usize;
+    
+    let mut grid = vec![vec![' '; width]; height];
+    
+    for &(r, c) in shape {
+        let row = (r - min_r) as usize;
+        let col = (c - min_c) as usize;
+        grid[row][col] = '■';
+    }
+    
+    grid.into_iter().map(|row| row.into_iter().collect()).collect()
 }
 
 fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
