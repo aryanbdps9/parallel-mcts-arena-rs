@@ -872,15 +872,15 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
     let max_board_height = (f.size().height / 2).max(8); // Don't take more than half screen, minimum 8
     
     let row_height = if board_height > 0 {
-        // Calculate optimal height per row
+        // For standard board sizes, use consistent height to avoid gaps between rows
         let calculated_height = (max_board_height / board_height as u16).max(1);
         
-        // Use different height based on board size for optimal display
+        // Use consistent height based on available space and board size
         match board_height {
-            1..=8 => calculated_height.min(3),    // Small boards: up to 3 rows per cell
-            9..=15 => calculated_height.min(2),   // Medium boards: up to 2 rows per cell  
-            16..=25 => calculated_height.min(1),  // Large boards: 1 row per cell
-            _ => 1                                // Very large boards: always 1 row per cell
+            1..=4 => calculated_height.min(4),    // Very small boards: allow larger cells
+            5..=9 => 2.min(calculated_height),    // Standard boards like 9x9 Gomoku: use 2 if space allows, else 1
+            10..=15 => 1,                         // Medium boards: always 1 row per cell
+            _ => 1                                // Large boards: always 1 row per cell
         }
     } else {
         2
@@ -1118,12 +1118,11 @@ fn draw_blokus_ghost_piece(f: &mut Frame, app: &App, area: Rect, piece_shape: &[
     };
     
     let max_board_height = (f.size().height / 2).max(8);
-    let row_height = if board_height > 0 {
+    let _row_height = if board_height > 0 {
         let calculated_height = (max_board_height / board_height as u16).max(1);
         match board_height {
-            1..=8 => calculated_height.min(3),
-            9..=15 => calculated_height.min(2),
-            16..=25 => calculated_height.min(1),
+            1..=4 => calculated_height.min(3),
+            5..=8 => calculated_height.min(2),
             _ => 1
         }
     } else {
@@ -1131,7 +1130,7 @@ fn draw_blokus_ghost_piece(f: &mut Frame, app: &App, area: Rect, piece_shape: &[
     };
     
     let board_area = Layout::default()
-        .constraints(vec![Constraint::Length(row_height); board_height])
+        .constraints(vec![Constraint::Length(_row_height); board_height])
         .split(content_area);
     
     // Get the current player color for the ghost piece
