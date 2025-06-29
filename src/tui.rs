@@ -192,6 +192,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                     KeyCode::Char('8') => if app.game_type == "blokus" { app.blokus_select_piece(7); },
                                     KeyCode::Char('9') => if app.game_type == "blokus" { app.blokus_select_piece(8); },
                                     KeyCode::Char('0') => if app.game_type == "blokus" { app.blokus_select_piece(9); },
+                                    // Letter keys for pieces 11-36 (a-z)
+                                    KeyCode::Char(c) if c >= 'a' && c <= 'z' && app.game_type == "blokus" => {
+                                        let piece_idx = (c as u8 - b'a') as usize + 10;
+                                        app.blokus_select_piece(piece_idx);
+                                    },
                                     KeyCode::Char('m') => app.state = AppState::Menu,
                                     KeyCode::PageUp => app.scroll_debug_up(),
                                     KeyCode::PageDown => app.scroll_debug_down(),
@@ -930,8 +935,8 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
                 }
             };
             
-            // Highlight the selected column for Connect4
-            let style = if app.game_type == "connect4" && c == app.cursor.1 && !app.ai_only {
+            // Highlight the selected column for Connect4 when it's a human's turn
+            let style = if app.game_type == "connect4" && c == app.cursor.1 && !app.is_current_player_ai() {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
             } else {
                 Style::default().fg(Color::Gray)
@@ -944,23 +949,8 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
         }
     }
     
-    // Calculate row height based on board size and available space to keep board compact
-    let max_board_height = (f.size().height / 2).max(8); // Don't take more than half screen, minimum 8
-    
-    let row_height = if board_height > 0 {
-        // For standard board sizes, use consistent height to avoid gaps between rows
-        let calculated_height = (max_board_height / board_height as u16).max(1);
-        
-        // Use consistent height based on available space and board size
-        match board_height {
-            1..=4 => calculated_height.min(4),    // Very small boards: allow larger cells
-            5..=9 => 2.min(calculated_height),    // Standard boards like 9x9 Gomoku: use 2 if space allows, else 1
-            10..=15 => 1,                         // Medium boards: always 1 row per cell
-            _ => 1                                // Large boards: always 1 row per cell
-        }
-    } else {
-        2
-    };
+    // Use consistent row height of 1 to avoid gaps between consecutive rows
+    let row_height = 1;
     
     // Create row layout with dynamic height
     let board_area = Layout::default()
@@ -1051,12 +1041,70 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
                 style = style.bg(Color::Cyan);
             }
 
-            // Highlight cursor position
-            if (r, c) == app.cursor && !app.ai_only {
-                style = style.bg(Color::Yellow).fg(Color::Black);
+            // Show cursor (ghost icon) only when it's a human's turn to play
+            let show_cursor = (r, c) == app.cursor && !app.is_current_player_ai();
+            let cursor_symbol = if show_cursor {
+                // Check if the current cursor position represents a valid move
+                let is_valid_move = match &app.game {
+                    GameWrapper::Gomoku(_) => {
+                        let move_wrapper = MoveWrapper::Gomoku(crate::games::gomoku::GomokuMove(r, c));
+                        app.game.is_legal(&move_wrapper)
+                    },
+                    GameWrapper::Connect4(_) => {
+                        let move_wrapper = MoveWrapper::Connect4(crate::games::connect4::Connect4Move(c));
+                        app.game.is_legal(&move_wrapper)
+                    },
+                    GameWrapper::Othello(_) => {
+                        let move_wrapper = MoveWrapper::Othello(crate::games::othello::OthelloMove(r, c));
+                        app.game.is_legal(&move_wrapper)
+                    },
+                    GameWrapper::Blokus(_) => {
+                        // For Blokus, we'll check if there's a valid piece placement at this position
+                        // This is more complex, so for now we'll just show the cursor
+                        true
+                    },
+                };
+                
+                if is_valid_move {
+                    "👻" // Ghost icon for valid moves
+                } else {
+                    "👻" // Gray ghost for invalid moves (style will be grayed out)
+                }
+            } else {
+                symbol // Use the normal symbol
+            };
+
+            // Apply grayed out style for invalid moves when showing cursor
+            if show_cursor {
+                // Check if the current cursor position represents a valid move
+                let is_valid_move = match &app.game {
+                    GameWrapper::Gomoku(_) => {
+                        let move_wrapper = MoveWrapper::Gomoku(crate::games::gomoku::GomokuMove(r, c));
+                        app.game.is_legal(&move_wrapper)
+                    },
+                    GameWrapper::Connect4(_) => {
+                        let move_wrapper = MoveWrapper::Connect4(crate::games::connect4::Connect4Move(c));
+                        app.game.is_legal(&move_wrapper)
+                    },
+                    GameWrapper::Othello(_) => {
+                        let move_wrapper = MoveWrapper::Othello(crate::games::othello::OthelloMove(r, c));
+                        app.game.is_legal(&move_wrapper)
+                    },
+                    GameWrapper::Blokus(_) => {
+                        // For Blokus, we'll check if there's a valid piece placement at this position
+                        // This is more complex, so for now we'll just show the cursor as valid
+                        true
+                    },
+                };
+                
+                if is_valid_move {
+                    style = Style::default().fg(Color::White); // White ghost for valid moves
+                } else {
+                    style = Style::default().fg(Color::DarkGray); // Gray ghost for invalid moves
+                }
             }
 
-            let paragraph = Paragraph::new(symbol)
+            let paragraph = Paragraph::new(cursor_symbol)
                 .style(style)
                 .alignment(Alignment::Center);
             f.render_widget(paragraph, row_area[start_idx + c]);
@@ -1118,8 +1166,17 @@ fn draw_blokus_piece_selection(f: &mut Frame, app: &App, area: Rect) {
             // Convert piece shape to visual representation
             let piece_visual = format_piece_shape(piece_shape);
             
-            let key_number = if display_idx < 9 { (display_idx + 1).to_string() } else if display_idx == 9 { "0".to_string() } else { "".to_string() };
-            
+            let key_number = if display_idx < 9 { 
+                (display_idx + 1).to_string() 
+            } else if display_idx == 9 { 
+                "0".to_string() 
+            } else if display_idx < 36 { 
+                // Use letters a-z for pieces 11-36
+                ((b'a' + (display_idx - 10) as u8) as char).to_string()
+            } else { 
+                "".to_string() 
+            };
+
             let piece_text = if is_selected {
                 format!("[{}] {}", key_number, piece_visual)
             } else {
@@ -1148,8 +1205,8 @@ fn draw_blokus_board(f: &mut Frame, app: &App, area: Rect) {
     // Draw the regular board first
     draw_board(f, app, area);
     
-    // Then overlay the ghost piece if we have a selected piece and preview is enabled
-    if app.blokus_show_piece_preview {
+    // Then overlay the ghost piece if we have a selected piece and preview is enabled, and it's a human's turn
+    if app.blokus_show_piece_preview && !app.is_current_player_ai() {
         if let (Some(piece_idx), GameWrapper::Blokus(_)) = (app.blokus_selected_piece_idx, &app.game) {
             let pieces = get_blokus_pieces();
             if let Some(piece) = pieces.get(piece_idx) {
@@ -1193,20 +1250,11 @@ fn draw_blokus_ghost_piece(f: &mut Frame, app: &App, area: Rect, piece_shape: &[
         4
     };
     
-    let max_board_height = (f.size().height / 2).max(8);
-    let _row_height = if board_height > 0 {
-        let calculated_height = (max_board_height / board_height as u16).max(1);
-        match board_height {
-            1..=4 => calculated_height.min(3),
-            5..=8 => calculated_height.min(2),
-            _ => 1
-        }
-    } else {
-        2
-    };
+    // Use consistent row height of 1 to avoid gaps between consecutive rows
+    let row_height = 1;
     
     let board_area = Layout::default()
-        .constraints(vec![Constraint::Length(_row_height); board_height])
+        .constraints(vec![Constraint::Length(row_height); board_height])
         .split(content_area);
     
     // Get the current player color for the ghost piece
@@ -1295,6 +1343,7 @@ fn draw_blokus_piece_preview(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from("R: Rotate"));
                 lines.push(Line::from("F: Flip"));
                 lines.push(Line::from("Tab: Next piece"));
+                lines.push(Line::from("Shift+Tab: Prev piece"));
                 
                 let paragraph = Paragraph::new(lines)
                     .style(Style::default().fg(Color::White));
@@ -1305,8 +1354,9 @@ fn draw_blokus_piece_preview(f: &mut Frame, app: &App, area: Rect) {
         let lines = vec![
             Line::from("No piece selected"),
             Line::from(""),
-            Line::from("Press 1-9,0 to"),
+            Line::from("Press 1-9,0,a-z to"),
             Line::from("select a piece"),
+            Line::from("Tab: Cycle pieces"),
         ];
         
         let paragraph = Paragraph::new(lines)
