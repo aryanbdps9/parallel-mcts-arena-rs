@@ -168,6 +168,8 @@ pub enum DragBoundary {
     BoardInstructions,  // Boundary between board and instructions panes
     InstructionsStats,  // Boundary between instructions and stats panes
     StatsHistory,       // Boundary between debug stats and move history panes
+    BlokusPieceSelectionLeft,   // Left wall of Blokus piece selection panel
+    BlokusPieceSelectionRight,  // Right wall of Blokus piece selection panel
 }
 
 pub struct App<'a> {
@@ -232,8 +234,11 @@ pub struct App<'a> {
     pub blokus_selected_transformation: usize,       // Current transformation/orientation
     pub blokus_piece_preview_pos: (usize, usize),   // Preview position on board
     pub blokus_show_piece_preview: bool,             // Whether to show piece preview on board
-    pub blokus_piece_selection_scroll: usize,        // Scroll offset for piece selection panel
+    pub blokus_piece_selection_scroll: usize,        // Scroll offset for piece selection panel (per-player)
+    pub blokus_panel_scroll_offset: usize,           // Scroll offset for entire Available Pieces panel
+    pub blokus_piece_selection_width: u16,           // Width of the piece selection panel (for drag resizing)
     pub blokus_last_rotation_time: Option<std::time::Instant>, // Track last rotation to prevent rapid changes
+    pub blokus_players_expanded: Vec<bool>,          // Track which players' piece sections are expanded
 
     // Player type configuration for current game
     pub player_types: Vec<PlayerType>, // length = number of players for current game
@@ -331,7 +336,10 @@ impl<'a> App<'a> {
             blokus_piece_preview_pos: (0, 0),
             blokus_show_piece_preview: false,
             blokus_piece_selection_scroll: 0,
+            blokus_panel_scroll_offset: 0,
+            blokus_piece_selection_width: 40, // Default width
             blokus_last_rotation_time: None,
+            blokus_players_expanded: vec![true; 4], // Start with all players expanded
             // Player type configuration for current game
             player_types: vec![PlayerType::Human; 2], // Will be set properly below
             player_config_index: 0,
@@ -419,6 +427,7 @@ impl<'a> App<'a> {
         self.blokus_piece_preview_pos = (0, 0);
         self.blokus_show_piece_preview = false;
         self.blokus_piece_selection_scroll = 0;
+        self.blokus_panel_scroll_offset = 0;
         self.blokus_last_rotation_time = None;
         
         // Initialize layout based on the new game's requirements
@@ -675,6 +684,7 @@ impl<'a> App<'a> {
         self.blokus_piece_preview_pos = (0, 0);
         self.blokus_show_piece_preview = false;
         self.blokus_piece_selection_scroll = 0;
+        self.blokus_panel_scroll_offset = 0;
         self.blokus_last_rotation_time = None;
         
         // Reset player config
@@ -1066,20 +1076,41 @@ impl<'a> App<'a> {
                 // This case should be handled by a separate method for horizontal dragging
                 // For now, do nothing as this will be handled by handle_horizontal_drag
             }
+            DragBoundary::BlokusPieceSelectionLeft | DragBoundary::BlokusPieceSelectionRight => {
+                // Horizontal dragging for Blokus piece selection panel resizing
+                // This will be handled by handle_horizontal_drag method
+            }
         }
     }
 
     pub fn handle_horizontal_drag(&mut self, col: u16, terminal_width: u16) {
         if let Some(boundary) = self.drag_boundary {
-            if boundary == DragBoundary::StatsHistory {
-                let col_percent = (col as f32 / terminal_width as f32 * 100.0) as u16;
-                
-                // Allow stats to be 20% to 80% of the width
-                let min_stats_width = 20u16;
-                let max_stats_width = 80u16;
-                
-                let new_stats_width = col_percent.clamp(min_stats_width, max_stats_width);
-                self.stats_width_percent = new_stats_width;
+            match boundary {
+                DragBoundary::StatsHistory => {
+                    let col_percent = (col as f32 / terminal_width as f32 * 100.0) as u16;
+                    
+                    // Allow stats to be 20% to 80% of the width
+                    let min_stats_width = 20u16;
+                    let max_stats_width = 80u16;
+                    
+                    let new_stats_width = col_percent.clamp(min_stats_width, max_stats_width);
+                    self.stats_width_percent = new_stats_width;
+                }
+                DragBoundary::BlokusPieceSelectionLeft => {
+                    // Dragging left wall - decrease width as we drag right
+                    let min_width = 25u16;
+                    let max_width = 60u16;
+                    let new_width = (terminal_width - col).clamp(min_width, max_width);
+                    self.blokus_piece_selection_width = new_width;
+                }
+                DragBoundary::BlokusPieceSelectionRight => {
+                    // Dragging right wall - increase width as we drag right
+                    let min_width = 25u16;
+                    let max_width = 60u16;
+                    let new_width = col.clamp(min_width, max_width);
+                    self.blokus_piece_selection_width = new_width;
+                }
+                _ => {}
             }
         }
     }
@@ -1188,9 +1219,10 @@ impl<'a> App<'a> {
                 return; // Invalid player
             }
             
-            let _player_idx = (current_player - 1) as usize;
-            // Get available pieces for current player (simplified check)
-            if piece_idx < 21 {
+            let player_idx = (current_player - 1) as usize;
+            // Get available pieces for current player and check if piece is available
+            let available_pieces = blokus_state.get_available_pieces(current_player);
+            if piece_idx < 21 && available_pieces.contains(&piece_idx) {
                 // Check if this is actually a different piece or if no piece is selected
                 let is_different_piece = self.blokus_selected_piece_idx != Some(piece_idx);
                 let no_piece_selected = self.blokus_selected_piece_idx.is_none();
@@ -1275,8 +1307,8 @@ impl<'a> App<'a> {
             let blokus_move = crate::games::blokus::BlokusMove(
                 piece_idx,
                 self.get_blokus_transformation("blokus_place_piece"),
-                self.blokus_piece_preview_pos.0,
-                self.blokus_piece_preview_pos.1,
+                self.cursor.0,  // Use cursor position instead of preview pos
+                self.cursor.1,  // Use cursor position instead of preview pos
             );
             
             if blokus_state.is_legal(&blokus_move) {
@@ -1337,46 +1369,66 @@ impl<'a> App<'a> {
         }
     }
 
-    // Debug helper to track all transformation changes
-    fn set_blokus_transformation(&mut self, new_value: usize, source: &str) {
-        let old_value = self.blokus_selected_transformation;
-        if old_value != new_value {
-            log_debug(&format!("TRANSFORMATION CHANGE: {} -> {} (source: {})", old_value, new_value, source));
-            self.blokus_selected_transformation = new_value;
-        } else {
-            log_debug(&format!("TRANSFORMATION NO-CHANGE: {} (source: {})", old_value, source));
+    /// Expand all player sections in Blokus piece selection
+    pub fn blokus_expand_all_players(&mut self) {
+        for expanded in &mut self.blokus_players_expanded {
+            *expanded = true;
         }
     }
 
-    // Debug helper to track all transformation reads (only log for important operations)
-    pub fn get_blokus_transformation(&self, _source: &str) -> usize {
-        // Disable all rendering-related debug logs for performance
-        self.blokus_selected_transformation
-    }
-
-    /// Call this when a new game is selected to set up the player_types vector
-    pub fn set_player_count(&mut self, count: usize) {
-        self.player_types = vec![PlayerType::Human; count];
-        self.player_config_index = 0;
-    }
-
-    /// Call this when switching games to reset player config
-    pub fn reset_player_config(&mut self) {
-        let n = self.get_player_count();
-        self.set_player_count(n);
-    }
-
-    /// Toggle the player type (Human/AI) for the selected player
-    pub fn toggle_player_type(&mut self, idx: usize) {
-        if let Some(pt) = self.player_types.get_mut(idx) {
-            *pt = match *pt {
-                PlayerType::Human => PlayerType::AI,
-                PlayerType::AI => PlayerType::Human,
-            };
+    /// Collapse all player sections in Blokus piece selection
+    pub fn blokus_collapse_all_players(&mut self) {
+        for expanded in &mut self.blokus_players_expanded {
+            *expanded = false;
         }
     }
 
-    /// Get the number of players for the current game
+    /// Toggle expand/collapse for the current player's section
+    pub fn blokus_toggle_current_player_expand(&mut self) {
+        let current_player = self.game.get_current_player();
+        let player_idx = ((current_player - 1).max(0) as usize).min(3);
+        self.blokus_toggle_player_expand(player_idx);
+    }
+
+    /// Toggle expand/collapse for a specific player's section (for mouse clicks)
+    pub fn blokus_toggle_player_expand(&mut self, player_idx: usize) {
+        if let Some(expanded) = self.blokus_players_expanded.get_mut(player_idx) {
+            *expanded = !*expanded;
+        }
+    }
+
+    // Blokus piece selection scroll methods
+    pub fn blokus_scroll_pieces_up(&mut self) {
+        self.blokus_piece_selection_scroll = self.blokus_piece_selection_scroll.saturating_sub(1);
+    }
+
+    pub fn blokus_scroll_pieces_down(&mut self) {
+        if self.blokus_piece_selection_scroll < 50 { // Safety limit
+            self.blokus_piece_selection_scroll += 1;
+        }
+    }
+
+    pub fn reset_blokus_piece_scroll(&mut self) {
+        self.blokus_piece_selection_scroll = 0;
+        self.blokus_panel_scroll_offset = 0;
+    }
+
+    // Blokus full panel scrolling methods
+    pub fn blokus_scroll_panel_up(&mut self) {
+        self.blokus_panel_scroll_offset = self.blokus_panel_scroll_offset.saturating_sub(1);
+    }
+
+    pub fn blokus_scroll_panel_down(&mut self) {
+        if self.blokus_panel_scroll_offset < 200 { // Safety limit
+            self.blokus_panel_scroll_offset += 1;
+        }
+    }
+
+    pub fn reset_blokus_panel_scroll(&mut self) {
+        self.blokus_panel_scroll_offset = 0;
+    }
+
+    // Missing methods that are referenced in the code
     pub fn get_player_count(&self) -> usize {
         match &self.game {
             GameWrapper::Blokus(_) => 4,
@@ -1386,15 +1438,13 @@ impl<'a> App<'a> {
         }
     }
 
-    /// Check if the current player should be controlled by AI
     pub fn is_current_player_ai(&self) -> bool {
         let current_player = self.game.get_current_player();
         let player_idx = self.get_player_index_from_id(current_player);
         self.player_types.get(player_idx).map_or(false, |pt| *pt == PlayerType::AI)
     }
 
-    /// Convert game player ID to player index (0-based)
-    fn get_player_index_from_id(&self, player_id: i32) -> usize {
+    pub fn get_player_index_from_id(&self, player_id: i32) -> usize {
         match &self.game {
             GameWrapper::Blokus(_) => {
                 // Blokus players are 1-4, convert to 0-3
@@ -1407,9 +1457,41 @@ impl<'a> App<'a> {
         }
     }
 
-    /// Check if all players are AI (for AI-only mode)
     pub fn is_ai_only_mode(&self) -> bool {
         self.player_types.iter().all(|pt| *pt == PlayerType::AI)
+    }
+
+    pub fn toggle_player_type(&mut self, idx: usize) {
+        if let Some(pt) = self.player_types.get_mut(idx) {
+            *pt = match *pt {
+                PlayerType::Human => PlayerType::AI,
+                PlayerType::AI => PlayerType::Human,
+            };
+        }
+    }
+
+    pub fn reset_player_config(&mut self) {
+        let n = self.get_player_count();
+        self.set_player_count(n);
+    }
+
+    pub fn set_player_count(&mut self, count: usize) {
+        self.player_types = vec![PlayerType::Human; count];
+        self.player_config_index = 0;
+    }
+
+    pub fn set_blokus_transformation(&mut self, new_value: usize, source: &str) {
+        let old_value = self.blokus_selected_transformation;
+        if old_value != new_value {
+            log_debug(&format!("TRANSFORMATION CHANGE: {} -> {} (source: {})", old_value, new_value, source));
+            self.blokus_selected_transformation = new_value;
+        } else {
+            log_debug(&format!("TRANSFORMATION NO-CHANGE: {} (source: {})", old_value, source));
+        }
+    }
+
+    pub fn get_blokus_transformation(&self, _source: &str) -> usize {
+        self.blokus_selected_transformation
     }
 }
 
