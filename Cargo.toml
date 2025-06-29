@@ -1,29 +1,43 @@
+# Multi-game MCTS Engine Project Configuration
+
 [package]
-name = "parallel-gomoku-rs"
+name = "parallel-mcts-arena"
 version = "0.1.0"
 edition = "2021"
 
+# Runtime Dependencies
 [dependencies]
+# Random number generation for MCTS simulations
 rand = "0.8.5"
+# Command line argument parsing
 clap = { version = "4.5.40", features = ["derive"] }
+# Parallel processing for multi-threaded MCTS
 rayon = "1.10.0"
+# High-performance thread synchronization
 parking_lot = "0.12.3"
+# Terminal text coloring (used for debug output)
 colored = "2.1.0"
+# High-quality random number generator
 rand_xoshiro = "0.6"
+# Terminal UI framework with crossterm support
 ratatui = { version = "0.26.0", features = ["crossterm"] }
+# Cross-platform terminal manipulation
 crossterm = "0.27.0"
 
+# Library configuration
 [lib]
 name = "mcts"
 path = "src/lib.rs"
 
+# Binary configuration
 [[bin]]
-name = "gomoku"
+name = "play"
 path = "src/main.rs"
 
+# Release build optimizations for best AI performance
 [profile.release]
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true
+lto = "fat"           # Link-time optimization for smaller, faster binary
+codegen-units = 1     # Single codegen unit for maximum optimization
+panic = "abort"       # Abort on panic instead of unwinding (smaller binary)
+strip = true          # Remove debug symbols from binary
 

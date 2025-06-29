@@ -1,3 +1,22 @@
+//! # Parallel Monte Carlo Tree Search (MCTS) Library
+//!
+//! This library provides a generic, parallel implementation of Monte Carlo Tree Search
+//! that can be used with any game that implements the `GameState` trait.
+//!
+//! ## Key Features
+//! - **Parallel Search**: Uses Rayon for multi-threaded tree search
+//! - **Thread Safety**: RwLock-based concurrent access to the search tree
+//! - **Virtual Losses**: Prevents multiple threads from exploring the same paths
+//! - **Memory Management**: Node recycling and automatic tree pruning
+//! - **PUCT Selection**: Enhanced UCB1 formula with prior probabilities
+//!
+//! use mcts::{MCTS, GameState};
+//! 
+//! // Your game must implement GameState
+//! let mut mcts = MCTS::new(game_state, 1.4, 8, 1000000);
+//! let best_move = mcts.search_for_best_move(100000);
+//! ```
+
 use rand::Rng;
 use std::collections::HashMap;
 use rayon::prelude::*;
@@ -8,17 +27,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // Thread-local storage for move generation to avoid allocations
+// Each thread maintains its own buffer for generating possible moves,
+// which reduces memory allocations during hot path execution.
 thread_local! {
     static MOVE_BUFFER: std::cell::RefCell<Vec<(usize, usize)>> = std::cell::RefCell::new(Vec::new());
 }
 
 /// A pool for recycling nodes to reduce memory allocations
+/// 
+/// Instead of constantly allocating and deallocating nodes, we maintain
+/// a pool of reusable nodes to improve performance and reduce GC pressure.
 struct NodePool<M: Clone + Eq + std::hash::Hash> {
     /// Pool of available nodes that can be reused
     available_nodes: Arc<Mutex<Vec<Arc<Node<M>>>>>,
 }
 
 impl<M: Clone + Eq + std::hash::Hash> NodePool<M> {
+    /// Creates a new empty node pool
     fn new() -> Self {
         Self {
             available_nodes: Arc::new(Mutex::new(Vec::with_capacity(1000000))),
@@ -26,6 +51,12 @@ impl<M: Clone + Eq + std::hash::Hash> NodePool<M> {
     }
 
     /// Return multiple nodes to the pool in batch
+    /// 
+    /// More efficient than returning nodes one at a time.
+    /// Nodes are reset to their initial state before being returned to the pool.
+    ///
+    /// # Arguments
+    /// * `nodes` - Vector of nodes to return to the pool
     fn return_nodes(&self, nodes: Vec<Arc<Node<M>>>) {
         let mut pool = self.available_nodes.lock();
         for node in nodes {
@@ -44,47 +75,116 @@ impl<M: Clone + Eq + std::hash::Hash> NodePool<M> {
 
 /// The state of the game. Must be cloneable to be used in the MCTS.
 /// `Send` and `Sync` are required for parallel processing.
+/// 
+/// This trait defines the interface that any game must implement to work
+/// with the MCTS engine. The engine will call these methods to:
+/// - Generate possible moves
+/// - Apply moves to create new states
+/// - Check if the game is over
+/// - Determine the winner
+/// 
+/// ## Thread Safety
+/// All methods must be thread-safe since the MCTS engine runs in parallel.
+/// The game state should be immutable during search (only copied, not modified).
 pub trait GameState: Clone + Send + Sync {
     /// The type of a move in the game.
+    /// 
+    /// Must be cloneable, comparable, hashable, debuggable, and thread-safe.
+    /// Used as keys in hash maps and for move generation.
     type Move: Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync;
 
     /// Returns the board state.
+    /// 
+    /// Used for visualization and analysis. Should return a 2D vector
+    /// where each cell contains a player ID (e.g., 1, -1, 0 for empty).
     fn get_board(&self) -> &Vec<Vec<i32>>;
 
     /// Returns the last move made as a set of coordinates, if applicable.
+    /// 
+    /// Used for UI highlighting and game analysis. Some games may not
+    /// have coordinate-based moves, so this can return None.
     fn get_last_move(&self) -> Option<Vec<(usize, usize)>> { None }
 
     /// Returns a vector of all possible moves from the current state.
+    /// 
+    /// This is called frequently during MCTS search, so it should be efficient.
+    /// The order of moves can affect search performance (better moves first).
     fn get_possible_moves(&self) -> Vec<Self::Move>;
+    
     /// Applies a move to the state, modifying it.
+    /// 
+    /// This should update the game state and switch to the next player.
+    /// The move is guaranteed to be legal (from get_possible_moves).
     fn make_move(&mut self, mv: &Self::Move);
+    
     /// Returns true if the game is over.
+    /// 
+    /// Called to determine when to stop simulations. Should check for
+    /// wins, draws, or any other terminal conditions.
     fn is_terminal(&self) -> bool;
+    
     /// Returns the winner of the game, if any.
     /// Should return `Some(player_id)` if a player has won, `None` for a draw or if the game is not over.
+    /// 
+    /// Used to determine the reward during backpropagation. The reward
+    /// is calculated from the perspective of each player in the path.
     fn get_winner(&self) -> Option<i32>;
+    
     /// Returns the player whose turn it is to move.
+    /// 
+    /// Used to determine perspective during reward calculation and
+    /// for UI display of current player.
     fn get_current_player(&self) -> i32;
 }
 
 /// A node in the Monte Carlo Search Tree.
 /// It is wrapped in an `Arc` to allow for shared ownership across threads.
+/// 
+/// Each node represents a game state and stores statistics about the outcomes
+/// of all simulations that have passed through this node. The tree is built
+/// incrementally as the search progresses.
+/// 
+/// ## Thread Safety
+/// All fields use atomic operations or locks to ensure thread-safe access
+/// during parallel search. Multiple threads can read and update the same
+/// node simultaneously.
 struct Node<M: Clone + Eq + std::hash::Hash> {
     /// A map from a move to the child node.
+    /// 
+    /// Protected by RwLock for concurrent access. Multiple threads can read
+    /// simultaneously, but only one can write (when expanding the tree).
     children: RwLock<HashMap<M, Arc<Node<M>>>>,
+    
     /// The number of times this node has been visited. Atomic for lock-free updates.
+    /// 
+    /// Incremented each time a simulation passes through this node.
+    /// Used in the PUCT formula for move selection.
     visits: AtomicI32,
+    
     /// Sum of rewards from the parent's perspective, stored as an integer.
     /// 2 for a win, 1 for a draw, 0 for a loss. Uses atomic operations for lock-free updates.
+    /// 
+    /// The reward is always from the perspective of the player who made the move
+    /// leading to this node. This makes backpropagation easier.
     wins: AtomicI32,
+    
     /// Virtual losses applied to this node. Used to reduce thread contention in parallel search.
+    /// 
+    /// When a thread selects a path, it applies a virtual loss to discourage
+    /// other threads from following the same path. The virtual loss is removed
+    /// after the simulation completes.
     virtual_losses: AtomicI32,
+    
     /// Depth of this node in the tree (0 for root)
+    /// 
+    /// Used for tree analysis and debugging. Not used in the search algorithm itself.
     depth: u32,
 }
 
 impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     /// Creates a new, empty node.
+    /// 
+    /// All statistics are initialized to zero. The node has no children initially.
     fn new() -> Self {
         Node {
             children: RwLock::new(HashMap::new()),
@@ -96,6 +196,10 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     }
 
     /// Resets the node to its initial state for reuse
+    /// 
+    /// Clears all statistics and children so the node can be reused
+    /// for a different position. This is part of the memory management
+    /// system to reduce allocations.
     fn reset(&mut self) {
         *self.children.write() = HashMap::new();
         self.visits.store(0, Ordering::Relaxed);
@@ -105,6 +209,13 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     }
 
     /// Collects all descendant nodes for batch recycling
+    /// 
+    /// Recursively traverses the subtree and collects all nodes
+    /// into a vector. Used when pruning parts of the tree or
+    /// when the tree is being destroyed.
+    /// 
+    /// # Returns
+    /// Vector of all nodes in the subtree rooted at this node
     fn collect_subtree_nodes(&self) -> Vec<Arc<Node<M>>> {
         let mut nodes = Vec::new();
         let mut stack = Vec::new();
@@ -129,6 +240,16 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
 
     /// Prunes weak children to save memory
     /// Keeps only children with visit count >= threshold
+    /// 
+    /// Removes children that haven't been visited enough times.
+    /// This helps control memory usage in long-running searches.
+    /// The pruned nodes are returned so they can be recycled.
+    /// 
+    /// # Arguments
+    /// * `min_visits` - Minimum number of visits required to keep a child
+    /// 
+    /// # Returns
+    /// Vector of pruned nodes that can be recycled
     fn prune_weak_children(&self, min_visits: i32) -> Vec<Arc<Node<M>>> {
         let mut children = self.children.write();
         let mut pruned_nodes = Vec::new();
@@ -149,6 +270,10 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     }
 
     /// Applies virtual loss to this node.
+    /// 
+    /// Virtual losses are used to coordinate between threads in parallel search.
+    /// When a thread selects a path for exploration, it applies a virtual loss
+    /// to discourage other threads from selecting the same path.
     fn apply_virtual_loss(&self) {
         self.virtual_losses.fetch_add(1, Ordering::Relaxed);
     }
@@ -204,6 +329,7 @@ pub struct MCTS<S: GameState> {
     max_nodes: usize,
     /// Current number of nodes in the tree (approximate)
     node_count: Arc<AtomicI32>,
+
 }
 
 impl<S: GameState> MCTS<S> {
@@ -349,7 +475,7 @@ impl<S: GameState> MCTS<S> {
             "MCTS Debug Info:".to_string(),
             format!("Root: {} visits, {} wins, {:.3} rate", 
                    root_visits, root_wins, 
-                   if root_visits > 0 { root_wins as f64 / root_visits as f64 / 2.0 } else { 0.0 }),
+                   if root_visits > 0 { root_wins as f64 / root_visits as f64 / 2.0 } else { 0.0 } ),
             format!("Tree: {} nodes ({} children, max {})", 
                    node_count, children_count, self.max_nodes),
             format!("Exploration: {:.3}, Threads: {}", 

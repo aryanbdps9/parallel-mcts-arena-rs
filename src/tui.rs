@@ -1,3 +1,23 @@
+//! # Terminal User Interface Module
+//!
+//! This module provides the interactive terminal interface for the multi-game engine.
+//! It uses Ratatui for rendering and Crossterm for input handling, creating a rich
+//! terminal experience with mouse support, resizable panels, and real-time updates.
+//!
+//! ## Key Features
+//! - **Multi-game UI**: Adaptive interface for all game types
+//! - **Mouse Support**: Click to move, drag to resize panels
+//! - **Keyboard Navigation**: Full keyboard support for all operations
+//! - **Real-time Updates**: Live AI statistics and game state updates
+//! - **Responsive Layout**: Automatically adjusts to terminal size
+//! - **Scrollable Panels**: History and debug info with scroll support
+//!
+//! ## UI Layout
+//! The interface is divided into three main areas:
+//! 1. **Game Board**: Interactive game board with cursor and move highlighting
+//! 2. **Instructions**: Game controls and current player information
+//! 3. **Statistics & History**: Split between AI debug info and move history
+
 use crate::{App, AppState, DragBoundary, PlayerType};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
 

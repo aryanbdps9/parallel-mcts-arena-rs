@@ -1,3 +1,22 @@
+//! # Parallel Multi-Game MCTS Engine
+//!
+//! This is the main entry point for a multi-game engine that supports Gomoku, Connect 4, 
+//! Othello, and Blokus. The engine uses a parallel Monte Carlo Tree Search (MCTS) algorithm
+//! for AI gameplay.
+//!
+//! The application provides a terminal user interface (TUI) built with Ratatui for interactive
+//! gameplay between humans and AI opponents.
+//!
+//! ## Features
+//! - Multiple game support with unified AI engine
+//! - Parallel MCTS with configurable parameters
+//! - Interactive terminal UI with mouse support
+//! - Real-time AI analysis and statistics
+//! - Move history tracking
+//!
+//! ## Usage
+//! Run with `cargo run --release` for best performance.
+
 pub mod tui;
 
 pub mod games;
@@ -15,16 +34,48 @@ use ratatui::layout::Constraint;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::SystemTime;
 
-// Move history tracking
+/// Represents a single move in the game's move history
+/// 
+/// Tracks when a move was made, which player made it, and what the move was.
+/// Used for game replay and analysis.
 #[derive(Debug, Clone)]
 pub struct MoveHistoryEntry {
+    /// When this move was made
     pub timestamp: SystemTime,
+    /// The sequential move number in the game (starting from 1)
     pub move_number: u32,
+    /// Which player made this move (1, -1, or for Blokus: 1, 2, 3, 4)
     pub player: i32,
+    /// The actual move data
     pub move_data: MoveWrapper,
 }
 
 impl MoveHistoryEntry {
+    /// Creates a new move history entry with current timestamp
+    ///
+    /// This function creates a new entry for the game's move history, automatically
+    /// setting the timestamp to the current system time. Each entry tracks when
+    /// a move was made, which player made it, and what the move was.
+    ///
+    /// # Arguments
+    /// * `move_number` - Sequential number of this move in the game (starting from 1)
+    /// * `player` - Which player made the move (1, -1, or for Blokus: 1, 2, 3, 4)
+    /// * `move_data` - The actual move that was made (wrapped in MoveWrapper enum)
+    ///
+    /// # Returns
+    /// A new `MoveHistoryEntry` with the current timestamp
+    ///
+    /// # Examples
+    /// ```
+    /// use crate::{MoveHistoryEntry, MoveWrapper};
+    /// use crate::games::gomoku::GomokuMove;
+    /// 
+    /// let entry = MoveHistoryEntry::new(
+    ///     1, 
+    ///     1, 
+    ///     MoveWrapper::Gomoku(GomokuMove(3, 4))
+    /// );
+    /// ```
     pub fn new(move_number: u32, player: i32, move_data: MoveWrapper) -> Self {
         Self {
             timestamp: SystemTime::now(),
@@ -36,53 +87,86 @@ impl MoveHistoryEntry {
 }
 
 // Centralized move processing
+/// Messages sent to the game processing thread
+/// 
+/// Used for coordinating move processing between the UI and game logic.
 pub enum GameRequest {
+    /// Make a move in the current game
     MakeMove(MoveWrapper),
 }
 
-// AI Worker Communication
+/// Messages sent to AI worker threads
+/// 
+/// Controls AI behavior and requests information from the AI engine.
 #[derive(Debug)]
 pub enum AIRequest {
+    /// Start a new AI search with the given request ID
     Search {
+        request_id: u64,
         game_state: GameWrapper,
         timeout_secs: u64,
-        request_id: u64,
     },
+    /// Update AI settings during gameplay
     UpdateSettings {
+        stats_interval_secs: u64,
         exploration_parameter: f64,
         num_threads: usize,
         max_nodes: usize,
         iterations: i32,
-        stats_interval_secs: u64,
     },
+    /// Tell AI about the last move made (to advance the search tree root)
     AdvanceRoot { last_move: MoveWrapper },
+    /// Request statistics about the current board position
     GetGridStats { board_size: usize },
+    /// Request debug information from the AI
     GetDebugInfo,
+    /// Stop the AI worker thread
     Stop,
 }
 
+/// Messages received from AI worker threads
+/// 
+/// Provides AI moves, status updates, and analysis information.
 #[derive(Debug)]
 pub enum AIResponse {
+    /// AI has completed a search and found a move
     MoveReady(MoveWrapper, u64), // move, request_id
+    /// AI is still thinking (sent periodically during long searches)
     Thinking(u64), // request_id
+    /// Statistics about the current position
     GridStats {
+        root_value: f64,
         visits_grid: Vec<Vec<i32>>,
         values_grid: Vec<Vec<f64>>,
         wins_grid: Vec<Vec<f64>>,
-        root_value: f64,
     },
+    /// Debug information from the AI engine
     DebugInfo(String),
+    /// An error occurred in the AI
     Error(String),
 }
 
+/// The AI worker that runs in a separate thread
+/// 
+/// Handles MCTS search requests and manages the search tree.
 pub struct AIWorker {
+    /// The MCTS engine
     ai: MCTS<GameWrapper>,
+    /// Number of iterations to run per search
     iterations: i32,
+    /// How often to send statistics updates (in seconds)
     stats_interval_secs: u64,
+    /// Current request ID being processed
     current_request_id: u64,
 }
 
 impl AIWorker {
+    /// Creates a new AI worker with the specified parameters
+    ///
+    /// # Arguments
+    /// * `exploration_parameter` - MCTS exploration parameter (C_puct)
+    /// * `num_threads` - Number of threads to use for parallel search
+    /// * `max_nodes` - Maximum number of nodes in the search tree
     pub fn new(exploration_parameter: f64, num_threads: usize, max_nodes: usize) -> Self {
         Self {
             ai: MCTS::new(exploration_parameter, num_threads, max_nodes),
@@ -92,6 +176,14 @@ impl AIWorker {
         }
     }
 
+    /// Main loop for the AI worker thread
+    ///
+    /// Processes AI requests and sends responses back to the main thread.
+    /// Runs until it receives a Stop request.
+    ///
+    /// # Arguments
+    /// * `rx` - Channel to receive requests from main thread
+    /// * `tx` - Channel to send responses back to main thread
     pub fn run(mut self, rx: std::sync::mpsc::Receiver<AIRequest>, tx: std::sync::mpsc::Sender<AIResponse>) {
         while let Ok(request) = rx.recv() {
             match request {
@@ -139,111 +231,242 @@ impl AIWorker {
     }
 }
 
+/// Current state of the AI engine
 #[derive(Debug, PartialEq)]
 pub enum AIState {
+    /// AI is not currently searching
     Idle,
+    /// AI is currently thinking about a move
     Thinking,
+    /// AI has found a move and is ready to play it
     Ready,
 }
 
+/// Type of player (human or AI)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerType {
+    /// Human player (makes moves via UI)
     Human,
+    /// AI player (moves chosen by MCTS)
     AI,
 }
 
+/// Current state of the application
+/// 
+/// Controls which screen/menu is currently displayed to the user.
+/// The application transitions between these states based on user input.
 #[derive(PartialEq)]
 pub enum AppState {
+    /// Main menu for selecting games
     Menu,
-    PlayerConfig, // New: second-level menu for player type selection
-    Settings,
+    /// Configuration screen for setting up players (Human vs AI)
+    PlayerConfig,
+    /// Active gameplay screen with board and controls
     Playing,
+    /// Settings screen for adjusting game parameters and AI behavior
+    Settings,
+    /// Game over screen showing final results
     GameOver,
 }
 
+/// Boundaries that can be dragged to resize UI panes
+/// 
+/// The TUI allows users to resize different sections by dragging borders.
+/// This enum identifies which border is being dragged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DragBoundary {
-    BoardInstructions,  // Boundary between board and instructions panes
-    InstructionsStats,  // Boundary between instructions and stats panes
-    StatsHistory,       // Boundary between debug stats and move history panes
-    BlokusPieceSelectionLeft,   // Left wall of Blokus piece selection panel
-    BlokusPieceSelectionRight,  // Right wall of Blokus piece selection panel
+    /// Boundary between board and statistics panel
+    BoardStats,
+    /// Boundary between board and move history panel  
+    BoardHistory,
+    /// Boundary between statistics and move history panels
+    StatsHistory,
+    /// Boundary between board and instructions panel
+    BoardInstructions,
+    /// Boundary between instructions and statistics panel
+    InstructionsStats,
+    /// Boundary for Blokus piece selection left side
+    BlokusPieceSelectionLeft,
+    /// Boundary for Blokus piece selection right side
+    BlokusPieceSelectionRight,
 }
 
+/// Main application state and UI controller
+/// 
+/// Contains all the state needed for the game UI, AI coordination, and game management.
+/// This is the central hub that coordinates between the UI, game logic, and AI threads.
+/// 
+/// The App struct manages:
+/// - Current game state and game type
+/// - UI state (menus, cursor position, layout)
+/// - AI worker thread communication
+/// - Player configuration
+/// - Move history and statistics
+/// - Game-specific UI elements (like Blokus piece selection)
+/// 
+/// # Lifetime
+/// The lifetime parameter `'a` is used for potential future extensions that might
+/// require borrowing data with specific lifetimes.
 pub struct App<'a> {
+    // Menu and navigation state
+    /// Menu titles for main menu navigation
     pub titles: Vec<&'a str>,
+    /// Currently selected menu index
     pub index: usize,
+    /// Current application state (menu, playing, settings, etc.)
     pub state: AppState,
+    
+    // Game state
+    /// Current game type as a string ("gomoku", "connect4", etc.)
     pub game_type: String,
+    /// The actual game state wrapper containing the current game
     pub game: GameWrapper,
+    /// Current cursor position on the game board (row, col)
     pub cursor: (usize, usize),
+    /// Winner of the current game, if any
     pub winner: Option<i32>,
+    
+    // AI coordination
+    /// Current state of the AI (idle, thinking, ready)
     pub ai_state: AIState,
+    /// Channel to send requests to AI worker thread
     pub ai_tx: Sender<AIRequest>,
+    /// Channel to receive responses from AI worker thread
     pub ai_rx: Receiver<AIResponse>,
+    /// Channel to send game moves for processing
     pub game_tx: Sender<GameRequest>,
+    /// Channel to receive processed game moves
     pub game_rx: Receiver<GameRequest>,
-    pub pending_ai_move: Option<MoveWrapper>,
-    pub ai_only: bool,
-    pub shared_tree: bool,
+    
+    // AI configuration
+    /// Number of MCTS iterations per AI move
     pub iterations: i32,
+    /// Number of threads for parallel MCTS search
     pub num_threads: usize,
+    /// How often to update statistics during AI thinking (in seconds)
     pub stats_interval_secs: u64,
+    /// Maximum time AI can think per move (in seconds)
     pub timeout_secs: u64,
+    /// Whether this is an AI vs AI only game
+    pub ai_only: bool,
+    /// Whether to share the search tree between moves
+    pub shared_tree: bool,
+    /// Move that AI is ready to play
+    pub pending_ai_move: Option<MoveWrapper>,
+    /// Scroll offset for debug information display
     pub debug_scroll_offset: usize,
-    // Settings for game configuration
+    
+    // Game configuration settings
+    /// Currently selected index in settings menu
     pub settings_index: usize,
+    /// List of setting names for display
     pub settings_titles: Vec<String>,
+    /// Gomoku board size (NxN)
     pub gomoku_board_size: usize,
+    /// Gomoku win condition (N pieces in a row)
     pub gomoku_line_size: usize,
+    /// Connect4 board width
     pub connect4_width: usize,
+    /// Connect4 board height
     pub connect4_height: usize,
+    /// Connect4 win condition (N pieces in a row)
     pub connect4_line_size: usize,
+    /// Othello board size (NxN)
     pub othello_board_size: usize,
+    /// MCTS exploration parameter (C_puct)
     pub exploration_parameter: f64,
+    /// Maximum nodes in MCTS search tree
     pub max_nodes: usize,
-    // Responsive layout fields
+    
+    // UI layout and interaction
+    /// Height percentage for board area
     pub board_height_percent: u16,
+    /// Height percentage for instructions area
     pub instructions_height_percent: u16,
+    /// Height percentage for statistics area
     pub stats_height_percent: u16,
-    pub stats_width_percent: u16,      // Width of debug stats vs move history
+    /// Width percentage for statistics vs move history split
+    pub stats_width_percent: u16,
+    /// Whether user is currently dragging a UI boundary
     pub is_dragging: bool,
+    /// Which boundary is being dragged, if any
     pub drag_boundary: Option<DragBoundary>,
+    /// Last known terminal size for layout calculations
     pub last_terminal_size: (u16, u16),
-    // MCTS statistics for display
+    
+    // MCTS analysis data for display
+    /// Grid showing MCTS visit counts per position
     pub mcts_visits_grid: Option<Vec<Vec<i32>>>,
+    /// Grid showing MCTS value estimates per position
     pub mcts_values_grid: Option<Vec<Vec<f64>>>,
+    /// Grid showing MCTS win rates per position
     pub mcts_wins_grid: Option<Vec<Vec<f64>>>,
+    /// MCTS evaluation of current root position
     pub mcts_root_value: Option<f64>,
+    /// Debug information from MCTS engine
     pub mcts_debug_info: Option<String>,
+    /// When AI started thinking (for elapsed time display)
     pub ai_thinking_start_time: Option<std::time::Instant>,
+    /// Counter for statistics requests
     pub stats_request_counter: u32,
+    /// When last statistics request was sent
     pub last_stats_request_time: Option<std::time::Instant>,
+    /// Next request ID to send to AI
     pub next_request_id: u64,
+    /// Current active AI request ID
     pub current_request_id: u64,
-    // Move history tracking
+    
+    // Move history and tracking
+    /// Complete history of all moves made in the game
     pub move_history: Vec<MoveHistoryEntry>,
+    /// Counter for move numbering
     pub move_counter: u32,
+    /// Scroll offset for move history display
     pub move_history_scroll_offset: usize,
-    pub moves_in_current_round: usize, // Track how many moves made in current round
+    /// Number of moves made in current turn/round
+    pub moves_in_current_round: usize,
     
     // Blokus-specific UI state
-    pub blokus_selected_piece_idx: Option<usize>,    // Currently selected piece index
-    pub blokus_selected_transformation: usize,       // Current transformation/orientation
-    pub blokus_piece_preview_pos: (usize, usize),   // Preview position on board
-    pub blokus_show_piece_preview: bool,             // Whether to show piece preview on board
-    pub blokus_piece_selection_scroll: usize,        // Scroll offset for piece selection panel (per-player)
-    pub blokus_panel_scroll_offset: usize,           // Scroll offset for entire Available Pieces panel
-    pub blokus_piece_selection_width: u16,           // Width of the piece selection panel (for drag resizing)
-    pub blokus_last_rotation_time: Option<std::time::Instant>, // Track last rotation to prevent rapid changes
-    pub blokus_players_expanded: Vec<bool>,          // Track which players' piece sections are expanded
-
-    // Player type configuration for current game
-    pub player_types: Vec<PlayerType>, // length = number of players for current game
-    pub player_config_index: usize,    // which player is selected in config menu
+    /// Currently selected piece index for Blokus
+    pub blokus_selected_piece_idx: Option<usize>,
+    /// Current transformation/rotation of selected piece
+    pub blokus_selected_transformation: usize,
+    /// Preview position for piece placement
+    pub blokus_piece_preview_pos: (usize, usize),
+    /// Whether to show piece placement preview
+    pub blokus_show_piece_preview: bool,
+    /// Scroll offset for piece selection panel
+    pub blokus_piece_selection_scroll: usize,
+    /// Scroll offset for available pieces panel
+    pub blokus_panel_scroll_offset: usize,
+    /// Width of piece selection panel
+    pub blokus_piece_selection_width: u16,
+    /// Last time piece was rotated (to prevent rapid rotation)
+    pub blokus_last_rotation_time: Option<std::time::Instant>,
+    /// Which player sections are expanded in Blokus UI
+    pub blokus_players_expanded: Vec<bool>,
+    
+    // Player configuration
+    /// Player types for current game (Human or AI for each player)
+    pub player_types: Vec<PlayerType>,
+    /// Currently selected player in configuration menu
+    pub player_config_index: usize,
 }
 
 impl<'a> App<'a> {
+    /// Creates a new App instance with the given command line arguments
+    /// 
+    /// Sets up the initial game state, spawns AI worker threads, and configures
+    /// all the necessary channels for communication between threads.
+    /// 
+    /// # Arguments
+    /// * `args` - Command line arguments parsed with clap
+    /// 
+    /// # Returns
+    /// A new App instance ready to run
+    /// 
+    /// # Note
+    /// This function also spawns the AI worker thread in the background.
     fn new(args: Args) -> App<'a> {
         let (game, game_type, should_start_playing) = if let Some(game_name) = args.game {
             // Game was explicitly specified
@@ -275,9 +498,9 @@ impl<'a> App<'a> {
         });
         
         let mut app = App {
-            titles: vec!["Gomoku", "Connect4", "Blokus", "Othello", "Settings", "Quit"],
+            titles: vec!["Gomoku", "Connect4", "Othello", "Blokus"],
             index: 0,
-            state: AppState::Menu,
+            state: if should_start_playing { AppState::PlayerConfig } else { AppState::Menu },
             game_type,
             game,
             cursor: (0, 0),
@@ -287,17 +510,16 @@ impl<'a> App<'a> {
             ai_rx,
             game_tx,
             game_rx,
-            pending_ai_move: None,
-            ai_only: args.ai_only,
-            shared_tree: args.shared_tree,
             iterations: args.iterations,
             num_threads: args.num_threads,
             stats_interval_secs: args.stats_interval_secs,
             timeout_secs: args.timeout_secs,
+            ai_only: args.ai_only,
+            shared_tree: args.shared_tree,
+            pending_ai_move: None,
             debug_scroll_offset: 0,
-            // Initialize settings
             settings_index: 0,
-            settings_titles: vec![], // Will be populated by update_settings_display
+            settings_titles: Vec::new(),
             gomoku_board_size: args.board_size,
             gomoku_line_size: args.line_size,
             connect4_width: 7,
@@ -306,15 +528,13 @@ impl<'a> App<'a> {
             othello_board_size: 8,
             exploration_parameter: args.exploration_parameter,
             max_nodes: args.max_nodes,
-            // Responsive layout fields - will be set by initialize_layout
-            board_height_percent: 50, // Temporary default, will be overridden
-            instructions_height_percent: 20, // Temporary default, will be overridden
-            stats_height_percent: 30, // Temporary default, will be overridden
-            stats_width_percent: 60, // Default: 60% for debug stats, 40% for move history
+            board_height_percent: 60,
+            instructions_height_percent: 10,
+            stats_height_percent: 30,
+            stats_width_percent: 50,
             is_dragging: false,
             drag_boundary: None,
             last_terminal_size: (0, 0),
-            // MCTS statistics for display
             mcts_visits_grid: None,
             mcts_values_grid: None,
             mcts_wins_grid: None,
@@ -323,9 +543,9 @@ impl<'a> App<'a> {
             ai_thinking_start_time: None,
             stats_request_counter: 0,
             last_stats_request_time: None,
-            next_request_id: 1,
+            next_request_id: 0,
             current_request_id: 0,
-            move_history: vec![],
+            move_history: Vec::new(),
             move_counter: 0,
             move_history_scroll_offset: 0,
             moves_in_current_round: 0,
@@ -335,11 +555,10 @@ impl<'a> App<'a> {
             blokus_show_piece_preview: false,
             blokus_piece_selection_scroll: 0,
             blokus_panel_scroll_offset: 0,
-            blokus_piece_selection_width: 40, // Default width
+            blokus_piece_selection_width: 40,
             blokus_last_rotation_time: None,
-            blokus_players_expanded: vec![true; 4], // Start with all players expanded
-            // Player type configuration for current game
-            player_types: vec![PlayerType::Human; 2], // Will be set properly below
+            blokus_players_expanded: vec![true; 4],
+            player_types: vec![PlayerType::Human; 4],
             player_config_index: 0,
         };
         
@@ -1022,7 +1241,7 @@ impl<'a> App<'a> {
         let min_stats_percent = 5u16; // Stats section can be very small (scrollable)
 
         match boundary {
-            DragBoundary::BoardInstructions => {
+            DragBoundary::BoardStats => {
                 // Ensure board doesn't go below its minimum height or above reasonable maximum
                 let max_board_percent = 100 - min_instructions_percent - min_stats_percent;
                 let new_board_percent = row_percent.clamp(min_board_percent, max_board_percent);
@@ -1045,7 +1264,22 @@ impl<'a> App<'a> {
                     self.stats_height_percent = remaining - self.instructions_height_percent;
                 }
             }
-            DragBoundary::InstructionsStats => {
+            DragBoundary::BoardHistory => {
+                // Dragging the border between board and move history
+                let max_board_percent = 100 - min_stats_percent;
+                let new_board_percent = row_percent.clamp(min_board_percent, max_board_percent);
+                let remaining = 100 - new_board_percent;
+                
+                // Split remaining space between stats and instructions
+                let instructions_height = remaining / 2;
+                let stats_height = remaining - instructions_height;
+                
+                // Ensure all sections meet their minimum requirements
+                self.board_height_percent = new_board_percent;
+                self.instructions_height_percent = instructions_height.max(min_instructions_percent);
+                self.stats_height_percent = stats_height.max(min_stats_percent);
+            }
+            DragBoundary::StatsHistory => {
                 // Calculate which part of the non-board area we're in
                 let non_board_start = self.board_height_percent;
                 if row_percent > non_board_start {
@@ -1053,7 +1287,7 @@ impl<'a> App<'a> {
                     let relative_pos = row_percent - non_board_start;
 
                     // Ensure instructions doesn't go below its minimum
-                    let max_instructions = non_board_percent - min_stats_percent;
+                    let max_instructions = 100 - self.board_height_percent - min_stats_percent;
                     let instructions_percent = relative_pos.clamp(min_instructions_percent, max_instructions);
                     let stats_percent = non_board_percent - instructions_percent;
                     
@@ -1064,10 +1298,25 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            DragBoundary::StatsHistory => {
-                // For horizontal dragging within the stats area, we don't use row_percent
-                // This case should be handled by a separate method for horizontal dragging
-                // For now, do nothing as this will be handled by handle_horizontal_drag
+            DragBoundary::BoardInstructions => {
+                let new_board_percent = row_percent.clamp(min_board_percent, 100 - min_instructions_percent - min_stats_percent);
+                let new_instructions_percent = self.instructions_height_percent;
+                let new_stats_percent = 100 - new_board_percent - new_instructions_percent;
+                
+                if new_stats_percent >= min_stats_percent {
+                    self.board_height_percent = new_board_percent;
+                    self.stats_height_percent = new_stats_percent;
+                }
+            }
+            DragBoundary::InstructionsStats => {
+                let max_instructions = 100 - self.board_height_percent - min_stats_percent;
+                let new_instructions_percent = (row_percent - self.board_height_percent).clamp(min_instructions_percent, max_instructions);
+                let new_stats_percent = 100 - self.board_height_percent - new_instructions_percent;
+                
+                if new_stats_percent >= min_stats_percent {
+                    self.instructions_height_percent = new_instructions_percent;
+                    self.stats_height_percent = new_stats_percent;
+                }
             }
             DragBoundary::BlokusPieceSelectionLeft | DragBoundary::BlokusPieceSelectionRight => {
                 // Horizontal dragging for Blokus piece selection panel resizing
@@ -1239,7 +1488,7 @@ impl<'a> App<'a> {
             let now = std::time::Instant::now();
             if let Some(last_rotation) = self.blokus_last_rotation_time {
                 if now.duration_since(last_rotation).as_millis() < 200 {
-                    return; // Too soon, ignore this rotation
+                    return;
                 }
             }
             

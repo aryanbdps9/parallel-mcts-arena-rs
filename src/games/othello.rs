@@ -1,14 +1,40 @@
+//! # Othello (Reversi) Game Implementation
+//!
+//! This module implements the classic Othello (also known as Reversi) board game.
+//! Players take turns placing pieces on an 8x8 board, with the goal of having
+//! the most pieces of their color when the board is full or no more moves are possible.
+//!
+//! ## Rules
+//! - Players must place pieces that "sandwich" opponent pieces between the new piece
+//!   and an existing piece of the same color
+//! - All sandwiched pieces are flipped to the current player's color
+//! - If a player has no legal moves, their turn is skipped
+//! - Game ends when neither player can make a move
+//! - Winner is determined by who has more pieces on the board
+
 use crate::GameState;
 use std::str::FromStr;
 
+/// Represents a move in Othello
+/// 
+/// Contains the row and column coordinates where a player wants to place their piece.
+/// Both coordinates are 0-based indices.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct OthelloMove(pub usize, pub usize);
 
+/// Represents the complete state of an Othello game
+/// 
+/// Contains the board state, current player, and move history.
+/// The board uses 1 for black pieces, -1 for white pieces, and 0 for empty spaces.
 #[derive(Debug, Clone)]
 pub struct OthelloState {
+    /// The game board as a 2D vector
     board: Vec<Vec<i32>>,
+    /// Current player (1 for black, -1 for white)
     current_player: i32,
+    /// Size of the board (NxN)
     board_size: usize,
+    /// Last move made, if any
     last_move: Option<(usize, usize)>,
 }
 
@@ -92,6 +118,16 @@ impl GameState for OthelloState {
 }
 
 impl OthelloState {
+    /// Creates a new Othello game with the standard starting position
+    /// 
+    /// Sets up the board with 4 pieces in the center in the traditional pattern.
+    /// Black (player 1) starts first.
+    /// 
+    /// # Arguments
+    /// * `board_size` - Size of the board (NxN), typically 8
+    /// 
+    /// # Returns
+    /// A new OthelloState ready to play
     pub fn new(board_size: usize) -> Self {
         let mut board = vec![vec![0; board_size]; board_size];
         let center = board_size / 2;
@@ -107,14 +143,37 @@ impl OthelloState {
         }
     }
 
+    /// Returns the line size for the game
+    /// 
+    /// Othello doesn't use a line size concept like other games,
+    /// so this returns 1 as a default value.
     pub fn get_line_size(&self) -> usize {
         1 // Othello doesn't have a line size concept, return 1 as default
     }
 
+    /// Checks if a move is legal in the current game state
+    /// 
+    /// A move is legal if it's on an empty square and would flip at least one opponent piece.
+    /// 
+    /// # Arguments
+    /// * `mv` - The move to check
+    /// 
+    /// # Returns
+    /// True if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &OthelloMove) -> bool {
         self.is_valid_move((mv.0, mv.1))
     }
 
+    /// Internal helper to check if a move at given coordinates is valid
+    /// 
+    /// Checks all 8 directions from the proposed move to see if any opponent
+    /// pieces would be flipped (sandwiched between the new piece and an existing piece).
+    /// 
+    /// # Arguments
+    /// * `mv` - Coordinates (row, col) to check
+    /// 
+    /// # Returns
+    /// True if the move would flip at least one opponent piece
     fn is_valid_move(&self, mv: (usize, usize)) -> bool {
         let (r, c) = mv;
         if self.board[r][c] != 0 {
@@ -150,6 +209,15 @@ impl OthelloState {
         false
     }
 
+    /// Flips all opponent pieces that are captured by placing a piece at (r, c)
+    /// 
+    /// This method is called after a move is made to flip all opponent pieces
+    /// that are sandwiched between the new piece and existing pieces of the same color.
+    /// It searches in all 8 directions and flips pieces in each valid direction.
+    /// 
+    /// # Arguments
+    /// * `r` - Row coordinate of the newly placed piece
+    /// * `c` - Column coordinate of the newly placed piece
     fn flip_pieces(&mut self, r: usize, c: usize) {
         let opponent = -self.current_player;
         let directions = [
@@ -183,6 +251,23 @@ impl OthelloState {
 impl FromStr for OthelloMove {
     type Err = String;
 
+    /// Creates an OthelloMove from a string representation
+    /// 
+    /// Expected format is "row,col" where both are 0-based indices.
+    /// 
+    /// # Arguments
+    /// * `s` - String in format "r,c" (e.g., "3,4")
+    /// 
+    /// # Returns
+    /// Ok(OthelloMove) if parsing succeeds, Err(String) if format is invalid
+    /// 
+    /// # Examples
+    /// ```
+    /// use std::str::FromStr;
+    /// let move = OthelloMove::from_str("3,4").unwrap();
+    /// assert_eq!(move.0, 3);
+    /// assert_eq!(move.1, 4);
+    /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split(',').map(|s| s.trim()).collect();
         if parts.len() != 2 {

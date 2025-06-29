@@ -1,3 +1,13 @@
+//! # Game Wrapper Module
+//!
+//! This module provides unified interfaces for all games in the engine.
+//! The GameWrapper enum allows the MCTS engine to work with any game type
+//! through a single interface, while MoveWrapper handles moves for all games.
+//!
+//! ## Key Components
+//! - **GameWrapper**: Enum that wraps all game types into a single interface
+//! - **MoveWrapper**: Enum that wraps all move types for unified handling
+
 use crate::games::connect4::{Connect4Move, Connect4State};
 use crate::games::gomoku::{GomokuMove, GomokuState};
 use crate::games::blokus::{BlokusMove, BlokusState};
@@ -5,23 +15,42 @@ use crate::games::othello::{OthelloMove, OthelloState};
 use mcts::GameState;
 use std::fmt;
 
+/// Wrapper enum for all supported game types
+/// 
+/// Allows the MCTS engine and UI to work with any game through a unified interface.
+/// Each variant contains the specific game state for that game type.
 #[derive(Debug, Clone)]
 pub enum GameWrapper {
+    /// Gomoku (Five in a Row) game state
     Gomoku(GomokuState),
+    /// Connect 4 game state
     Connect4(Connect4State),
+    /// Blokus game state
     Blokus(BlokusState),
+    /// Othello (Reversi) game state
     Othello(OthelloState),
 }
 
+/// Wrapper enum for all supported move types
+/// 
+/// Allows moves from any game to be stored and passed around uniformly.
+/// Each variant contains the specific move type for that game.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MoveWrapper {
+    /// Gomoku move (row, col)
     Gomoku(GomokuMove),
+    /// Connect4 move (column)
     Connect4(Connect4Move),
+    /// Blokus move (piece_id, transformation, row, col)
     Blokus(BlokusMove),
+    /// Othello move (row, col)
     Othello(OthelloMove),
 }
 
 impl fmt::Display for MoveWrapper {
+    /// Formats moves for display in UI and logs
+    /// 
+    /// Each game type gets a compact string representation showing the essential move info.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MoveWrapper::Gomoku(m) => write!(f, "G({},{})", m.0, m.1),
@@ -108,10 +137,20 @@ impl GameState for GameWrapper {
 }
 
 impl GameWrapper {
+    /// Returns the size of the game board
+    /// 
+    /// For most games this is the board height/width, but for Connect4 it's the height.
+    /// 
+    /// # Returns
+    /// Board size as number of rows
     pub fn get_board_size(&self) -> usize {
         self.get_board().len()
     }
 
+    /// Returns the number of pieces needed in a row to win
+    /// 
+    /// # Returns
+    /// Number of pieces needed for victory (e.g., 5 for Gomoku, 4 for Connect4)
     pub fn get_line_size(&self) -> usize {
         match self {
             GameWrapper::Gomoku(g) => g.get_line_size(),
@@ -121,6 +160,10 @@ impl GameWrapper {
         }
     }
 
+    /// Returns coordinates of the last move made, if any
+    /// 
+    /// # Returns
+    /// Optional vector of (row, col) coordinates for the last move
     pub fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
         match self {
             GameWrapper::Gomoku(g) => g.get_last_move(),
@@ -130,6 +173,13 @@ impl GameWrapper {
         }
     }
 
+    /// Checks if a move is legal in the current game state
+    /// 
+    /// # Arguments
+    /// * `mv` - The move to check
+    /// 
+    /// # Returns
+    /// True if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &MoveWrapper) -> bool {
         match (self, mv) {
             (GameWrapper::Gomoku(g), MoveWrapper::Gomoku(m)) => g.is_legal(m),
