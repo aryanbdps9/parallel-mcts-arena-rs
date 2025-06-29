@@ -925,19 +925,29 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
             vec![Constraint::Min(0)]
         })
         .split(area);
-    
+
     // Calculate column width based on board size and available space to keep board compact
     let max_board_width = (f.size().width * 2 / 3).max(20); // Don't take more than 2/3 screen width, minimum 20
     let col_width = if board_width > 0 {
         // Calculate optimal width per column
         let calculated_width = (max_board_width / board_width as u16).max(1);
         
-        // Use different width based on board size for optimal display
-        match board_width {
-            1..=10 => calculated_width.min(5),    // Small boards: up to 5 chars per cell
-            11..=15 => calculated_width.min(4),   // Medium boards: up to 4 chars per cell
-            16..=25 => calculated_width.min(3),   // Large boards: up to 3 chars per cell
-            _ => calculated_width.min(2).max(1)   // Very large boards: 1-2 chars per cell
+        // Game-specific column width optimization
+        match app.game_type.as_str() {
+            "othello" => {
+                // Othello uses compact Unicode circles, so we can use smaller columns
+                // This makes the cells more square-like (row height = 1, column width = 2-3)
+                calculated_width.min(3).max(2)  // Force 2-3 chars per cell for better square ratio
+            }
+            _ => {
+                // Use different width based on board size for optimal display
+                match board_width {
+                    1..=10 => calculated_width.min(5),    // Small boards: up to 5 chars per cell
+                    11..=15 => calculated_width.min(4),   // Medium boards: up to 4 chars per cell
+                    16..=25 => calculated_width.min(3),   // Large boards: up to 3 chars per cell
+                    _ => calculated_width.min(2).max(1)   // Very large boards: 1-2 chars per cell
+                }
+            }
         }
     } else {
         4
