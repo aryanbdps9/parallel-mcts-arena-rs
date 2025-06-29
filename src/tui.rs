@@ -1,4 +1,4 @@
-use crate::{App, AppState, DragBoundary};
+use crate::{App, AppState, DragBoundary, PlayerType};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::games::connect4::Connect4Move;
 use crossterm::{
@@ -90,8 +90,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                     } else if app.index == app.titles.len() - 2 { // Settings
                                         app.state = AppState::Settings;
                                     } else {
-                                        app.state = AppState::Playing;
+                                        // When a game is selected, go to PlayerConfig first
                                         app.set_game(app.index);
+                                        app.state = AppState::PlayerConfig;
                                     }
                                 }
                                 _ => {}
@@ -214,6 +215,42 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                 },
                                 _ => {}
                             },
+                            AppState::PlayerConfig => {
+                                if let Event::Key(key) = event::read()? {
+                                    match key.code {
+                                        KeyCode::Esc => {
+                                            app.state = AppState::Menu;
+                                        }
+                                        KeyCode::Up => {
+                                            if app.player_config_index > 0 {
+                                                app.player_config_index -= 1;
+                                            }
+                                        }
+                                        KeyCode::Down => {
+                                            // Allow navigating to Launch button (index = player_types.len())
+                                            if app.player_config_index + 1 <= app.player_types.len() {
+                                                app.player_config_index += 1;
+                                            }
+                                        }
+                                        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+                                            // Only toggle if we're on a player, not on Launch button
+                                            if app.player_config_index < app.player_types.len() {
+                                                app.toggle_player_type(app.player_config_index);
+                                            }
+                                        }
+                                        KeyCode::Enter | KeyCode::Char('l') | KeyCode::Char('L') => {
+                                            if app.player_config_index < app.player_types.len() {
+                                                // If on a player slot, toggle the player type
+                                                app.toggle_player_type(app.player_config_index);
+                                            } else {
+                                                // If on Launch button, start the game
+                                                app.state = AppState::Playing;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            },
                         }
                         // Update timing variables based on key type
                         if is_movement_key {
@@ -274,7 +311,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             f.render_stateful_widget(list, main_chunks[0], &mut list_state);
 
             let instructions =
-                Paragraph::new("Use arrow keys to navigate, Enter to select, or click with mouse. 'q' or Esc to quit.")
+                Paragraph::new("Use arrow keys to navigate, Enter to select, or click with mouse. Press 'p' for Player Config. 'q' or Esc to quit.")
                     .block(Block::default().title("Instructions").borders(Borders::ALL));
             f.render_widget(instructions, main_chunks[1]);
         }
@@ -418,7 +455,46 @@ fn ui(f: &mut Frame, app: &mut App) {
             draw_stats(f, app, horizontal_chunks[0]);
             draw_move_history(f, app, horizontal_chunks[1]);
         }
+        AppState::PlayerConfig => {
+            draw_player_config_menu(f, app, f.size());
+        }
     }
+}
+
+fn draw_player_config_menu(f: &mut Frame, app: &App, area: Rect) {
+    let n = app.player_types.len();
+    let mut items = Vec::with_capacity(n + 1); // +1 for Launch button
+    
+    // Add player type options
+    for (i, pt) in app.player_types.iter().enumerate() {
+        let label = format!("Player {}: {}", i + 1, match pt {
+            PlayerType::Human => "Human",
+            PlayerType::AI => "AI",
+        });
+        let style = if i == app.player_config_index {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(label).style(style));
+    }
+    
+    // Add Launch button
+    let launch_label = "Launch Game";
+    let launch_style = if app.player_config_index == n {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    items.push(ListItem::new(launch_label).style(launch_style));
+    
+    // Create title with game name
+    let game_name = app.game_type.to_uppercase();
+    let title = format!("{} - Player Configuration (Up/Down: Navigate, Space/Left/Right: Toggle, Enter: Select/Launch, Esc: Back)", game_name);
+    
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(title));
+    f.render_widget(list, area);
 }
 
 fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
@@ -1315,6 +1391,9 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
         }
         AppState::GameOver => {
             // Could add click handling for game over state if needed
+        }
+        AppState::PlayerConfig => {
+            // Player configuration clicks handled in the event loop
         }
     }
 }

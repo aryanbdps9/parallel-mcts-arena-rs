@@ -148,9 +148,16 @@ pub enum AIState {
     Ready,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerType {
+    Human,
+    AI,
+}
+
 #[derive(PartialEq)]
 pub enum AppState {
     Menu,
+    PlayerConfig, // New: second-level menu for player type selection
     Settings,
     Playing,
     GameOver,
@@ -218,7 +225,7 @@ pub struct App<'a> {
     pub move_history: Vec<MoveHistoryEntry>,
     pub move_counter: u32,
     pub move_history_scroll_offset: usize,
-    pub moves_in_current_round: u32, // Track how many moves made in current round
+    pub moves_in_current_round: usize, // Track how many moves made in current round
     
     // Blokus-specific UI state
     pub blokus_selected_piece_idx: Option<usize>,    // Currently selected piece index
@@ -227,6 +234,10 @@ pub struct App<'a> {
     pub blokus_show_piece_preview: bool,             // Whether to show piece preview on board
     pub blokus_piece_selection_scroll: usize,        // Scroll offset for piece selection panel
     pub blokus_last_rotation_time: Option<std::time::Instant>, // Track last rotation to prevent rapid changes
+
+    // Player type configuration for current game
+    pub player_types: Vec<PlayerType>, // length = number of players for current game
+    pub player_config_index: usize,    // which player is selected in config menu
 }
 
 impl<'a> App<'a> {
@@ -321,7 +332,18 @@ impl<'a> App<'a> {
             blokus_show_piece_preview: false,
             blokus_piece_selection_scroll: 0,
             blokus_last_rotation_time: None,
+            // Player type configuration for current game
+            player_types: vec![PlayerType::Human; 2], // Will be set properly below
+            player_config_index: 0,
         };
+        
+        // Set initial player types based on command line args
+        if args.ai_only {
+            // Set all players to AI if --ai-only flag is used
+            let player_count = app.get_player_count();
+            app.player_types = vec![PlayerType::AI; player_count];
+        }
+        
         app.update_settings_display();
         
         // Initialize AI worker with current game state and settings
@@ -412,6 +434,9 @@ impl<'a> App<'a> {
             iterations: self.iterations,
             stats_interval_secs: self.stats_interval_secs,
         });
+        
+        // Reset player config for the new game
+        self.reset_player_config();
     }
 
     pub fn tick(&mut self) -> bool {
@@ -491,7 +516,7 @@ impl<'a> App<'a> {
                         }
 
                         // If not in AI-only mode, or if in AI-only mode with a shared tree, advance the root.
-                        if !self.ai_only || self.shared_tree {
+                        if !self.is_ai_only_mode() || self.shared_tree {
                             let _ = self.ai_tx.send(AIRequest::AdvanceRoot { last_move: mv });
                         }
 
@@ -503,8 +528,7 @@ impl<'a> App<'a> {
                             self.state = AppState::GameOver;
                         } else {
                             // If it's the AI's turn next, request a move
-                            let is_ai_turn = self.ai_only || self.game.get_current_player() == -1;
-                            if is_ai_turn && self.ai_state == AIState::Idle {
+                            if self.is_current_player_ai() && self.ai_state == AIState::Idle {
                                 self.send_search_request(self.timeout_secs);
                             }
                         }
@@ -543,7 +567,7 @@ impl<'a> App<'a> {
         }
 
         // Request AI move if needed
-        if self.state == AppState::Playing && self.ai_only && self.ai_state == AIState::Idle {
+        if self.state == AppState::Playing && self.is_current_player_ai() && self.ai_state == AIState::Idle {
             if !self.game.is_terminal() {
                 self.send_search_request(self.timeout_secs);
             }
@@ -653,6 +677,9 @@ impl<'a> App<'a> {
         self.blokus_piece_selection_scroll = 0;
         self.blokus_last_rotation_time = None;
         
+        // Reset player config
+        self.reset_player_config();
+        
         let _ = self.ai_tx.send(AIRequest::UpdateSettings {
             exploration_parameter: self.exploration_parameter,
             num_threads: self.num_threads,
@@ -703,14 +730,6 @@ impl<'a> App<'a> {
         self.move_history_scroll_offset = 0;
     }
 
-    /// Get the number of players for the current game
-    fn get_player_count(&self) -> u32 {
-        match self.game {
-            GameWrapper::Blokus(_) => 4,
-            _ => 2, // Gomoku, Connect4, Othello are all 2-player games
-        }
-    }
-
     pub fn settings_next(&mut self) {
         self.settings_index = (self.settings_index + 1) % self.settings_titles.len();
     }
@@ -725,11 +744,7 @@ impl<'a> App<'a> {
 
     pub fn increase_setting(&mut self) {
         match self.settings_index {
-            0 => { // Game Mode toggle
-                self.ai_only = !self.ai_only;
-                self.update_settings_display();
-            }
-            1 => { // Gomoku Board Size
+            0 => { // Gomoku Board Size
                 if self.gomoku_board_size < 25 {
                     self.gomoku_board_size += 2; // Keep odd for center positioning
                     self.update_settings_display();
@@ -738,7 +753,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            2 => { // Gomoku Line Size
+            1 => { // Gomoku Line Size
                 if self.gomoku_line_size < 10 {
                     self.gomoku_line_size += 1;
                     self.update_settings_display();
@@ -747,7 +762,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            3 => { // Connect4 Width
+            2 => { // Connect4 Width
                 if self.connect4_width < 12 {
                     self.connect4_width += 1;
                     self.update_settings_display();
@@ -756,7 +771,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            4 => { // Connect4 Height
+            3 => { // Connect4 Height
                 if self.connect4_height < 10 {
                     self.connect4_height += 1;
                     self.update_settings_display();
@@ -765,7 +780,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            5 => { // Connect4 Line Size
+            4 => { // Connect4 Line Size
                 if self.connect4_line_size < 8 {
                     self.connect4_line_size += 1;
                     self.update_settings_display();
@@ -774,7 +789,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            6 => { // Othello Board Size
+            5 => { // Othello Board Size
                 if self.othello_board_size < 12 {
                     self.othello_board_size += 2; // Keep even for othello
                     self.update_settings_display();
@@ -783,37 +798,13 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            7 => { // AI Iterations
-                if self.iterations < 5000000 {
-                    self.iterations = (self.iterations as f64 * 1.5) as i32;
-                    self.update_settings_display();
-                }
-            }
-            8 => { // AI Exploration Parameter
-                if self.exploration_parameter < 10.0 {
-                    self.exploration_parameter += 0.5;
-                    self.update_settings_display();
-                    self.update_ai_settings();
-                }
-            }
-            9 => { // AI Max Nodes
-                if self.max_nodes < 1000000 {
-                    self.max_nodes = (self.max_nodes as f64 * 1.5) as usize;
-                    self.update_settings_display();
-                    self.update_ai_settings();
-                }
-            }
             _ => {}
         }
     }
 
     pub fn decrease_setting(&mut self) {
         match self.settings_index {
-            0 => { // Game Mode toggle
-                self.ai_only = !self.ai_only;
-                self.update_settings_display();
-            }
-            1 => { // Gomoku Board Size
+            0 => { // Gomoku Board Size
                 if self.gomoku_board_size > 9 {
                     self.gomoku_board_size -= 2; // Keep odd for center positioning
                     self.update_settings_display();
@@ -822,7 +813,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            2 => { // Gomoku Line Size
+            1 => { // Gomoku Line Size
                 if self.gomoku_line_size > 3 {
                     self.gomoku_line_size -= 1;
                     self.update_settings_display();
@@ -831,7 +822,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            3 => { // Connect4 Width
+            2 => { // Connect4 Width
                 if self.connect4_width > 4 {
                     self.connect4_width -= 1;
                     self.update_settings_display();
@@ -840,7 +831,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            4 => { // Connect4 Height
+            3 => { // Connect4 Height
                 if self.connect4_height > 4 {
                     self.connect4_height -= 1;
                     self.update_settings_display();
@@ -849,7 +840,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            5 => { // Connect4 Line Size
+            4 => { // Connect4 Line Size
                 if self.connect4_line_size > 3 {
                     self.connect4_line_size -= 1;
                     self.update_settings_display();
@@ -858,7 +849,7 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            6 => { // Othello Board Size
+            5 => { // Othello Board Size
                 if self.othello_board_size > 6 {
                     self.othello_board_size -= 2; // Keep even for othello
                     self.update_settings_display();
@@ -867,42 +858,18 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            7 => { // AI Iterations
-                if self.iterations > 10000 {
-                    self.iterations = (self.iterations as f64 / 1.5) as i32;
-                    self.update_settings_display();
-                }
-            }
-            8 => { // AI Exploration Parameter
-                if self.exploration_parameter > 0.5 {
-                    self.exploration_parameter -= 0.5;
-                    self.update_settings_display();
-                    self.update_ai_settings();
-                }
-            }
-            9 => { // AI Max Nodes
-                if self.max_nodes > 10000 {
-                    self.max_nodes = (self.max_nodes as f64 / 1.5) as usize;
-                    self.update_settings_display();
-                    self.update_ai_settings();
-                }
-            }
             _ => {}
         }
     }
 
     fn update_settings_display(&mut self) {
         self.settings_titles = vec![
-            if self.ai_only { "Game Mode: AI vs AI".to_string() } else { "Game Mode: Human vs AI".to_string() },
             format!("Gomoku Board Size: {}", self.gomoku_board_size),
             format!("Gomoku Line Size: {}", self.gomoku_line_size),
             format!("Connect4 Width: {}", self.connect4_width),
             format!("Connect4 Height: {}", self.connect4_height),
             format!("Connect4 Line Size: {}", self.connect4_line_size),
             format!("Othello Board Size: {}", self.othello_board_size),
-            format!("AI Iterations: {}", self.iterations),
-            format!("AI Exploration: {:.1}", self.exploration_parameter),
-            format!("AI Max Nodes: {}", self.max_nodes),
             "Back to Menu".to_string()
         ];
     }
@@ -1139,7 +1106,7 @@ impl<'a> App<'a> {
         self.ai_state = AIState::Thinking;  // Immediately set to thinking to prevent duplicate requests
         
         // In AI vs AI mode with non-shared tree, reset the MCTS tree for the new player's turn.
-        if self.ai_only && !self.shared_tree {
+        if self.is_ai_only_mode() && !self.shared_tree {
             self.update_ai_settings();
         }
 
@@ -1208,9 +1175,9 @@ impl<'a> App<'a> {
         log_debug(&format!("blokus_select_piece called with piece_idx={}", piece_idx));
         
         if let GameWrapper::Blokus(blokus_state) = &self.game {
-            // Only allow piece selection if it's human's turn (not AI-only or AI's turn)
-            if self.ai_only || self.ai_state != AIState::Idle {
-                log_debug(&format!("Rejecting piece selection - ai_only={}, ai_state={:?}", self.ai_only, self.ai_state));
+            // Only allow piece selection if it's human's turn
+            if self.is_current_player_ai() || self.ai_state != AIState::Idle {
+                log_debug(&format!("Rejecting piece selection - is_ai={}, ai_state={:?}", self.is_current_player_ai(), self.ai_state));
                 return;
             }
             
@@ -1250,9 +1217,9 @@ impl<'a> App<'a> {
         log_debug(&format!("blokus_rotate_piece called, current_transformation={}", self.get_blokus_transformation("blokus_rotate_piece_start")));
         
         if let (Some(_), GameWrapper::Blokus(_)) = (self.blokus_selected_piece_idx, &self.game) {
-            // Only allow rotation if it's human's turn (not AI-only or AI's turn)
-            if self.ai_only || self.ai_state != AIState::Idle {
-                log_debug(&format!("Rejecting rotation - ai_only={}, ai_state={:?}", self.ai_only, self.ai_state));
+            // Only allow rotation if it's human's turn
+            if self.is_current_player_ai() || self.ai_state != AIState::Idle {
+                log_debug(&format!("Rejecting rotation - is_ai={}, ai_state={:?}", self.is_current_player_ai(), self.ai_state));
                 return;
             }
             
@@ -1326,8 +1293,8 @@ impl<'a> App<'a> {
     pub fn blokus_cycle_pieces(&mut self, forward: bool) {
         log_debug(&format!("blokus_cycle_pieces called with forward={}", forward));
         if let GameWrapper::Blokus(_) = &self.game {
-            // Only allow cycling if it's human's turn (not AI-only or AI's turn)
-            if self.ai_only || self.ai_state != AIState::Idle {
+            // Only allow cycling if it's human's turn
+            if self.is_current_player_ai() || self.ai_state != AIState::Idle {
                 return;
             }
             
@@ -1385,6 +1352,64 @@ impl<'a> App<'a> {
     pub fn get_blokus_transformation(&self, _source: &str) -> usize {
         // Disable all rendering-related debug logs for performance
         self.blokus_selected_transformation
+    }
+
+    /// Call this when a new game is selected to set up the player_types vector
+    pub fn set_player_count(&mut self, count: usize) {
+        self.player_types = vec![PlayerType::Human; count];
+        self.player_config_index = 0;
+    }
+
+    /// Call this when switching games to reset player config
+    pub fn reset_player_config(&mut self) {
+        let n = self.get_player_count();
+        self.set_player_count(n);
+    }
+
+    /// Toggle the player type (Human/AI) for the selected player
+    pub fn toggle_player_type(&mut self, idx: usize) {
+        if let Some(pt) = self.player_types.get_mut(idx) {
+            *pt = match *pt {
+                PlayerType::Human => PlayerType::AI,
+                PlayerType::AI => PlayerType::Human,
+            };
+        }
+    }
+
+    /// Get the number of players for the current game
+    pub fn get_player_count(&self) -> usize {
+        match &self.game {
+            GameWrapper::Blokus(_) => 4,
+            GameWrapper::Gomoku(_) => 2,
+            GameWrapper::Connect4(_) => 2,
+            GameWrapper::Othello(_) => 2,
+        }
+    }
+
+    /// Check if the current player should be controlled by AI
+    pub fn is_current_player_ai(&self) -> bool {
+        let current_player = self.game.get_current_player();
+        let player_idx = self.get_player_index_from_id(current_player);
+        self.player_types.get(player_idx).map_or(false, |pt| *pt == PlayerType::AI)
+    }
+
+    /// Convert game player ID to player index (0-based)
+    fn get_player_index_from_id(&self, player_id: i32) -> usize {
+        match &self.game {
+            GameWrapper::Blokus(_) => {
+                // Blokus players are 1-4, convert to 0-3
+                ((player_id - 1).max(0) as usize).min(3)
+            }
+            _ => {
+                // Other games use -1/1, convert to 0/1
+                if player_id == 1 { 0 } else { 1 }
+            }
+        }
+    }
+
+    /// Check if all players are AI (for AI-only mode)
+    pub fn is_ai_only_mode(&self) -> bool {
+        self.player_types.iter().all(|pt| *pt == PlayerType::AI)
     }
 }
 
@@ -1450,5 +1475,11 @@ fn main() -> io::Result<()> {
     log_debug("=== NEW SESSION STARTED ===");
     let args = Args::parse();
     let mut app = App::new(args);
-    tui::run_tui(&mut app)
+    tui::run_tui(&mut app)?;
+
+    // Example: add a way to enter PlayerConfig from menu (pseudo, actual key handling is in tui.rs)
+    // In tui.rs, in AppState::Menu key handler, add:
+    // if key.code == KeyCode::Char('p') { app.state = AppState::PlayerConfig; }
+
+    Ok(())
 }
