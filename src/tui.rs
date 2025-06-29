@@ -1195,29 +1195,24 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_blokus_ui(f: &mut Frame, app: &App, area: Rect) {
-    // Create a 4-column layout for Blokus: player status | piece selection (dynamic width) | game board | piece preview
+    // Create a 3-column layout for Blokus: game board | piece selection (dynamic width) | player status
     let horizontal_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(20),                                // Player status panel
-            Constraint::Length(app.blokus_piece_selection_width),  // Piece selection panel (dynamic width)
             Constraint::Min(40),                                   // Game board (expandable)
-            Constraint::Length(25),                                // Piece preview panel
+            Constraint::Length(app.blokus_piece_selection_width),  // Piece selection panel (dynamic width)
+            Constraint::Length(20),                                // Player status panel
         ])
         .split(area);
 
-    // Draw player status panel (all 4 players)
-    draw_blokus_player_status(f, app, horizontal_chunks[0]);
+    // Draw game board with ghost piece overlay
+    draw_board(f, app, horizontal_chunks[0]);
     
     // Draw piece selection panel with scrollbar
     draw_blokus_piece_selection(f, app, horizontal_chunks[1]);
     
-    // Draw game board with ghost piece overlay
-    draw_board(f, app, horizontal_chunks[2]);
-    
-    // Draw piece preview panel (placeholder for now)
-    let block = Block::default().title("Piece Preview").borders(Borders::ALL);
-    f.render_widget(block, horizontal_chunks[3]);
+    // Draw player status panel (all 4 players)
+    draw_blokus_player_status(f, app, horizontal_chunks[2]);
 }
 
 fn draw_blokus_player_status(f: &mut Frame, app: &App, area: Rect) {
@@ -1640,10 +1635,11 @@ fn detect_boundary_click(app: &App, col: u16, row: u16, terminal_width: u16, ter
             // Check for Blokus piece selection panel boundaries first (only in Blokus mode)
             if app.game_type == "blokus" {
                 // Calculate the approximate positions of the Blokus panel boundaries
-                let player_status_width = 20u16;
+                // New layout: game board | piece selection (dynamic width) | player status (20)
+                let board_width = terminal_width.saturating_sub(app.blokus_piece_selection_width + 20).max(40);
                 let piece_selection_width = app.blokus_piece_selection_width;
-                let left_boundary = player_status_width;
-                let right_boundary = player_status_width + piece_selection_width;
+                let left_boundary = board_width; // Between board and piece selection
+                let right_boundary = board_width + piece_selection_width; // Between piece selection and player status
                 
                 // Check if click is near the left boundary of piece selection panel
                 if col.abs_diff(left_boundary) <= 2 {
@@ -1711,8 +1707,9 @@ fn handle_menu_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
 }
 
 fn handle_blokus_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
-    // For Blokus, we have a 4-column layout: player status (20) | piece selection (dynamic) | game board (min 40) | piece preview (25)
-    let horizontal_chunks_widths = [20u16, app.blokus_piece_selection_width, 40, 25]; // Use dynamic width
+    // For Blokus, we have a 3-column layout: game board (min 40) | piece selection (dynamic) | player status (20)
+    let board_width = terminal_size.width.saturating_sub(app.blokus_piece_selection_width + 20).max(40);
+    let horizontal_chunks_widths = [board_width, app.blokus_piece_selection_width, 20u16];
     let mut accumulated_width = 0u16;
     
     // Determine which panel was clicked
@@ -1720,7 +1717,8 @@ fn handle_blokus_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
         if col >= accumulated_width && col < accumulated_width + panel_width {
             match panel_idx {
                 0 => {
-                    // Player status panel - no interaction for now
+                    // Game board panel - handle normal board clicks
+                    handle_board_click(app, col, row, terminal_size);
                     return;
                 }
                 1 => {
@@ -1729,12 +1727,7 @@ fn handle_blokus_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
                     return;
                 }
                 2 => {
-                    // Game board panel - handle normal board clicks
-                    handle_board_click(app, col, row, terminal_size);
-                    return;
-                }
-                3 => {
-                    // Piece preview panel - no interaction for now
+                    // Player status panel - no interaction for now
                     return;
                 }
                 _ => break,
@@ -1855,9 +1848,10 @@ fn handle_mouse_scroll(app: &mut App, col: u16, row: u16, terminal_size: Rect, s
         AppState::Playing | AppState::GameOver => {
             // Special handling for Blokus piece selection scrolling
             if app.game_type == "blokus" {
-                // Blokus has horizontal layout: player status (20) | piece selection (dynamic width) | game board | piece preview (25)
-                let piece_selection_start = 20; // After player status panel
-                let piece_selection_end = 20 + app.blokus_piece_selection_width; // Dynamic width
+                // Blokus has horizontal layout: game board | piece selection (dynamic width) | player status (20)
+                let board_width = terminal_size.width.saturating_sub(app.blokus_piece_selection_width + 20).max(40);
+                let piece_selection_start = board_width; // After game board
+                let piece_selection_end = board_width + app.blokus_piece_selection_width; // Dynamic width
                 
                 if col >= piece_selection_start && col < piece_selection_end {
                     // Mouse is in the piece selection panel - use full panel scrolling
