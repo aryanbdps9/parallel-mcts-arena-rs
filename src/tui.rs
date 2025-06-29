@@ -2096,33 +2096,3 @@ fn create_visual_piece_shape(piece_shape: &[(i32, i32)]) -> Vec<String> {
     
     result
 }
-
-fn create_compact_piece_preview(piece_shape: &[(i32, i32)]) -> String {
-    if piece_shape.is_empty() {
-        return "▢".to_string();
-    }
-    
-    // Create a single-line compact representation
-    let min_r = piece_shape.iter().map(|p| p.0).min().unwrap_or(0);
-    let max_r = piece_shape.iter().map(|p| p.0).max().unwrap_or(0);
-    let min_c = piece_shape.iter().map(|p| p.1).min().unwrap_or(0);
-    let max_c = piece_shape.iter().map(|p| p.1).max().unwrap_or(0);
-    
-    let height = (max_r - min_r + 1) as usize;
-    let width = (max_c - min_c + 1) as usize;
-    
-    // For small pieces (up to 3x3), show actual shape compressed
-    if height <= 3 && width <= 3 {
-        let mut grid = vec![vec![' '; width]; height];
-        for &(r, c) in piece_shape {
-            let gr = (r - min_r) as usize;
-            let gc = (c - min_c) as usize;
-            grid[gr][gc] = '▢';
-        }
-        // Join all rows into one compact string
-        grid.iter().map(|row| row.iter().collect::<String>()).collect::<Vec<_>>().join("")
-    } else {
-        // For larger pieces, just show size info
-        format!("{}x{}", height, width)
-    }
-}

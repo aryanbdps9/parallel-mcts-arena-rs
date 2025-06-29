@@ -5,8 +5,6 @@ pub mod game_wrapper;
 
 use clap::Parser;
 use std::io;
-use std::fs::OpenOptions;
-use std::io::Write;
 use mcts::{GameState, MCTS};
 use crate::games::gomoku::{GomokuMove, GomokuState};
 use crate::games::connect4::{Connect4Move, Connect4State};
@@ -391,7 +389,6 @@ impl<'a> App<'a> {
     }
 
     pub fn set_game(&mut self, index: usize) {
-        log_debug(&format!("set_game() called with index={} ({})", index, self.titles[index]));
         self.game_type = self.titles[index].to_lowercase();
         self.game = match self.game_type.as_str() {
             "gomoku" => GameWrapper::Gomoku(GomokuState::new(self.gomoku_board_size, self.gomoku_line_size)),
@@ -453,7 +450,6 @@ impl<'a> App<'a> {
         
         // Check for any messages from the AI thread
         while let Ok(response) = self.ai_rx.try_recv() {
-            log_debug("tick(): AI response received");
             ui_changed = true; // AI response received, UI needs update
             match response {
                 AIResponse::MoveReady(mv, request_id) => {
@@ -486,7 +482,6 @@ impl<'a> App<'a> {
         // Process ready AI move by submitting it to the central game channel
         if self.ai_state == AIState::Ready {
             if let Some(mv) = self.pending_ai_move.take() {
-                log_debug("tick(): AI move ready");
                 // The AI has a move, send it to the game loop for processing
                 let _ = self.game_tx.send(GameRequest::MakeMove(mv));
                 self.ai_state = AIState::Idle; // Reset state, new move will be requested if needed after processing
@@ -496,7 +491,6 @@ impl<'a> App<'a> {
 
         // Process any pending game requests (e.g., moves from player or AI)
         if let Ok(game_request) = self.game_rx.try_recv() {
-            log_debug("tick(): Game request received");
             ui_changed = true; // Game state changed, UI needs update
             match game_request {
                 GameRequest::MakeMove(mv) => {
@@ -662,7 +656,6 @@ impl<'a> App<'a> {
     }
 
     pub fn reset(&mut self) {
-        log_debug("reset() called - resetting all Blokus state");
         self.state = AppState::Menu;
         self.game = match self.game_type.as_str() {
             "gomoku" => GameWrapper::Gomoku(GomokuState::new(self.gomoku_board_size, self.gomoku_line_size)),
@@ -1202,24 +1195,18 @@ impl<'a> App<'a> {
     // Blokus-specific methods
     
     pub fn blokus_select_piece(&mut self, piece_idx: usize) {
-        // DEBUG: Print when piece selection is called
-        log_debug(&format!("blokus_select_piece called with piece_idx={}", piece_idx));
-        
         if let GameWrapper::Blokus(blokus_state) = &self.game {
             // Only allow piece selection if it's human's turn
             if self.is_current_player_ai() || self.ai_state != AIState::Idle {
-                log_debug(&format!("Rejecting piece selection - is_ai={}, ai_state={:?}", self.is_current_player_ai(), self.ai_state));
                 return;
             }
             
             // Additional check: ensure it's a human player's turn
             let current_player = blokus_state.get_current_player();
             if current_player < 1 || current_player > 4 {
-                log_debug(&format!("Rejecting piece selection - invalid current_player={}", current_player));
                 return; // Invalid player
             }
             
-            let player_idx = (current_player - 1) as usize;
             // Get available pieces for current player and check if piece is available
             let available_pieces = blokus_state.get_available_pieces(current_player);
             if piece_idx < 21 && available_pieces.contains(&piece_idx) {
@@ -1227,18 +1214,14 @@ impl<'a> App<'a> {
                 let is_different_piece = self.blokus_selected_piece_idx != Some(piece_idx);
                 let no_piece_selected = self.blokus_selected_piece_idx.is_none();
                 
-                log_debug(&format!("is_different_piece={}, no_piece_selected={}, current_transformation={}", 
-                    is_different_piece, no_piece_selected, self.get_blokus_transformation("blokus_select_piece_check")));
-                
                 if is_different_piece || no_piece_selected {
                     // Reset transformation only when selecting a different piece or first selection
-                    log_debug(&format!("Setting transformation to 0, piece to {}", piece_idx));
                     self.set_blokus_transformation(0, "blokus_select_piece");
                     self.blokus_selected_piece_idx = Some(piece_idx);
                     self.blokus_show_piece_preview = true;
                     self.blokus_last_rotation_time = None; // Reset rotation timer
                 } else {
-                    log_debug("Same piece selected again, doing nothing");
+                    // Same piece selected again, do nothing
                 }
                 // If same piece is selected again, do absolutely nothing to prevent any changes
             }
@@ -1246,12 +1229,9 @@ impl<'a> App<'a> {
     }
 
     pub fn blokus_rotate_piece(&mut self) {
-        log_debug(&format!("blokus_rotate_piece called, current_transformation={}", self.get_blokus_transformation("blokus_rotate_piece_start")));
-        
         if let (Some(_), GameWrapper::Blokus(_)) = (self.blokus_selected_piece_idx, &self.game) {
             // Only allow rotation if it's human's turn
             if self.is_current_player_ai() || self.ai_state != AIState::Idle {
-                log_debug(&format!("Rejecting rotation - is_ai={}, ai_state={:?}", self.is_current_player_ai(), self.ai_state));
                 return;
             }
             
@@ -1259,7 +1239,6 @@ impl<'a> App<'a> {
             let now = std::time::Instant::now();
             if let Some(last_rotation) = self.blokus_last_rotation_time {
                 if now.duration_since(last_rotation).as_millis() < 200 {
-                    log_debug(&format!("Rejecting rotation - too soon, {}ms since last", now.duration_since(last_rotation).as_millis()));
                     return; // Too soon, ignore this rotation
                 }
             }
@@ -1272,8 +1251,6 @@ impl<'a> App<'a> {
                     let new_transformation = (old_transformation + 1) % max_transformations;
                     self.set_blokus_transformation(new_transformation, "blokus_rotate_piece");
                     self.blokus_last_rotation_time = Some(now);
-                    log_debug(&format!("Rotated piece {} from {} to {} (max={})", 
-                        piece_idx, old_transformation, new_transformation, max_transformations));
                 }
             }
         }
@@ -1323,7 +1300,6 @@ impl<'a> App<'a> {
     }
 
     pub fn blokus_cycle_pieces(&mut self, forward: bool) {
-        log_debug(&format!("blokus_cycle_pieces called with forward={}", forward));
         if let GameWrapper::Blokus(_) = &self.game {
             // Only allow cycling if it's human's turn
             if self.is_current_player_ai() || self.ai_state != AIState::Idle {
@@ -1344,21 +1320,16 @@ impl<'a> App<'a> {
                 if new_idx != current_idx {
                     // Store current transformation before selecting new piece
                     let current_transformation = self.get_blokus_transformation("blokus_cycle_pieces_store");
-                    log_debug(&format!("Cycling from piece {} to piece {}, storing transformation={}", current_idx, new_idx, current_transformation));
                     
                     // Reset to the new piece
                     self.blokus_selected_piece_idx = Some(new_idx);
                     self.set_blokus_transformation(0, "blokus_cycle_pieces_reset");
-                    log_debug(&format!("Reset transformation to 0 for new piece {}", new_idx));
                     self.blokus_show_piece_preview = true;
                     
                     // Try to restore transformation if the new piece supports it
                     if let Some((_, max_transformations)) = pieces.get(new_idx) {
                         if current_transformation < *max_transformations {
                             self.set_blokus_transformation(current_transformation, "blokus_cycle_pieces_restore");
-                            log_debug(&format!("Restored transformation to {} for piece {} (max={})", current_transformation, new_idx, max_transformations));
-                        } else {
-                            log_debug(&format!("Could not restore transformation {} for piece {} (max={})", current_transformation, new_idx, max_transformations));
                         }
                     }
                 }
@@ -1480,13 +1451,10 @@ impl<'a> App<'a> {
         self.player_config_index = 0;
     }
 
-    pub fn set_blokus_transformation(&mut self, new_value: usize, source: &str) {
+    pub fn set_blokus_transformation(&mut self, new_value: usize, _source: &str) {
         let old_value = self.blokus_selected_transformation;
         if old_value != new_value {
-            log_debug(&format!("TRANSFORMATION CHANGE: {} -> {} (source: {})", old_value, new_value, source));
             self.blokus_selected_transformation = new_value;
-        } else {
-            log_debug(&format!("TRANSFORMATION NO-CHANGE: {} (source: {})", old_value, source));
         }
     }
 
@@ -1532,29 +1500,9 @@ struct Args {
     shared_tree: bool,
 }
 
-// Helper function to log debug messages to file
-fn log_debug(message: &str) {
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("blokus_debug.log")
-    {
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        if let Err(_) = writeln!(file, "[{}] {}", timestamp, message) {
-            // If we can't write to file, fall back to stderr
-            eprintln!("DEBUG: {}", message);
-        }
-    } else {
-        // If we can't open file, fall back to stderr
-        eprintln!("DEBUG: {}", message);
-    }
-}
+
 
 fn main() -> io::Result<()> {
-    log_debug("=== NEW SESSION STARTED ===");
     let args = Args::parse();
     let mut app = App::new(args);
     tui::run_tui(&mut app)?;
