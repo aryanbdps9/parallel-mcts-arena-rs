@@ -204,6 +204,10 @@ pub struct App {
     pub selected_blokus_piece: Option<(usize, usize)>,
     pub history_scroll: u16,
     pub debug_scroll: u16,
+    // Auto-scroll for move history
+    pub history_auto_scroll: bool,
+    pub history_user_scroll_time: Option<std::time::Instant>,
+    pub history_auto_scroll_reset_duration: std::time::Duration,
     // AI timing and status
     pub ai_thinking_start: Option<std::time::Instant>,
     pub ai_minimum_display_duration: std::time::Duration,
@@ -356,6 +360,10 @@ impl App {
             selected_blokus_piece: None,
             history_scroll: 0,
             debug_scroll: 0,
+            // Auto-scroll for move history
+            history_auto_scroll: true,
+            history_user_scroll_time: None,
+            history_auto_scroll_reset_duration: std::time::Duration::from_secs(20), // 20 seconds as requested
             // AI timing and status
             ai_thinking_start: None,
             ai_minimum_display_duration: std::time::Duration::from_millis(500), // Minimum 0.5 seconds display
@@ -404,6 +412,7 @@ impl App {
                             self.game_wrapper.get_current_player(),
                             best_move.clone(),
                         ));
+                        self.on_move_added(); // Auto-scroll to bottom
                         self.game_wrapper.make_move(&best_move);
                         self.last_search_stats = Some(stats);
                         
@@ -433,6 +442,9 @@ impl App {
                 }
             }
         }
+        
+        // Handle auto-scroll reset timer for move history
+        self.update_history_auto_scroll();
     }
 
     pub fn get_selected_game_name(&self) -> &'static str {
@@ -666,10 +678,12 @@ impl App {
 
     pub fn scroll_move_history_up(&mut self) {
         self.history_scroll = self.history_scroll.saturating_sub(1);
+        self.on_user_history_scroll();
     }
 
     pub fn scroll_move_history_down(&mut self) {
         self.history_scroll = self.history_scroll.saturating_add(1);
+        self.on_user_history_scroll();
     }
 
     // Enhanced Blokus functionality
@@ -789,6 +803,7 @@ impl App {
                         self.game_wrapper.get_current_player(),
                         move_wrapper.clone(),
                     ));
+                    self.on_move_added(); // Auto-scroll to bottom
                     
                     // Make the move
                     self.game_wrapper.make_move(&move_wrapper);
@@ -818,6 +833,7 @@ impl App {
                 self.game_wrapper.get_current_player(),
                 move_wrapper.clone(),
             ));
+            self.on_move_added(); // Auto-scroll to bottom
             
             // Make the pass move
             self.game_wrapper.make_move(&move_wrapper);
@@ -848,6 +864,8 @@ impl App {
 
     pub fn reset_history_scroll(&mut self) {
         self.history_scroll = 0;
+        self.history_auto_scroll = true;
+        self.history_user_scroll_time = None;
     }
 
     pub fn blokus_scroll_panel_up(&mut self) {
@@ -856,6 +874,37 @@ impl App {
 
     pub fn blokus_scroll_panel_down(&mut self) {
         self.blokus_ui_config.scroll_panel_down();
+    }
+
+    /// Update auto-scroll behavior for move history
+    fn update_history_auto_scroll(&mut self) {
+        // Check if we should reset auto-scroll after user interaction
+        if let Some(user_scroll_time) = self.history_user_scroll_time {
+            if user_scroll_time.elapsed() >= self.history_auto_scroll_reset_duration {
+                self.history_auto_scroll = true;
+                self.history_user_scroll_time = None;
+            }
+        }
+    }
+
+    /// Called when user manually scrolls the history - disables auto-scroll temporarily
+    pub fn on_user_history_scroll(&mut self) {
+        self.history_auto_scroll = false;
+        self.history_user_scroll_time = Some(std::time::Instant::now());
+    }
+
+    /// Called when a new move is added - ensures we scroll to bottom if auto-scroll is enabled
+    pub fn on_move_added(&mut self) {
+        if self.history_auto_scroll {
+            self.history_scroll = 0; // Reset to bottom (0 means show latest moves)
+        }
+    }
+
+    /// Manually enable auto-scroll for move history
+    pub fn enable_history_auto_scroll(&mut self) {
+        self.history_auto_scroll = true;
+        self.history_user_scroll_time = None;
+        self.history_scroll = 0; // Go to bottom immediately
     }
 
     /// Map game player ID to UI player ID
@@ -878,15 +927,19 @@ impl App {
         }
     }
 
+    /// Check if the current player is controlled by AI
     pub fn is_current_player_ai(&self) -> bool {
         let game_player_id = self.game_wrapper.get_current_player();
         let ui_player_id = self.map_game_player_to_ui_player(game_player_id);
         self.player_options
             .iter()
-            .any(|(id, p_type)| *id == ui_player_id && *p_type == Player::AI)
+            .find(|(id, _)| *id == ui_player_id)
+            .map(|(_, p_type)| *p_type == Player::AI)
+            .unwrap_or(false)
     }
 
-    pub fn check_game_over(&mut self) {
+    /// Check if the game is over and update game status
+    fn check_game_over(&mut self) {
         if self.game_wrapper.is_terminal() {
             self.game_status = match self.game_wrapper.get_winner() {
                 Some(winner) => GameStatus::Win(winner),
@@ -896,66 +949,119 @@ impl App {
         }
     }
 
-    /// Clear selected piece if it becomes unavailable
+    /// Clear selected Blokus piece if it becomes unavailable
     pub fn clear_selected_piece_if_unavailable(&mut self) {
-        if let Some(selected_piece) = self.blokus_ui_config.selected_piece_idx {
-            if let GameWrapper::Blokus(state) = &self.game_wrapper {
-                let available_pieces = state.get_available_pieces(state.get_current_player());
-                if !available_pieces.contains(&selected_piece) {
-                    self.blokus_ui_config.selected_piece_idx = None;
-                    self.blokus_ui_config.selected_transformation_idx = 0;
-                }
+        if let (Some(piece_idx), GameWrapper::Blokus(state)) = (self.blokus_ui_config.selected_piece_idx, &self.game_wrapper) {
+            let available_pieces = state.get_available_pieces(state.get_current_player());
+            if !available_pieces.contains(&piece_idx) {
+                self.blokus_ui_config.selected_piece_idx = None;
+                self.blokus_ui_config.selected_transformation_idx = 0;
             }
         }
     }
 
-    /// Find a valid cursor position for the selected Blokus piece
-    /// Returns true if a valid position was found and cursor was moved
+    /// Find a valid cursor position for the given Blokus piece and transformation
     fn find_valid_cursor_position_for_piece(&mut self, piece_idx: usize, transformation_idx: usize) -> bool {
         if let GameWrapper::Blokus(state) = &self.game_wrapper {
             let board = state.get_board();
             let board_height = board.len();
             let board_width = if board_height > 0 { board[0].len() } else { 0 };
             
-            // Try current position first
+            // Try positions starting from current cursor position, then spiral outward
+            let start_row = self.board_cursor.0 as usize;
+            let start_col = self.board_cursor.1 as usize;
+            
+            // First try the current position
             if self.would_blokus_piece_fit_at_cursor(piece_idx, transformation_idx) {
                 return true;
             }
             
-            // Search in a spiral pattern from current position
-            let start_row = self.board_cursor.0 as i32;
-            let start_col = self.board_cursor.1 as i32;
-            
-            for radius in 1..=((board_height.max(board_width)) as i32) {
-                // Check positions in a square around the current position
-                for dr in -radius..=radius {
-                    for dc in -radius..=radius {
-                        // Only check the perimeter of the current radius
-                        if dr.abs() != radius && dc.abs() != radius {
-                            continue;
-                        }
-                        
-                        let new_row = start_row + dr;
-                        let new_col = start_col + dc;
-                        
-                        // Check bounds
-                        if new_row >= 0 && new_row < board_height as i32 && new_col >= 0 && new_col < board_width as i32 {
-                            // Temporarily set cursor to test position
-                            let old_cursor = self.board_cursor;
-                            self.board_cursor = (new_row as u16, new_col as u16);
+            // Try positions in expanding squares around the current position
+            for radius in 1..=10 {
+                for row in start_row.saturating_sub(radius)..=(start_row + radius).min(board_height - 1) {
+                    for col in start_col.saturating_sub(radius)..=(start_col + radius).min(board_width - 1) {
+                        // Only check the border of the current radius
+                        if (row == start_row.saturating_sub(radius) || row == (start_row + radius).min(board_height - 1)) ||
+                           (col == start_col.saturating_sub(radius) || col == (start_col + radius).min(board_width - 1)) {
                             
+                            self.board_cursor = (row as u16, col as u16);
                             if self.would_blokus_piece_fit_at_cursor(piece_idx, transformation_idx) {
-                                // Found a valid position, keep the cursor here
                                 return true;
                             }
-                            
-                            // Restore cursor for next test
-                            self.board_cursor = old_cursor;
                         }
                     }
                 }
             }
+            
+            // If no valid position found, reset cursor to original position
+            self.board_cursor = (start_row as u16, start_col as u16);
         }
         false
+    }
+
+    /// Get the effective scroll offset for move history, considering auto-scroll
+    pub fn get_history_scroll_offset(&self, content_height: usize, visible_height: usize) -> usize {
+        if self.history_auto_scroll {
+            // Auto-scroll: always show the bottom
+            content_height.saturating_sub(visible_height)
+        } else {
+            // Manual scroll: use user-set offset
+            let max_scroll = content_height.saturating_sub(visible_height);
+            (self.history_scroll as usize).min(max_scroll)
+        }
+    }
+
+    /// Get the color for a player that matches the board display
+    pub fn get_player_color(&self, player_id: i32) -> ratatui::prelude::Color {
+        use ratatui::prelude::Color;
+        
+        match &self.game_wrapper {
+            GameWrapper::Connect4(_) => {
+                // Connect4 uses game player IDs 1 and -1, map to UI colors
+                if player_id == 1 { Color::Red } else { Color::Yellow }
+            }
+            GameWrapper::Othello(_) => {
+                // Othello uses game player IDs 1 and -1, both display as white for contrast
+                Color::White
+            }
+            GameWrapper::Blokus(_) => {
+                // Blokus uses player IDs 1,2,3,4 directly
+                match player_id {
+                    1 => Color::Red,
+                    2 => Color::Blue,
+                    3 => Color::Green,
+                    4 => Color::Yellow,
+                    _ => Color::White,
+                }
+            }
+            _ => { // Gomoku and others
+                // Game uses 1 and -1, map to UI colors
+                if player_id == 1 { Color::Red } else { Color::Blue }
+            }
+        }
+    }
+
+    /// Get the player symbol/marker for display
+    pub fn get_player_symbol(&self, player_id: i32) -> &'static str {
+        match &self.game_wrapper {
+            GameWrapper::Connect4(_) => {
+                if player_id == 1 { "🔴" } else { "🟡" }
+            }
+            GameWrapper::Othello(_) => {
+                if player_id == 1 { "⚫" } else { "⚪" }
+            }
+            GameWrapper::Blokus(_) => {
+                match player_id {
+                    1 => "🟥", // Red square
+                    2 => "🟦", // Blue square
+                    3 => "🟩", // Green square
+                    4 => "🟨", // Yellow square
+                    _ => "⬜",
+                }
+            }
+            _ => { // Gomoku and others
+                if player_id == 1 { "❌" } else { "⭕" }
+            }
+        }
     }
 }

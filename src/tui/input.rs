@@ -146,7 +146,7 @@ fn handle_ingame_input(key_code: KeyCode, app: &mut App) {
         KeyCode::PageUp => app.scroll_debug_up(),
         KeyCode::PageDown => app.scroll_debug_down(),
         KeyCode::Home => app.reset_debug_scroll(),
-        KeyCode::End => app.reset_history_scroll(),
+        KeyCode::End => app.enable_history_auto_scroll(),
         KeyCode::Char('f') => {
             if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
                 app.blokus_select_piece(15);
@@ -420,6 +420,7 @@ fn make_move(app: &mut App) {
     if app.game_wrapper.is_legal(&player_move) {
         let current_player = app.game_wrapper.get_current_player();
         app.move_history.push(crate::app::MoveHistoryEntry::new(current_player, player_move.clone()));
+        app.on_move_added(); // Auto-scroll to bottom
         app.game_wrapper.make_move(&player_move);
         
         // Advance the AI worker's MCTS tree root to reflect the move that was just made

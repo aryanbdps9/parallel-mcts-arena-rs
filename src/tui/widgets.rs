@@ -496,46 +496,46 @@ fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(100)])
             .split(area)
+    };    // Group moves side-by-side based on game type
+    let formatted_lines = match &app.game_wrapper {
+        GameWrapper::Blokus(_) => {
+            // For Blokus (4 players), group moves in sets of 4 per line
+            format_blokus_moves_sidebyside_colored(&app.move_history, chunks[0].width.saturating_sub(2) as usize, app)
+        },
+        _ => {
+            // For 2-player games, group moves in pairs per line
+            format_two_player_moves_sidebyside_colored(&app.move_history, chunks[0].width.saturating_sub(2) as usize, app)
+        }
     };
-
-    let items: Vec<ListItem> = app
-        .move_history
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let player_symbol = match &app.game_wrapper {
-                GameWrapper::Blokus(_) => format!("P{}", entry.player),
-                _ => if entry.player == 1 { "X".to_string() } else { "O".to_string() },
-            };
-            let move_str = format!("{}. {}: {}", i + 1, player_symbol, entry.a_move);
-            ListItem::new(move_str)
-        })
-        .collect();
-
-    // Apply scrolling - show items starting from scroll offset
-    let content_height = items.len();
+    
+    // Calculate scrolling for text content using auto-scroll logic
+    let content_height = formatted_lines.len();
     let visible_height = chunks[0].height.saturating_sub(2) as usize; // Account for borders
-    let max_scroll = content_height.saturating_sub(visible_height);
-    let scroll_offset = (app.history_scroll as usize).min(max_scroll);
-
-    let visible_items: Vec<ListItem> = items
+    let scroll_offset = app.get_history_scroll_offset(content_height, visible_height);
+    
+    // Take visible lines for display
+    let visible_lines = formatted_lines
         .into_iter()
         .skip(scroll_offset)
         .take(visible_height)
-        .collect();
+        .collect::<Vec<Line>>();
 
     let drag_indicator = if app.drag_state.is_dragging { "🔀" } else { "↔" };
-    let title = format!("{} Move History ({}) - {}%", 
+    let auto_scroll_indicator = if app.history_auto_scroll { "📜" } else { "📌" };
+    let title = format!("{} {} Move History ({}) - {}%", 
         drag_indicator, 
+        auto_scroll_indicator,
         app.move_history.len(),
         100 - app.layout_config.stats_width_percent
     );
 
-    let list = List::new(visible_items)
-        .block(Block::default().borders(Borders::ALL).title(title));
-    f.render_widget(list, chunks[0]);
+    let paragraph = Paragraph::new(visible_lines)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(ratatui::widgets::Wrap { trim: true }); // Enable word wrap
+    f.render_widget(paragraph, chunks[0]);
 
     // Render scrollbar if content is scrollable and we have space for it
+    let max_scroll = content_height.saturating_sub(visible_height);
     if max_scroll > 0 && chunks.len() > 1 && chunks[1].height > 2 {
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(content_height)
@@ -549,6 +549,116 @@ fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
             
         f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
     }
+}
+
+/// Format two-player game moves side-by-side with colors
+fn format_two_player_moves_sidebyside_colored<'a>(move_history: &'a [crate::app::MoveHistoryEntry], max_width: usize, app: &'a App) -> Vec<Line<'a>> {
+    use ratatui::prelude::*;
+    let mut result = Vec::new();
+    let mut moves_iter = move_history.iter().enumerate();
+    
+    while let Some((i, first_move)) = moves_iter.next() {
+        let move_number = (i / 2) + 1;
+        
+        // Get player color and symbol
+        let first_player_color = app.get_player_color(first_move.player);
+        let first_player_symbol = app.get_player_symbol(first_move.player);
+        
+        // Format first player's move with color
+        let first_player_spans = vec![
+            Span::styled(format!("{}. ", move_number), Style::default().fg(Color::Gray)),
+            Span::styled(first_player_symbol, Style::default()),
+            Span::styled(format!(" {}", first_move.a_move), Style::default().fg(first_player_color).add_modifier(Modifier::BOLD)),
+        ];
+        
+        // Check if there's a second move for this round
+        if let Some((_, second_move)) = moves_iter.next() {
+            let second_player_color = app.get_player_color(second_move.player);
+            let second_player_symbol = app.get_player_symbol(second_move.player);
+            
+            // Calculate approximate text length for spacing
+            let first_text_len = format!("{}. {} {}", move_number, first_player_symbol, first_move.a_move).len();
+            let second_text_len = format!("{} {}", second_player_symbol, second_move.a_move).len();
+            let combined_length = first_text_len + second_text_len + 3; // 3 spaces minimum
+            
+            if combined_length <= max_width {
+                // Fit on one line with spacing
+                let spacing = " ".repeat((max_width - first_text_len - second_text_len).max(3).min(10));
+                let mut line_spans = first_player_spans;
+                line_spans.push(Span::styled(spacing, Style::default()));
+                line_spans.push(Span::styled(second_player_symbol, Style::default()));
+                line_spans.push(Span::styled(format!(" {}", second_move.a_move), Style::default().fg(second_player_color).add_modifier(Modifier::BOLD)));
+                result.push(Line::from(line_spans));
+            } else {
+                // Too long, put second move on new line with indentation
+                result.push(Line::from(first_player_spans));
+                let second_player_spans = vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(second_player_symbol, Style::default()),
+                    Span::styled(format!(" {}", second_move.a_move), Style::default().fg(second_player_color).add_modifier(Modifier::BOLD)),
+                ];
+                result.push(Line::from(second_player_spans));
+            }
+        } else {
+            // Only first move exists
+            result.push(Line::from(first_player_spans));
+        }
+    }
+    
+    result
+}
+
+/// Format Blokus (4-player) moves side-by-side with colors
+fn format_blokus_moves_sidebyside_colored<'a>(move_history: &'a [crate::app::MoveHistoryEntry], max_width: usize, app: &'a App) -> Vec<Line<'a>> {
+    use ratatui::prelude::*;
+    let mut result = Vec::new();
+    let mut moves_iter = move_history.chunks(4).enumerate();
+    
+    while let Some((round, round_moves)) = moves_iter.next() {
+        let move_number = round + 1;
+        result.push(Line::from(Span::styled(format!("Round {}:", move_number), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+        
+        // Collect all moves for this round with their colors
+        let mut move_spans = Vec::new();
+        for (i, move_entry) in round_moves.iter().enumerate() {
+            let player_color = app.get_player_color(move_entry.player);
+            let player_symbol = app.get_player_symbol(move_entry.player);
+            
+            if i > 0 {
+                move_spans.push(Span::styled(" | ", Style::default().fg(Color::Gray)));
+            }
+            move_spans.push(Span::styled(player_symbol, Style::default()));
+            move_spans.push(Span::styled(format!(" {}", move_entry.a_move), Style::default().fg(player_color).add_modifier(Modifier::BOLD)));
+        }
+        
+        // Check if the line fits
+        let line_text = format!("  {}", round_moves.iter().map(|m| format!("{} {}", app.get_player_symbol(m.player), m.a_move)).collect::<Vec<_>>().join(" | "));
+        if line_text.len() <= max_width {
+            // Fit on one line
+            let mut line_content = vec![Span::styled("  ", Style::default())];
+            line_content.extend(move_spans);
+            result.push(Line::from(line_content));
+        } else {
+            // Wrap moves - put 2 per line if possible
+            let move_pairs: Vec<_> = round_moves.chunks(2).collect();
+            for pair in move_pairs {
+                let mut pair_spans = vec![Span::styled("  ", Style::default())];
+                for (i, move_entry) in pair.iter().enumerate() {
+                    let player_color = app.get_player_color(move_entry.player);
+                    let player_symbol = app.get_player_symbol(move_entry.player);
+                    
+                    if i > 0 {
+                        pair_spans.push(Span::styled(" | ", Style::default().fg(Color::Gray)));
+                    }
+                    pair_spans.push(Span::styled(player_symbol, Style::default()));
+                    pair_spans.push(Span::styled(format!(" {}", move_entry.a_move), Style::default().fg(player_color).add_modifier(Modifier::BOLD)));
+                }
+                result.push(Line::from(pair_spans));
+            }
+        }
+    }
+    
+    result
 }
 
 fn draw_board(f: &mut Frame, app: &App, area: Rect) {

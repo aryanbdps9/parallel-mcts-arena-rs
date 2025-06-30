@@ -76,6 +76,9 @@ pub fn handle_mouse_event(app: &mut App, kind: MouseEventKind, col: u16, row: u1
         MouseEventKind::Down(MouseButton::Left) => {
             handle_mouse_click(app, col, row, terminal_size);
         }
+        MouseEventKind::Down(MouseButton::Right) => {
+            handle_mouse_right_click(app, col, row, terminal_size);
+        }
         MouseEventKind::Drag(MouseButton::Left) => {
             handle_mouse_drag(app, col, row, terminal_size);
         }
@@ -89,6 +92,21 @@ pub fn handle_mouse_event(app: &mut App, kind: MouseEventKind, col: u16, row: u1
             handle_mouse_scroll(app, col, row, terminal_size, false);
         }
         _ => {}
+    }
+}
+
+/// Handle right mouse click events
+fn handle_mouse_right_click(app: &mut App, _col: u16, _row: u16, _terminal_size: Rect) {
+    // Right-click in Blokus to rotate selected piece
+    if matches!(app.game_wrapper, GameWrapper::Blokus(_)) && app.mode == AppMode::InGame {
+        if let Some((piece_idx, _)) = app.blokus_ui_config.get_selected_piece_info() {
+            // Get the number of transformations for this piece
+            let pieces = crate::games::blokus::get_blokus_pieces();
+            if piece_idx < pieces.len() {
+                let total_transformations = pieces[piece_idx].transformations.len();
+                app.blokus_ui_config.rotate_piece(total_transformations);
+            }
+        }
     }
 }
 
@@ -109,12 +127,10 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
             handle_settings_click(app, col, row, terminal_size);
         }
         AppMode::InGame => {
-            if !app.ai_only {
-                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                    handle_blokus_click(app, col, row, terminal_size);
-                } else {
-                    handle_board_click(app, col, row, terminal_size);
-                }
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                handle_blokus_click(app, col, row, terminal_size);
+            } else {
+                handle_board_click(app, col, row, terminal_size);
             }
         }
         AppMode::GameOver => {
@@ -152,9 +168,9 @@ fn handle_mouse_release(app: &mut App, _col: u16, _row: u16, _terminal_size: Rec
 fn handle_mouse_scroll(app: &mut App, col: u16, row: u16, terminal_size: Rect, scroll_up: bool) {
     match app.mode {
         AppMode::InGame | AppMode::GameOver => {
-            // Special handling for Blokus piece selection scrolling
+            // Special handling for Blokus
             if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                let (_, piece_selection_area, _) = app.layout_config.get_blokus_layout(terminal_size);
+                let (board_area, piece_selection_area, _) = app.layout_config.get_blokus_layout(terminal_size);
                 
                 // Check if mouse is in piece selection area
                 if col >= piece_selection_area.x && col < piece_selection_area.x + piece_selection_area.width &&
@@ -163,6 +179,27 @@ fn handle_mouse_scroll(app: &mut App, col: u16, row: u16, terminal_size: Rect, s
                         app.blokus_scroll_panel_up();
                     } else {
                         app.blokus_scroll_panel_down();
+                    }
+                    return;
+                }
+                
+                // Check if mouse is over board area and a piece is selected - rotate piece
+                if col >= board_area.x && col < board_area.x + board_area.width &&
+                   row >= board_area.y && row < board_area.y + board_area.height {
+                    if let Some((piece_idx, _)) = app.blokus_ui_config.get_selected_piece_info() {
+                        // Get the number of transformations for this piece
+                        let pieces = crate::games::blokus::get_blokus_pieces();
+                        if piece_idx < pieces.len() {
+                            let total_transformations = pieces[piece_idx].transformations.len();
+                            if scroll_up {
+                                app.blokus_ui_config.rotate_piece(total_transformations);
+                            } else {
+                                // Rotate in reverse direction
+                                for _ in 0..(total_transformations - 1) {
+                                    app.blokus_ui_config.rotate_piece(total_transformations);
+                                }
+                            }
+                        }
                     }
                     return;
                 }
@@ -249,30 +286,69 @@ fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
         return;
     }
 
-    let board = app.game_wrapper.get_board();
-    let board_height = board.len();
-    let board_width = if board_height > 0 { board[0].len() } else { 0 };
-
     let (board_area, _, _) = app.layout_config.get_main_layout(terminal_size);
     
     // Check if click is within the board area
-    if row < board_area.height {
+    if row >= board_area.y && row < board_area.y + board_area.height &&
+       col >= board_area.x && col < board_area.x + board_area.width {
+        
+        let (board_height, board_width) = {
+            let board = app.game_wrapper.get_board();
+            (board.len(), if board.len() > 0 { board[0].len() } else { 0 })
+        };
+        
         // Calculate board cell from click position
         // Account for borders and labels
         let board_start_col = board_area.x + 1; // Border
         let board_start_row = board_area.y + 1; // Border
         
         if col >= board_start_col && row >= board_start_row {
-            let cell_width = (board_area.width.saturating_sub(2)) / board_width as u16;
-            let cell_height = (board_area.height.saturating_sub(2)) / board_height as u16;
+            let available_width = board_area.width.saturating_sub(2);
+            let available_height = board_area.height.saturating_sub(2);
+            
+            let cell_width = (available_width as f32 / board_width as f32) as u16;
+            let cell_height = (available_height as f32 / board_height as f32) as u16;
             
             let board_col = ((col - board_start_col) / cell_width.max(1)) as usize;
             let board_row = ((row - board_start_row) / cell_height.max(1)) as usize;
             
             if board_row < board_height && board_col < board_width {
-                if board[board_row][board_col] == 0 {
-                    app.board_cursor = (board_row as u16, board_col as u16);
-                    make_move(app);
+                // Update cursor position
+                app.board_cursor = (board_row as u16, board_col as u16);
+                
+                // For Connect4, adjust cursor to lowest available position
+                if matches!(app.game_wrapper, GameWrapper::Connect4(_)) {
+                    update_connect4_cursor_row(app);
+                }
+                
+                // Check if move is legal before making it
+                let player_move = {
+                    let board = app.game_wrapper.get_board();
+                    match &app.game_wrapper {
+                        GameWrapper::Gomoku(_) => {
+                            if board[board_row][board_col] == 0 {
+                                Some(MoveWrapper::Gomoku(GomokuMove(board_row, board_col)))
+                            } else {
+                                None
+                            }
+                        },
+                        GameWrapper::Connect4(_) => {
+                            Some(MoveWrapper::Connect4(Connect4Move(board_col)))
+                        },
+                        GameWrapper::Othello(_) => {
+                            Some(MoveWrapper::Othello(OthelloMove(board_row, board_col)))
+                        },
+                        GameWrapper::Blokus(_) => {
+                            // Blokus handled separately
+                            None
+                        }
+                    }
+                };
+                
+                if let Some(mv) = player_move {
+                    if app.game_wrapper.is_legal(&mv) {
+                        make_move_with_move(app, mv);
+                    }
                 }
             }
         }
@@ -287,29 +363,120 @@ fn handle_blokus_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
 
     let (board_area, piece_area, _) = app.layout_config.get_blokus_layout(terminal_size);
     
-    if col >= board_area.x && col < board_area.x + board_area.width {
-        // Click on board area
-        handle_board_click(app, col, row, terminal_size);
-    } else if col >= piece_area.x && col < piece_area.x + piece_area.width {
+    if col >= board_area.x && col < board_area.x + board_area.width &&
+       row >= board_area.y && row < board_area.y + board_area.height {
+        // Click on board area - place piece or update cursor
+        handle_blokus_board_click(app, col - board_area.x, row - board_area.y, board_area);
+    } else if col >= piece_area.x && col < piece_area.x + piece_area.width &&
+              row >= piece_area.y && row < piece_area.y + piece_area.height {
         // Click on piece selection area
         handle_blokus_piece_selection_click(app, col - piece_area.x, row - piece_area.y);
     }
 }
 
+/// Handle clicks on the Blokus board
+fn handle_blokus_board_click(app: &mut App, col: u16, row: u16, board_area: Rect) {
+    let board = app.game_wrapper.get_board();
+    let board_height = board.len();
+    let board_width = if board_height > 0 { board[0].len() } else { 0 };
+    
+    // Calculate board cell from click position
+    let board_start_col = 1; // Border
+    let board_start_row = 1; // Border
+    
+    if col >= board_start_col && row >= board_start_row {
+        let available_width = board_area.width.saturating_sub(2);
+        let available_height = board_area.height.saturating_sub(2);
+        
+        let cell_width = (available_width as f32 / board_width as f32) as u16;
+        let cell_height = (available_height as f32 / board_height as f32) as u16;
+        
+        let board_col = ((col - board_start_col) / cell_width.max(1)) as usize;
+        let board_row = ((row - board_start_row) / cell_height.max(1)) as usize;
+        
+        if board_row < board_height && board_col < board_width {
+            // Update cursor position
+            app.board_cursor = (board_row as u16, board_col as u16);
+            
+            // If a piece is selected, try to place it
+            if let Some((piece_idx, transformation_idx)) = app.blokus_ui_config.get_selected_piece_info() {
+                let player_move = MoveWrapper::Blokus(BlokusMove(
+                    piece_idx, 
+                    transformation_idx, 
+                    board_row, 
+                    board_col
+                ));
+                
+                if app.game_wrapper.is_legal(&player_move) {
+                    make_move_with_move(app, player_move);
+                    // Deselect piece after successful placement
+                    app.blokus_ui_config.selected_piece_idx = None;
+                }
+            }
+        }
+    }
+}
+
 /// Handle clicks in Blokus piece selection area
 fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16) {
-    // Simple implementation - toggle expansion for players
-    if col <= 5 { // Click on expand/collapse indicator area
+    let current_player = app.game_wrapper.get_current_player();
+    
+    // Check if clicking on expand/collapse area
+    if col <= 5 { 
         let estimated_player = match row {
             0..=10 => 1,
-            11..=20 => 2,
-            21..=30 => 3,
-            31..=40 => 4,
+            11..=21 => 2,
+            22..=32 => 3,
+            33..=43 => 4,
             _ => return,
         };
         
         if estimated_player >= 1 && estimated_player <= 4 {
-            app.blokus_toggle_player_expand((estimated_player - 1) as usize);
+            app.blokus_ui_config.toggle_player_expand((estimated_player - 1) as usize);
+        }
+        return;
+    }
+    
+    // Check if clicking on pieces for the current player
+    if let GameWrapper::Blokus(ref state) = app.game_wrapper {
+        let available_pieces = state.get_available_pieces(current_player);
+        
+        // Calculate which piece was clicked based on the expanded state
+        let mut piece_row = 0;
+        for player_idx in 0..4 {
+            if !app.blokus_ui_config.players_expanded[player_idx] {
+                piece_row += 1; // Just the header row
+                continue;
+            }
+            
+            // Player header
+            piece_row += 1;
+            
+            if player_idx == (current_player - 1) as usize {
+                // This is the current player - check if we clicked on a piece
+                let pieces_per_row = 5; // Display 5 pieces per row
+                let piece_area_start = piece_row;
+                
+                if row >= piece_area_start {
+                    let relative_row = row - piece_area_start;
+                    let piece_col = (col - 6) / 8; // Each piece takes ~8 characters width
+                    let piece_row_in_section = relative_row / 3; // Each piece takes ~3 rows height
+                    
+                    let piece_index = (piece_row_in_section * pieces_per_row + piece_col) as usize;
+                    
+                    if piece_index < available_pieces.len() {
+                        // Piece is available - select it
+                        let piece_id = available_pieces[piece_index];
+                        app.blokus_ui_config.select_piece(piece_id);
+                        return;
+                    }
+                }
+                break;
+            } else {
+                // Count rows for other players
+                let other_available = state.get_available_pieces((player_idx + 1) as i32);
+                piece_row += ((other_available.len() + 4) / 5 * 3) as u16; // 5 pieces per row, 3 rows per piece section
+            }
         }
     }
 }
@@ -335,6 +502,43 @@ fn is_current_player_human(app: &App) -> bool {
         .any(|(id, p_type)| *id == ui_player_id && *p_type == Player::Human)
 }
 
+/// Update Connect4 cursor to lowest available position in column
+fn update_connect4_cursor_row(app: &mut App) {
+    let board = app.game_wrapper.get_board();
+    let board_height = board.len();
+    let col = app.board_cursor.1 as usize;
+    
+    if col < board[0].len() {
+        // Find the lowest available row in this column
+        for row in (0..board_height).rev() {
+            if board[row][col] == 0 {
+                app.board_cursor.0 = row as u16;
+                break;
+            }
+        }
+    }
+}
+
+/// Make a move with a specific move
+fn make_move_with_move(app: &mut App, player_move: MoveWrapper) {
+    let current_player = app.game_wrapper.get_current_player();
+    app.move_history.push(crate::app::MoveHistoryEntry::new(current_player, player_move.clone()));
+    app.on_move_added(); // Auto-scroll to bottom
+    app.game_wrapper.make_move(&player_move);
+    
+    // Advance the AI worker's MCTS tree root to reflect the move that was just made
+    app.ai_worker.advance_root(&player_move);
+    
+    // Check for game over
+    if app.game_wrapper.is_terminal() {
+        app.game_status = match app.game_wrapper.get_winner() {
+            Some(winner) => GameStatus::Win(winner),
+            None => GameStatus::Draw,
+        };
+        app.mode = AppMode::GameOver;
+    }
+}
+
 /// Make a move at the current cursor position
 fn make_move(app: &mut App) {
     let (row, col) = (app.board_cursor.0 as usize, app.board_cursor.1 as usize);
@@ -350,20 +554,6 @@ fn make_move(app: &mut App) {
     };
 
     if app.game_wrapper.is_legal(&player_move) {
-        let current_player = app.game_wrapper.get_current_player();
-        app.move_history.push(crate::app::MoveHistoryEntry::new(current_player, player_move.clone()));
-        app.game_wrapper.make_move(&player_move);
-        
-        // Advance the AI worker's MCTS tree root to reflect the move that was just made
-        app.ai_worker.advance_root(&player_move);
-        
-        // Check for game over
-        if app.game_wrapper.is_terminal() {
-            app.game_status = match app.game_wrapper.get_winner() {
-                Some(winner) => GameStatus::Win(winner),
-                None => GameStatus::Draw,
-            };
-            app.mode = AppMode::GameOver;
-        }
+        make_move_with_move(app, player_move);
     }
 }
