@@ -6,6 +6,7 @@
 use crate::app::{App, AppMode, GameStatus, Player};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::games::{gomoku::GomokuMove, connect4::Connect4Move, othello::OthelloMove, blokus::BlokusMove};
+use crate::games::blokus::get_blokus_pieces;
 use crate::tui::mouse;
 use crossterm::event::{KeyCode, MouseEventKind};
 use ratatui::layout::Rect;
@@ -314,7 +315,15 @@ fn is_current_player_human(app: &App) -> bool {
 
 fn move_cursor_up(app: &mut App) {
     if app.board_cursor.0 > 0 {
-        app.board_cursor.0 -= 1;
+        let new_row = app.board_cursor.0 - 1;
+        // For Blokus, check if the selected piece would fit at the new position
+        if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+            if would_blokus_piece_fit(app, new_row, app.board_cursor.1) {
+                app.board_cursor.0 = new_row;
+            }
+        } else {
+            app.board_cursor.0 = new_row;
+        }
     }
 }
 
@@ -322,16 +331,32 @@ fn move_cursor_down(app: &mut App) {
     let board = app.game_wrapper.get_board();
     let max_row = board.len() as u16;
     if app.board_cursor.0 < max_row.saturating_sub(1) {
-        app.board_cursor.0 += 1;
+        let new_row = app.board_cursor.0 + 1;
+        // For Blokus, check if the selected piece would fit at the new position
+        if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+            if would_blokus_piece_fit(app, new_row, app.board_cursor.1) {
+                app.board_cursor.0 = new_row;
+            }
+        } else {
+            app.board_cursor.0 = new_row;
+        }
     }
 }
 
 fn move_cursor_left(app: &mut App) {
     if app.board_cursor.1 > 0 {
-        app.board_cursor.1 -= 1;
-        // For Connect4, update cursor to lowest available position in new column
-        if let GameWrapper::Connect4(_) = app.game_wrapper {
-            update_connect4_cursor_row(app);
+        let new_col = app.board_cursor.1 - 1;
+        // For Blokus, check if the selected piece would fit at the new position
+        if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+            if would_blokus_piece_fit(app, app.board_cursor.0, new_col) {
+                app.board_cursor.1 = new_col;
+            }
+        } else {
+            app.board_cursor.1 = new_col;
+            // For Connect4, update cursor to lowest available position in new column
+            if let GameWrapper::Connect4(_) = app.game_wrapper {
+                update_connect4_cursor_row(app);
+            }
         }
     }
 }
@@ -340,10 +365,18 @@ fn move_cursor_right(app: &mut App) {
     let board = app.game_wrapper.get_board();
     let max_col = if !board.is_empty() { board[0].len() as u16 } else { 0 };
     if app.board_cursor.1 < max_col.saturating_sub(1) {
-        app.board_cursor.1 += 1;
-        // For Connect4, update cursor to lowest available position in new column
-        if let GameWrapper::Connect4(_) = app.game_wrapper {
-            update_connect4_cursor_row(app);
+        let new_col = app.board_cursor.1 + 1;
+        // For Blokus, check if the selected piece would fit at the new position
+        if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+            if would_blokus_piece_fit(app, app.board_cursor.0, new_col) {
+                app.board_cursor.1 = new_col;
+            }
+        } else {
+            app.board_cursor.1 = new_col;
+            // For Connect4, update cursor to lowest available position in new column
+            if let GameWrapper::Connect4(_) = app.game_wrapper {
+                update_connect4_cursor_row(app);
+            }
         }
     }
 }
@@ -406,6 +439,50 @@ fn make_move(app: &mut App) {
             app.mode = AppMode::GameOver;
         }
     }
+}
+
+/// Check if a Blokus piece would fit within board bounds at the given position
+fn would_blokus_piece_fit(app: &App, new_row: u16, new_col: u16) -> bool {
+    // If no piece is selected, always allow movement
+    let (piece_idx, transformation_idx) = match app.blokus_ui_config.get_selected_piece_info() {
+        Some(info) => info,
+        None => return true,
+    };
+    
+    // Only check for Blokus game
+    if let GameWrapper::Blokus(state) = &app.game_wrapper {
+        let board = state.get_board();
+        let board_height = board.len();
+        let board_width = if board_height > 0 { board[0].len() } else { 0 };
+        
+        // Check if this piece is available for the current player
+        let current_player = state.get_current_player();
+        let available_pieces = state.get_available_pieces(current_player);
+        if !available_pieces.contains(&piece_idx) {
+            return true; // Allow movement if piece is not available anyway
+        }
+        
+        // Get the piece and its transformation
+        let pieces = get_blokus_pieces();
+        if let Some(piece) = pieces.iter().find(|p| p.id == piece_idx) {
+            if transformation_idx < piece.transformations.len() {
+                let shape = &piece.transformations[transformation_idx];
+                
+                // Check if all blocks of the piece would be within bounds
+                for &(dr, dc) in shape {
+                    let board_r = new_row as i32 + dr;
+                    let board_c = new_col as i32 + dc;
+                    
+                    // If any block would be out of bounds, don't allow this cursor position
+                    if board_r < 0 || board_r >= board_height as i32 || board_c < 0 || board_c >= board_width as i32 {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    
+    true
 }
 
 

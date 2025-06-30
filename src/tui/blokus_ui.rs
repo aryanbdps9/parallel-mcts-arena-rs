@@ -563,17 +563,32 @@ fn get_ghost_piece_positions(state: &BlokusState, piece_id: usize, transformatio
             if transformation < piece.transformations.len() {
                 let shape = &piece.transformations[transformation];
                 let board = state.get_board();
+                let board_height = board.len();
+                let board_width = if board_height > 0 { board[0].len() } else { 0 };
                 
-                // Always show the ghost piece at cursor position, but only on empty squares
+                // First, check if ALL blocks of the piece would be within bounds
+                let mut all_positions_valid = true;
+                let mut valid_positions = Vec::new();
+                
                 for &(dr, dc) in shape {
                     let board_r = row as i32 + dr;
                     let board_c = col as i32 + dc;
                     
-                    // Ensure we're within board bounds and the position is empty
-                    if board_r >= 0 && board_r < 20 && board_c >= 0 && board_c < 20 {
+                    // Check if this position is within board bounds
+                    if board_r >= 0 && board_r < board_height as i32 && board_c >= 0 && board_c < board_width as i32 {
                         let board_r = board_r as usize;
                         let board_c = board_c as usize;
-                        
+                        valid_positions.push((board_r, board_c));
+                    } else {
+                        // If any block is out of bounds, don't show the ghost piece at all
+                        all_positions_valid = false;
+                        break;
+                    }
+                }
+                
+                // Only show ghost piece if ALL blocks are within bounds
+                if all_positions_valid {
+                    for (board_r, board_c) in valid_positions {
                         // Only show ghost piece on empty squares
                         if board[board_r][board_c] == 0 {
                             positions.insert((board_r, board_c));

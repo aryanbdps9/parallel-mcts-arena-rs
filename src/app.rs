@@ -656,9 +656,50 @@ impl App {
             let available_pieces = state.get_available_pieces(state.get_current_player());
             if available_pieces.contains(&piece_idx) {
                 self.blokus_ui_config.select_piece(piece_idx);
+                // Try to find a valid cursor position for this piece
+                self.find_valid_cursor_position_for_piece(piece_idx, 0);
             }
             // If piece is not available, do nothing (no selection change)
         }
+    }
+
+    /// Check if a Blokus piece would fit within board bounds at the given position
+    fn would_blokus_piece_fit_at_cursor(&self, piece_idx: usize, transformation_idx: usize) -> bool {
+        if let GameWrapper::Blokus(state) = &self.game_wrapper {
+            let board = state.get_board();
+            let board_height = board.len();
+            let board_width = if board_height > 0 { board[0].len() } else { 0 };
+            
+            // Check if this piece is available for the current player
+            let current_player = state.get_current_player();
+            let available_pieces = state.get_available_pieces(current_player);
+            if !available_pieces.contains(&piece_idx) {
+                return false; // Piece not available
+            }
+            
+            // Get the piece and its transformation
+            let pieces = crate::games::blokus::get_blokus_pieces();
+            if let Some(piece) = pieces.iter().find(|p| p.id == piece_idx) {
+                if transformation_idx < piece.transformations.len() {
+                    let shape = &piece.transformations[transformation_idx];
+                    let cursor_row = self.board_cursor.0 as i32;
+                    let cursor_col = self.board_cursor.1 as i32;
+                    
+                    // Check if all blocks of the piece would be within bounds
+                    for &(dr, dc) in shape {
+                        let board_r = cursor_row + dr;
+                        let board_c = cursor_col + dc;
+                        
+                        // If any block would be out of bounds, piece doesn't fit
+                        if board_r < 0 || board_r >= board_height as i32 || board_c < 0 || board_c >= board_width as i32 {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub fn blokus_rotate_piece(&mut self) {
@@ -669,7 +710,32 @@ impl App {
                 if available_pieces.contains(&piece_idx) {
                     let pieces = crate::games::blokus::get_blokus_pieces();
                     if let Some(piece) = pieces.iter().find(|p| p.id == piece_idx) {
-                        self.blokus_ui_config.rotate_piece(piece.transformations.len());
+                        let current_transformation = self.blokus_ui_config.selected_transformation_idx;
+                        let total_transformations = piece.transformations.len();
+                        
+                        if total_transformations > 0 {
+                            // Calculate the next transformation index
+                            let next_transformation = (current_transformation + 1) % total_transformations;
+                            
+                            // Check if the piece would fit at the current cursor position with the new transformation
+                            if self.would_blokus_piece_fit_at_cursor(piece_idx, next_transformation) {
+                                // Fits at current position, just rotate
+                                self.blokus_ui_config.selected_transformation_idx = next_transformation;
+                            } else {
+                                // Doesn't fit at current position, find a new position and then rotate
+                                // Temporarily set the transformation to see if we can find a valid position
+                                let old_transformation = self.blokus_ui_config.selected_transformation_idx;
+                                self.blokus_ui_config.selected_transformation_idx = next_transformation;
+                                
+                                if self.find_valid_cursor_position_for_piece(piece_idx, next_transformation) {
+                                    // Found a valid position, keep the new transformation and position
+                                    // (cursor was already moved by find_valid_cursor_position_for_piece)
+                                } else {
+                                    // Couldn't find a valid position, revert transformation
+                                    self.blokus_ui_config.selected_transformation_idx = old_transformation;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -818,5 +884,55 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Find a valid cursor position for the selected Blokus piece
+    /// Returns true if a valid position was found and cursor was moved
+    fn find_valid_cursor_position_for_piece(&mut self, piece_idx: usize, transformation_idx: usize) -> bool {
+        if let GameWrapper::Blokus(state) = &self.game_wrapper {
+            let board = state.get_board();
+            let board_height = board.len();
+            let board_width = if board_height > 0 { board[0].len() } else { 0 };
+            
+            // Try current position first
+            if self.would_blokus_piece_fit_at_cursor(piece_idx, transformation_idx) {
+                return true;
+            }
+            
+            // Search in a spiral pattern from current position
+            let start_row = self.board_cursor.0 as i32;
+            let start_col = self.board_cursor.1 as i32;
+            
+            for radius in 1..=((board_height.max(board_width)) as i32) {
+                // Check positions in a square around the current position
+                for dr in -radius..=radius {
+                    for dc in -radius..=radius {
+                        // Only check the perimeter of the current radius
+                        if dr.abs() != radius && dc.abs() != radius {
+                            continue;
+                        }
+                        
+                        let new_row = start_row + dr;
+                        let new_col = start_col + dc;
+                        
+                        // Check bounds
+                        if new_row >= 0 && new_row < board_height as i32 && new_col >= 0 && new_col < board_width as i32 {
+                            // Temporarily set cursor to test position
+                            let old_cursor = self.board_cursor;
+                            self.board_cursor = (new_row as u16, new_col as u16);
+                            
+                            if self.would_blokus_piece_fit_at_cursor(piece_idx, transformation_idx) {
+                                // Found a valid position, keep the cursor here
+                                return true;
+                            }
+                            
+                            // Restore cursor for next test
+                            self.board_cursor = old_cursor;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 }
