@@ -318,9 +318,7 @@ fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
     let mut text = vec![
-        Line::from(format!("Game: {}", app.get_selected_game_name())),
-        Line::from(format!("Status: {:?}", app.game_status)),
-        Line::from(""),
+        Line::from(format!("Game: {}  |  Status: {:?}", app.get_selected_game_name(), app.game_status)),
     ];
 
     // Show current player
@@ -345,54 +343,139 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or(&Player::Human);
 
     let current_player_text = match app.game_wrapper {
-        GameWrapper::Blokus(_) => format!("Current Player: Player {} ({:?})", ui_player_id, player_type),
+        GameWrapper::Blokus(_) => format!("Player {} ({:?})", ui_player_id, player_type),
         _ => {
             let symbol = if ui_player_id == 1 { "X" } else { "O" };
-            format!("Current Player: {} ({:?})", symbol, player_type)
+            format!("{} ({:?})", symbol, player_type)
         }
     };
-    text.push(Line::from(current_player_text));
-    text.push(Line::from(""));
 
-    // Show AI status
+    // Get player color to match board display
+    let player_color = match &app.game_wrapper {
+        GameWrapper::Connect4(_) => {
+            if ui_player_id == 1 { Color::Red } else { Color::Yellow }
+        }
+        GameWrapper::Othello(_) => {
+            if ui_player_id == 1 { Color::White } else { Color::White } // Both use white for contrast
+        }
+        GameWrapper::Blokus(_) => {
+            match ui_player_id {
+                1 => Color::Red,
+                2 => Color::Blue, 
+                3 => Color::Green,
+                4 => Color::Yellow,
+                _ => Color::White,
+            }
+        }
+        _ => { // Gomoku and others
+            if ui_player_id == 1 { Color::Red } else { Color::Blue }
+        }
+    };
+
+    // Add current player indicator with color-coded marker
+    let player_marker = match &app.game_wrapper {
+        GameWrapper::Connect4(_) => {
+            if ui_player_id == 1 { "🔴" } else { "🟡" }
+        }
+        GameWrapper::Othello(_) => {
+            if ui_player_id == 1 { "⚫" } else { "⚪" }
+        }
+        GameWrapper::Blokus(_) => {
+            match ui_player_id {
+                1 => "🟥", // Red square
+                2 => "🟦", // Blue square
+                3 => "🟩", // Green square  
+                4 => "🟨", // Yellow square
+                _ => "⬜",
+            }
+        }
+        _ => { // Gomoku and others
+            if ui_player_id == 1 { "❌" } else { "⭕" }
+        }
+    };
+
+    text.push(Line::from(vec![
+        Span::styled("Current: ", Style::default().fg(Color::White)),
+        Span::styled(player_marker, Style::default()),
+        Span::styled(" ", Style::default()),
+        Span::styled(current_player_text, Style::default().fg(player_color).add_modifier(Modifier::BOLD)),
+    ]));
+
+    // Show AI status - display horizontally to save vertical space
     if app.is_current_player_ai() {
         if let Some(start_time) = app.ai_thinking_start {
-            let elapsed = start_time.elapsed().as_secs();
-            let remaining = app.timeout_secs.saturating_sub(elapsed);
-            text.push(Line::from(format!("AI Status: Thinking... ({}s / {}s)", elapsed, app.timeout_secs)));
-            text.push(Line::from(format!("Time Remaining: {}s", remaining)));
+            let elapsed = start_time.elapsed();
+            let elapsed_secs = elapsed.as_secs();
+            let elapsed_millis = elapsed.as_millis() % 1000;
+            let remaining = app.timeout_secs.saturating_sub(elapsed_secs);
+            
+            // Create a compact progress bar
+            let progress = if app.timeout_secs > 0 {
+                (elapsed_secs as f64 / app.timeout_secs as f64 * 10.0) as usize
+            } else {
+                0
+            };
+            let progress_bar = "█".repeat(progress.min(10)) + &"░".repeat(10 - progress.min(10));
+            
+            // Display AI status and timer info on one line
+            let mut line_spans = vec![
+                Span::styled("� AI: ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled("🤔 Thinking ", Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{}.{}s", elapsed_secs, elapsed_millis / 100), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" / {}s", app.timeout_secs), Style::default().fg(Color::Gray)),
+                Span::styled("  ⏰ ", Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{}s left", remaining), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ];
+            
+            // Add pending response indicator if applicable
+            if app.pending_ai_response.is_some() {
+                line_spans.push(Span::styled("  📥 Ready", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+            }
+            
+            text.push(Line::from(line_spans));
+            
+            // Progress bar on second line
+            text.push(Line::from(vec![
+                Span::styled("Progress: [", Style::default().fg(Color::Cyan)),
+                Span::styled(progress_bar, Style::default().fg(Color::Cyan)),
+                Span::styled("]", Style::default().fg(Color::Cyan)),
+                // Add debug info about minimum display time
+                Span::styled(format!("  ⏳ Min: {:.1}s", app.ai_minimum_display_duration.as_secs_f64()), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    if elapsed.as_secs_f64() >= app.ai_minimum_display_duration.as_secs_f64() { " ✓" } else { " ⏱️" },
+                    Style::default().fg(if elapsed.as_secs_f64() >= app.ai_minimum_display_duration.as_secs_f64() { Color::Green } else { Color::Yellow })
+                ),
+            ]));
         } else {
-            text.push(Line::from("AI Status: Starting search..."));
+            // AI starting search
+            text.push(Line::from(vec![
+                Span::styled("🤖🤔 AI Starting search...", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            ]));
         }
-    } else {
-        text.push(Line::from("AI Status: Ready"));
     }
-    text.push(Line::from(""));
 
-    // Show basic statistics if available
+    // Show basic statistics if available - compact format
     if let Some(stats) = &app.last_search_stats {
-        text.push(Line::from(format!("Nodes Searched: {}", stats.total_nodes)));
-        text.push(Line::from(format!("Root Value: {:.3}", stats.root_value)));
+        text.push(Line::from(format!("Nodes: {} | Root Value: {:.3}", stats.total_nodes, stats.root_value)));
     }
 
-    // Game-specific instructions
+    // Game-specific instructions - compact
     let instructions = match app.mode {
         AppMode::InGame => {
             if app.game_status == GameStatus::InProgress {
                 match player_type {
-                    Player::Human => "Use arrow keys to move cursor, Enter/Space to make move, PageUp/PageDown to scroll debug info",
+                    Player::Human => "Arrows: move cursor | Enter/Space: make move | PgUp/PgDn: scroll",
                     Player::AI => "AI is thinking...",
                 }
             } else {
-                "Press 'r' to restart, Esc for menu"
+                "Press 'r' to restart | Esc for menu"
             }
         }
-        AppMode::GameOver => "Press 'r' to restart, Esc for menu",
+        AppMode::GameOver => "Press 'r' to restart | Esc for menu",
         _ => "",
     };
 
     if !instructions.is_empty() {
-        text.push(Line::from(""));
         text.push(Line::from(instructions));
     }
 
@@ -557,7 +640,7 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
                 }
             };
 
-            let final_style = if is_cursor && cell != 0 {  
+            let final_style = if is_cursor && cell != 0 && !app.is_current_player_ai() {  
                 style.bg(Color::Yellow)
             } else {
                 style

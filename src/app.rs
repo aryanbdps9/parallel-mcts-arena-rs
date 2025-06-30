@@ -206,6 +206,8 @@ pub struct App {
     pub debug_scroll: u16,
     // AI timing and status
     pub ai_thinking_start: Option<std::time::Instant>,
+    pub ai_minimum_display_duration: std::time::Duration,
+    pub pending_ai_response: Option<(MoveWrapper, mcts::SearchStatistics)>,
     // Settings
     pub settings_board_size: usize,
     pub settings_line_size: usize,
@@ -356,6 +358,8 @@ impl App {
             debug_scroll: 0,
             // AI timing and status
             ai_thinking_start: None,
+            ai_minimum_display_duration: std::time::Duration::from_millis(500), // Minimum 0.5 seconds display
+            pending_ai_response: None,
             // Initialize settings with current values
             settings_board_size: if board_size == 15 { 15 } else { board_size }, // Keep 15 as standard Gomoku default
             settings_line_size: if line_size == 5 { 5 } else { line_size }, // Keep 5 as standard Gomoku default
@@ -385,26 +389,45 @@ impl App {
                     }
                 }
 
+                // Check if we have a pending AI response that we're ready to process
+                if let Some((best_move, stats)) = self.pending_ai_response.take() {
+                    // Ensure the AI timer has been displayed for at least the minimum duration
+                    let should_process_move = if let Some(start_time) = self.ai_thinking_start {
+                        start_time.elapsed() >= self.ai_minimum_display_duration
+                    } else {
+                        true // No timer was set, process immediately
+                    };
+
+                    if should_process_move {
+                        self.ai_thinking_start = None; // Reset thinking timer
+                        self.move_history.push(MoveHistoryEntry::new(
+                            self.game_wrapper.get_current_player(),
+                            best_move.clone(),
+                        ));
+                        self.game_wrapper.make_move(&best_move);
+                        self.last_search_stats = Some(stats);
+                        
+                        // Advance the AI worker's MCTS tree root to reflect the move that was just made
+                        self.ai_worker.advance_root(&best_move);
+                        
+                        // Clear selected piece if it becomes unavailable after move
+                        if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
+                            self.clear_selected_piece_if_unavailable();
+                        }
+                        
+                        self.check_game_over();
+                    } else {
+                        // Put the response back until the minimum time has elapsed
+                        self.pending_ai_response = Some((best_move, stats));
+                    }
+                }
+
+                // Check for new AI responses
                 if let Some(response) = self.ai_worker.try_recv() {
                     match response {
                         AIResponse::Move(best_move, stats) => {
-                            self.ai_thinking_start = None; // Reset thinking timer
-                            self.move_history.push(MoveHistoryEntry::new(
-                                self.game_wrapper.get_current_player(),
-                                best_move.clone(),
-                            ));
-                            self.game_wrapper.make_move(&best_move);
-                            self.last_search_stats = Some(stats);
-                            
-                            // Advance the AI worker's MCTS tree root to reflect the move that was just made
-                            self.ai_worker.advance_root(&best_move);
-                            
-                            // Clear selected piece if it becomes unavailable after move
-                            if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
-                                self.clear_selected_piece_if_unavailable();
-                            }
-                            
-                            self.check_game_over();
+                            // Store the response for delayed processing
+                            self.pending_ai_response = Some((best_move, stats));
                         }
                     }
                 }
