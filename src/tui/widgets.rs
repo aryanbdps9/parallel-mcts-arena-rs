@@ -6,8 +6,9 @@
 use crate::app::{App, AppMode, GameStatus, Player};
 use crate::game_wrapper::GameWrapper;
 use crate::games::blokus::BlokusState;
+use crate::tui::blokus_ui;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use mcts::GameState;
 
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -157,36 +158,100 @@ fn draw_player_config_menu(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_game_view(f: &mut Frame, app: &App, area: Rect) {
-    // Split the main area into board and info sections
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(area);
+    if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+        draw_blokus_game_view(f, app, area);
+    } else {
+        draw_standard_game_view(f, app, area);
+    }
+}
+
+fn draw_standard_game_view(f: &mut Frame, app: &App, area: Rect) {
+    // Use the layout config to get the main areas
+    let (board_area, instructions_area, stats_area) = app.layout_config.get_main_layout(area);
 
     // Draw the game board
-    draw_board(f, app, main_chunks[0]);
+    draw_board(f, app, board_area);
     
-    // Split the info area into game info and debug/history
-    let info_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(main_chunks[1]);
-
-    // Draw game info at the top
-    draw_game_info(f, app, info_chunks[0]);
+    // Draw game info/instructions
+    draw_game_info(f, app, instructions_area);
     
-    // Split the bottom area for debug stats and move history
-    let bottom_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(info_chunks[1]);
+    // Split the stats area for debug stats and move history
+    let (debug_area, history_area) = app.layout_config.get_stats_layout(stats_area);
 
     // Draw debug statistics and move history
-    draw_debug_stats(f, app, bottom_chunks[0]);
-    draw_move_history(f, app, bottom_chunks[1]);
+    draw_debug_stats(f, app, debug_area);
+    draw_move_history(f, app, history_area);
+}
+
+fn draw_blokus_game_view(f: &mut Frame, app: &App, area: Rect) {
+    // First split vertically to have the main game area and bottom info area
+    let vertical_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(area);
+
+    let main_game_area = vertical_chunks[0];
+    let bottom_info_area = vertical_chunks[1];
+
+    // Use Blokus-specific layout for the main game area
+    let (board_area, piece_area, player_area) = app.layout_config.get_blokus_layout(main_game_area);
+
+    // Draw the Blokus board with ghost pieces
+    if let GameWrapper::Blokus(state) = &app.game_wrapper {
+        // Get selected piece info from app state
+        let selected_piece = if let Some((piece_idx, transformation_idx)) = app.blokus_ui_config.get_selected_piece_info() {
+            Some((piece_idx, transformation_idx, app.board_cursor.0 as usize, app.board_cursor.1 as usize))
+        } else {
+            None
+        };
+        // Only show cursor for human turns
+        let show_cursor = !app.is_current_player_ai();
+        blokus_ui::draw_blokus_board(f, state, board_area, selected_piece, app.board_cursor, show_cursor);
+    }
+
+    // Draw piece selection panel
+    blokus_ui::draw_blokus_piece_selection(f, app, piece_area);
+
+    // Draw player status panel
+    blokus_ui::draw_blokus_player_status(f, app, player_area);
+
+    // Split the bottom area into instructions and stats/history
+    let bottom_vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(bottom_info_area);
+
+    let instructions_area = bottom_vertical[0];
+    let stats_area = bottom_vertical[1];
+
+    // Draw game info/instructions
+    draw_game_info(f, app, instructions_area);
+
+    // Split stats area horizontally for debug stats and move history
+    let stats_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(stats_area);
+
+    // Draw debug stats and move history
+    draw_debug_stats(f, app, stats_chunks[0]);
+    draw_move_history(f, app, stats_chunks[1]);
 }
 
 fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
+    // Split area for content and scrollbar
+    let chunks = if area.width > 5 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100)])
+            .split(area)
+    };
+
     let mut text = vec![Line::from("Debug Statistics")];
     
     if let Some(stats) = &app.last_search_stats {
@@ -213,16 +278,42 @@ fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
         text.push(Line::from("Waiting for MCTS statistics..."));
     }
 
-    // Apply scrolling offset
+    // Apply scrolling
+    let content_height = text.len();
+    let visible_height = chunks[0].height.saturating_sub(2) as usize; // Account for borders
+    let max_scroll = content_height.saturating_sub(visible_height);
+    let scroll_offset = (app.debug_scroll as usize).min(max_scroll);
+
     let visible_lines: Vec<Line> = text
         .into_iter()
-        .skip(app.debug_scroll as usize)
-        .take(area.height.saturating_sub(2) as usize)
+        .skip(scroll_offset)
+        .take(visible_height)
         .collect();
 
+    let drag_indicator = if app.drag_state.is_dragging { "🔀" } else { "↔" };
+    let title = format!("{} Debug Stats - {}%", 
+        drag_indicator, 
+        app.layout_config.stats_width_percent
+    );
+
     let paragraph = Paragraph::new(visible_lines)
-        .block(Block::default().borders(Borders::ALL).title("Debug Stats"));
-    f.render_widget(paragraph, area);
+        .block(Block::default().borders(Borders::ALL).title(title));
+    f.render_widget(paragraph, chunks[0]);
+
+    // Render scrollbar if content is scrollable and we have space for it
+    if max_scroll > 0 && chunks.len() > 1 && chunks[1].height > 2 {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(content_height)
+            .viewport_content_length(visible_height)
+            .position(scroll_offset);
+            
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+            
+        f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
+    }
 }
 
 fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
@@ -298,6 +389,19 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
+    // Split area for content and scrollbar
+    let chunks = if area.width > 5 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100)])
+            .split(area)
+    };
+
     let items: Vec<ListItem> = app
         .move_history
         .iter()
@@ -313,15 +417,42 @@ fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     // Apply scrolling - show items starting from scroll offset
+    let content_height = items.len();
+    let visible_height = chunks[0].height.saturating_sub(2) as usize; // Account for borders
+    let max_scroll = content_height.saturating_sub(visible_height);
+    let scroll_offset = (app.history_scroll as usize).min(max_scroll);
+
     let visible_items: Vec<ListItem> = items
         .into_iter()
-        .skip(app.history_scroll as usize)
-        .take(area.height.saturating_sub(2) as usize)
+        .skip(scroll_offset)
+        .take(visible_height)
         .collect();
 
+    let drag_indicator = if app.drag_state.is_dragging { "🔀" } else { "↔" };
+    let title = format!("{} Move History ({}) - {}%", 
+        drag_indicator, 
+        app.move_history.len(),
+        100 - app.layout_config.stats_width_percent
+    );
+
     let list = List::new(visible_items)
-        .block(Block::default().borders(Borders::ALL).title(format!("Move History ({})", app.move_history.len())));
-    f.render_widget(list, area);
+        .block(Block::default().borders(Borders::ALL).title(title));
+    f.render_widget(list, chunks[0]);
+
+    // Render scrollbar if content is scrollable and we have space for it
+    if max_scroll > 0 && chunks.len() > 1 && chunks[1].height > 2 {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(content_height)
+            .viewport_content_length(visible_height)
+            .position(scroll_offset);
+            
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+            
+        f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
+    }
 }
 
 fn draw_board(f: &mut Frame, app: &App, area: Rect) {

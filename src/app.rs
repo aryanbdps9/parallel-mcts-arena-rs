@@ -5,6 +5,9 @@
 //! channels between the UI, game logic, and AI threads.
 
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
+use crate::tui::layout::LayoutConfig;
+use crate::tui::mouse::DragState;
+use crate::tui::blokus_ui::BlokusUIConfig;
 use mcts::{GameState, MCTS};
 use ratatui::widgets::ListState;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -215,6 +218,10 @@ pub struct App {
     pub stats_interval_secs: u64,
     pub ai_only: bool,
     pub shared_tree: bool,
+    // Enhanced UI components
+    pub layout_config: LayoutConfig,
+    pub drag_state: DragState,
+    pub blokus_ui_config: BlokusUIConfig,
 }
 
 impl App {
@@ -321,7 +328,7 @@ impl App {
                     let size = board.len();
                     (size / 2 - 1, size / 2 - 1)
                 }
-                GameWrapper::Blokus(_) => (10, 10), // Center of Blokus board
+                GameWrapper::Blokus(_) => (0, 0), // Start at corner for first move
             }
         } else {
             (0, 0)
@@ -361,6 +368,10 @@ impl App {
             stats_interval_secs,
             ai_only,
             shared_tree,
+            // Enhanced UI components
+            layout_config: LayoutConfig::default(),
+            drag_state: DragState::default(),
+            blokus_ui_config: BlokusUIConfig::default(),
         }
     }
 
@@ -387,6 +398,11 @@ impl App {
                             
                             // Advance the AI worker's MCTS tree root to reflect the move that was just made
                             self.ai_worker.advance_root(&best_move);
+                            
+                            // Clear selected piece if it becomes unavailable after move
+                            if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
+                                self.clear_selected_piece_if_unavailable();
+                            }
                             
                             self.check_game_over();
                         }
@@ -588,12 +604,124 @@ impl App {
         self.history_scroll = self.history_scroll.saturating_add(1);
     }
 
+    // Enhanced Blokus functionality
+    pub fn blokus_select_piece(&mut self, piece_idx: usize) {
+        // Only allow selection of available pieces
+        if let GameWrapper::Blokus(state) = &self.game_wrapper {
+            let available_pieces = state.get_available_pieces(state.get_current_player());
+            if available_pieces.contains(&piece_idx) {
+                self.blokus_ui_config.select_piece(piece_idx);
+            }
+            // If piece is not available, do nothing (no selection change)
+        }
+    }
+
+    pub fn blokus_rotate_piece(&mut self) {
+        if let Some(piece_idx) = self.blokus_ui_config.selected_piece_idx {
+            // Get the selected piece to find out how many transformations it has
+            if let GameWrapper::Blokus(state) = &self.game_wrapper {
+                let available_pieces = state.get_available_pieces(state.get_current_player());
+                if available_pieces.contains(&piece_idx) {
+                    let pieces = crate::games::blokus::get_blokus_pieces();
+                    if let Some(piece) = pieces.iter().find(|p| p.id == piece_idx) {
+                        self.blokus_ui_config.rotate_piece(piece.transformations.len());
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn blokus_flip_piece(&mut self) {
+        // TODO: Implement piece flipping logic
+        // This would apply a reflection transformation
+    }
+
+    pub fn blokus_place_piece(&mut self) {
+        if let Some((piece_idx, transformation_idx)) = self.blokus_ui_config.get_selected_piece_info() {
+            if let GameWrapper::Blokus(state) = &mut self.game_wrapper {
+                let blokus_move = crate::games::blokus::BlokusMove(
+                    piece_idx,
+                    transformation_idx,
+                    self.board_cursor.0 as usize,
+                    self.board_cursor.1 as usize,
+                );
+                
+                // Check if the move is legal
+                if state.is_legal(&blokus_move) {
+                    let move_wrapper = crate::game_wrapper::MoveWrapper::Blokus(blokus_move);
+                    
+                    // Record the move in history
+                    self.move_history.push(crate::app::MoveHistoryEntry::new(
+                        self.game_wrapper.get_current_player(),
+                        move_wrapper.clone(),
+                    ));
+                    
+                    // Make the move
+                    self.game_wrapper.make_move(&move_wrapper);
+                    
+                    // Advance the AI worker's MCTS tree root
+                    self.ai_worker.advance_root(&move_wrapper);
+                    
+                    // Clear selection after placing
+                    self.blokus_ui_config.selected_piece_idx = None;
+                    self.blokus_ui_config.selected_transformation_idx = 0;
+                    
+                    // Check if game is over
+                    self.check_game_over();
+                }
+            }
+        }
+    }
+
+    pub fn blokus_pass_move(&mut self) {
+        if let GameWrapper::Blokus(_) = &mut self.game_wrapper {
+            // Create a pass move (usize::MAX is the PASS_MOVE constant)
+            let pass_move = crate::games::blokus::BlokusMove(usize::MAX, 0, 0, 0);
+            let move_wrapper = crate::game_wrapper::MoveWrapper::Blokus(pass_move);
+            
+            // Record the move in history
+            self.move_history.push(crate::app::MoveHistoryEntry::new(
+                self.game_wrapper.get_current_player(),
+                move_wrapper.clone(),
+            ));
+            
+            // Make the pass move
+            self.game_wrapper.make_move(&move_wrapper);
+            
+            // Advance AI tree
+            self.ai_worker.advance_root(&move_wrapper);
+            
+            // Check for game over
+            self.check_game_over();
+        }
+    }
+
+    pub fn blokus_expand_all(&mut self) {
+        self.blokus_ui_config.expand_all();
+    }
+
+    pub fn blokus_collapse_all(&mut self) {
+        self.blokus_ui_config.collapse_all();
+    }
+
+    pub fn blokus_toggle_player_expand(&mut self, player_idx: usize) {
+        self.blokus_ui_config.toggle_player_expand(player_idx);
+    }
+
     pub fn reset_debug_scroll(&mut self) {
         self.debug_scroll = 0;
     }
 
     pub fn reset_history_scroll(&mut self) {
         self.history_scroll = 0;
+    }
+
+    pub fn blokus_scroll_panel_up(&mut self) {
+        self.blokus_ui_config.scroll_panel_up();
+    }
+
+    pub fn blokus_scroll_panel_down(&mut self) {
+        self.blokus_ui_config.scroll_panel_down();
     }
 
     pub fn is_current_player_ai(&self) -> bool {
@@ -610,6 +738,19 @@ impl App {
                 None => GameStatus::Draw,
             };
             self.mode = AppMode::GameOver;
+        }
+    }
+
+    /// Clear selected piece if it becomes unavailable
+    pub fn clear_selected_piece_if_unavailable(&mut self) {
+        if let Some(selected_piece) = self.blokus_ui_config.selected_piece_idx {
+            if let GameWrapper::Blokus(state) = &self.game_wrapper {
+                let available_pieces = state.get_available_pieces(state.get_current_player());
+                if !available_pieces.contains(&selected_piece) {
+                    self.blokus_ui_config.selected_piece_idx = None;
+                    self.blokus_ui_config.selected_transformation_idx = 0;
+                }
+            }
         }
     }
 }

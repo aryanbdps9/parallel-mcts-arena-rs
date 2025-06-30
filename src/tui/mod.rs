@@ -12,6 +12,9 @@ use std::{io, time::Duration};
 
 pub mod input;
 pub mod widgets;
+pub mod layout;
+pub mod mouse;
+pub mod blokus_ui;
 
 pub fn run(app: &mut App) -> io::Result<()> {
     let mut terminal = init_terminal()?;

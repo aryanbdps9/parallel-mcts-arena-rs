@@ -6,7 +6,8 @@
 use crate::app::{App, AppMode, GameStatus, Player};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::games::{gomoku::GomokuMove, connect4::Connect4Move, othello::OthelloMove, blokus::BlokusMove};
-use crossterm::event::{KeyCode, MouseEventKind, MouseButton};
+use crate::tui::mouse;
+use crossterm::event::{KeyCode, MouseEventKind};
 use ratatui::layout::Rect;
 use mcts::GameState;
 
@@ -20,27 +21,8 @@ pub fn handle_key_press(app: &mut App, key_code: KeyCode) {
     }
 }
 
-pub fn handle_mouse_event(app: &mut App, kind: MouseEventKind, col: u16, row: u16, _terminal_size: Rect) {
-    match kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            if app.mode == AppMode::InGame {
-                handle_board_click(app, col, row);
-            }
-        }
-        MouseEventKind::ScrollUp => {
-            if app.mode == AppMode::InGame {
-                // Scroll debug stats up
-                app.scroll_debug_up();
-            }
-        }
-        MouseEventKind::ScrollDown => {
-            if app.mode == AppMode::InGame {
-                // Scroll debug stats down  
-                app.scroll_debug_down();
-            }
-        }
-        _ => {}
-    }
+pub fn handle_mouse_event(app: &mut App, kind: MouseEventKind, col: u16, row: u16, terminal_size: Rect) {
+    mouse::handle_mouse_event(app, kind, col, row, terminal_size);
 }
 
 fn handle_game_selection_input(key_code: KeyCode, app: &mut App) {
@@ -119,7 +101,13 @@ fn handle_ingame_input(key_code: KeyCode, app: &mut App) {
 
     match key_code {
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Char('r') => app.reset_game(),
+        KeyCode::Char('r') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) && is_current_player_human(app) {
+                app.blokus_rotate_piece();
+            } else {
+                app.reset_game();
+            }
+        },
         KeyCode::Esc => app.mode = AppMode::GameSelection,
         KeyCode::Up => move_cursor_up(app),
         KeyCode::Down => move_cursor_down(app),
@@ -130,6 +118,139 @@ fn handle_ingame_input(key_code: KeyCode, app: &mut App) {
         KeyCode::PageDown => app.scroll_debug_down(),
         KeyCode::Home => app.reset_debug_scroll(),
         KeyCode::End => app.reset_history_scroll(),
+        KeyCode::Char('f') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(15);
+            }
+        },
+        KeyCode::Char('p') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_pass_move();
+            }
+        },
+        KeyCode::Char('e') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(14);
+            }
+        },
+        KeyCode::Char('+') | KeyCode::Char('=') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_expand_all();
+            }
+        },
+        KeyCode::Char('-') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_collapse_all();
+            }
+        },
+        // Piece selection keys
+        KeyCode::Char('1') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(0);
+            }
+        },
+        KeyCode::Char('2') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(1);
+            }
+        },
+        KeyCode::Char('3') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(2);
+            }
+        },
+        KeyCode::Char('4') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(3);
+            }
+        },
+        KeyCode::Char('5') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(4);
+            }
+        },
+        KeyCode::Char('6') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(5);
+            }
+        },
+        KeyCode::Char('7') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(6);
+            }
+        },
+        KeyCode::Char('8') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(7);
+            }
+        },
+        KeyCode::Char('9') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(8);
+            }
+        },
+        KeyCode::Char('0') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(9);
+            }
+        },
+        // Letters a-k for pieces 10-20
+        KeyCode::Char('a') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(10);
+            }
+        },
+        KeyCode::Char('b') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(11);
+            }
+        },
+        KeyCode::Char('c') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(12);
+            }
+        },
+        KeyCode::Char('d') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(13);
+            }
+        },
+        KeyCode::Char('g') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(16);
+            }
+        },
+        KeyCode::Char('h') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(17);
+            }
+        },
+        KeyCode::Char('i') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(18);
+            }
+        },
+        KeyCode::Char('j') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(19);
+            }
+        },
+        KeyCode::Char('k') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_select_piece(20);
+            }
+        },
+        KeyCode::Char('x') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                app.blokus_flip_piece();
+            }
+        },
+        KeyCode::Char('z') => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                let current_player = app.game_wrapper.get_current_player();
+                app.blokus_toggle_player_expand((current_player - 1) as usize);
+            }
+        },
         _ => {}
     }
 }
@@ -140,24 +261,6 @@ fn handle_game_over_input(key_code: KeyCode, app: &mut App) {
         KeyCode::Char('r') | KeyCode::Enter => app.reset_game(),
         KeyCode::Esc => app.mode = AppMode::GameSelection,
         _ => {}
-    }
-}
-
-fn handle_board_click(app: &mut App, col: u16, row: u16) {
-    if app.game_status != GameStatus::InProgress || !is_current_player_human(app) {
-        return;
-    }
-
-    // Convert screen coordinates to board coordinates
-    // This is a simplified version - in the original it was much more complex
-    let board = app.game_wrapper.get_board();
-    let board_height = board.len();
-    let board_width = if board_height > 0 { board[0].len() } else { 0 };
-
-    // Simple click handling - assume click is within board area
-    if (row as usize) < board_height && (col as usize) < board_width {
-        app.board_cursor = (row, col);
-        make_move(app);
     }
 }
 
@@ -230,8 +333,13 @@ fn make_move(app: &mut App) {
         GameWrapper::Connect4(_) => MoveWrapper::Connect4(Connect4Move(col)),
         GameWrapper::Othello(_) => MoveWrapper::Othello(OthelloMove(row, col)),
         GameWrapper::Blokus(_) => {
-            // For Blokus, use a simple pass move for now - this would need more complex handling
-            MoveWrapper::Blokus(BlokusMove(usize::MAX, 0, 0, 0))
+            // For Blokus, create a move from the selected piece and cursor position
+            if let Some((piece_idx, transformation_idx)) = app.blokus_ui_config.get_selected_piece_info() {
+                MoveWrapper::Blokus(BlokusMove(piece_idx, transformation_idx, row, col))
+            } else {
+                // No piece selected, use pass move
+                MoveWrapper::Blokus(BlokusMove(usize::MAX, 0, 0, 0))
+            }
         }
     };
 
@@ -242,6 +350,11 @@ fn make_move(app: &mut App) {
         
         // Advance the AI worker's MCTS tree root to reflect the move that was just made
         app.ai_worker.advance_root(&player_move);
+        
+        // Clear selected piece if it becomes unavailable after move (for Blokus)
+        if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+            app.clear_selected_piece_if_unavailable();
+        }
         
         // Check for game over
         if app.game_wrapper.is_terminal() {
