@@ -172,103 +172,6 @@ fn handle_ingame_input(key_code: KeyCode, app: &mut App) {
                 app.blokus_collapse_all();
             }
         },
-        // Piece selection keys
-        KeyCode::Char('1') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(0);
-            }
-        },
-        KeyCode::Char('2') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(1);
-            }
-        },
-        KeyCode::Char('3') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(2);
-            }
-        },
-        KeyCode::Char('4') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(3);
-            }
-        },
-        KeyCode::Char('5') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(4);
-            }
-        },
-        KeyCode::Char('6') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(5);
-            }
-        },
-        KeyCode::Char('7') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(6);
-            }
-        },
-        KeyCode::Char('8') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(7);
-            }
-        },
-        KeyCode::Char('9') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(8);
-            }
-        },
-        KeyCode::Char('0') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(9);
-            }
-        },
-        // Letters a-k for pieces 10-20
-        KeyCode::Char('a') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(10);
-            }
-        },
-        KeyCode::Char('b') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(11);
-            }
-        },
-        KeyCode::Char('c') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(12);
-            }
-        },
-        KeyCode::Char('d') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(13);
-            }
-        },
-        KeyCode::Char('g') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(16);
-            }
-        },
-        KeyCode::Char('h') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(17);
-            }
-        },
-        KeyCode::Char('i') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(18);
-            }
-        },
-        KeyCode::Char('j') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(19);
-            }
-        },
-        KeyCode::Char('k') => {
-            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                app.blokus_select_piece(20);
-            }
-        },
         KeyCode::Char('x') => {
             if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
                 app.blokus_flip_piece();
@@ -278,6 +181,33 @@ fn handle_ingame_input(key_code: KeyCode, app: &mut App) {
             if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
                 let current_player = app.game_wrapper.get_current_player();
                 app.blokus_toggle_player_expand((current_player - 1) as usize);
+            }
+        },
+        // Piece selection keys - refactored to use lookup table
+        KeyCode::Char(c) => {
+            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                // Map characters to piece indices
+                let piece_index = match c {
+                    // Numbers 1-9 map to pieces 0-8, 0 maps to piece 9
+                    '1'..='9' => Some((c as u8 - b'1') as usize),
+                    '0' => Some(9),
+                    // Letters a-d map to pieces 10-13, g-k map to pieces 16-20
+                    // (e and f are used for other functions like 'e' and 'p', x and z have specific handlers above)
+                    'a' => Some(10),
+                    'b' => Some(11),
+                    'c' => Some(12),
+                    'd' => Some(13),
+                    'g' => Some(16),
+                    'h' => Some(17),
+                    'i' => Some(18),
+                    'j' => Some(19),
+                    'k' => Some(20),
+                    _ => None,
+                };
+                
+                if let Some(index) = piece_index {
+                    app.blokus_select_piece(index);
+                }
             }
         },
         _ => {}
