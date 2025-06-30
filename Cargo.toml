@@ -20,9 +20,13 @@ colored = "2.1.0"
 # High-quality random number generator
 rand_xoshiro = "0.6"
 # Terminal UI framework with crossterm support
-ratatui = { version = "0.26.0", features = ["crossterm"] }
+ratatui = { version = "0.26.1", features = ["crossterm"] }
 # Cross-platform terminal manipulation
 crossterm = "0.27.0"
+# Asynchronous runtime
+tokio = { version = "1", features = ["full"] }
+# CPU information and control
+num_cpus = "1.16.0"
 
 # Library configuration
 [lib]
