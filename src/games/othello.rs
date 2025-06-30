@@ -281,14 +281,6 @@ impl FromStr for OthelloMove {
     /// 
     /// # Returns
     /// Ok(OthelloMove) if parsing succeeds, Err(String) if format is invalid
-    /// 
-    /// # Examples
-    /// ```
-    /// use std::str::FromStr;
-    /// let move = OthelloMove::from_str("3,4").unwrap();
-    /// assert_eq!(move.0, 3);
-    /// assert_eq!(move.1, 4);
-    /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split(',').map(|s| s.trim()).collect();
         if parts.len() != 2 {

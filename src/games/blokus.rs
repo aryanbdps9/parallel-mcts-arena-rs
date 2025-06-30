@@ -1,14 +1,31 @@
 //! # Blokus Game Implementation
 //!
 //! This module implements the Blokus board game, a strategic tile-laying game
-//! where players place polyomino pieces on a 20x20 grid following specific rules.
+//! where players place polyomino pieces on a 20x20 grid following specific placement rules.
 //!
-//! ## Rules
-//! - Players take turns placing pieces on the board
-//! - First piece must cover a corner of the board
-//! - Subsequent pieces must touch corner-to-corner with existing pieces
-//! - Pieces cannot touch edge-to-edge with the same player's pieces
-//! - Goal is to place as many pieces as possible
+//! ## Game Overview
+//! Blokus is a territorial strategy game for 2-4 players where each player tries to place
+//! all 21 of their polyomino pieces on the board while blocking opponents from doing the same.
+//! The player who places the most squares (fewest remaining pieces) wins.
+//!
+//! ## Rules and Mechanics
+//! - **Initial Placement**: Each player's first piece must cover one of the four corner squares
+//! - **Corner-to-Corner**: Subsequent pieces must touch corner-to-corner with existing pieces of the same color
+//! - **No Edge Contact**: Pieces cannot touch edge-to-edge with the same player's pieces
+//! - **Blocking**: Players can block opponents by placing pieces adjacent to their pieces
+//! - **Passing**: Players must pass if they cannot place any pieces
+//! - **Game End**: Game ends when all players pass consecutively
+//!
+//! ## Scoring
+//! - Score is based on remaining piece squares (lower is better)
+//! - Player with fewest remaining squares wins
+//! - Bonus points for placing all pieces or ending with the single square piece
+//!
+//! ## Implementation Details
+//! - 20x20 game board with integer player IDs (1-4)
+//! - 21 unique polyomino pieces per player (monomino through pentominoes)
+//! - All piece transformations (rotations + reflections) pre-computed for efficiency
+//! - Move validation includes adjacency rules and corner-touching requirements
 
 use mcts::GameState;
 use std::collections::HashSet;
@@ -16,32 +33,49 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Special constant representing a pass move in Blokus
+/// 
+/// When a player cannot place any pieces according to Blokus rules,
+/// they must pass their turn. This constant uses usize::MAX as the
+/// piece ID to distinguish it from valid piece placements (0-20).
 const PASS_MOVE: BlokusMove = BlokusMove(usize::MAX, 0, 0, 0);
 
 /// Represents a Blokus piece with all its possible transformations
 /// 
-/// Each piece has a unique ID and a list of all possible rotations and reflections.
-/// The transformations are normalized to start from (0,0) and sorted for consistency.
+/// Each piece represents one of the 21 unique polyomino shapes used in Blokus,
+/// from the single square (monomino) up to the complex pentomino shapes.
+/// All possible rotations and reflections are pre-computed and normalized
+/// for efficient move generation and validation.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Piece {
-    /// Unique identifier for this piece type
+    /// Unique identifier for this piece type (0-20)
     pub id: usize,
     /// All possible transformations (rotations + reflections) of this piece
+    /// Each transformation is a vector of (row, col) offsets from origin (0,0)
     pub transformations: Vec<Vec<(i32, i32)>>,
 }
 
 impl Piece {
     /// Creates a new piece with all possible transformations
     /// 
-    /// Generates all unique rotations and reflections of the given shape.
-    /// Each transformation is normalized to start from (0,0).
+    /// Generates all unique rotations and reflections of the given shape through
+    /// a systematic process: 4 rotations × 2 reflections = up to 8 transformations.
+    /// Duplicate transformations are automatically eliminated, and all shapes are
+    /// normalized to start from coordinate (0,0) for consistent positioning.
     /// 
     /// # Arguments
-    /// * `id` - Unique identifier for this piece
-    /// * `shape` - Base shape as a list of (row, col) coordinates
+    /// * `id` - Unique identifier for this piece type (0-20)
+    /// * `shape` - Base shape as a list of (row, col) coordinates relative to origin
     /// 
     /// # Returns
-    /// A new Piece with all transformations calculated
+    /// A new Piece with all unique transformations calculated and sorted
+    /// 
+    /// # Examples
+    /// Creating the simple 2-square domino piece:
+    /// ```
+    /// let domino = Piece::new(1, &[(0, 0), (0, 1)]);
+    /// // Results in 2 transformations: horizontal and vertical orientations
+    /// assert_eq!(domino.transformations.len(), 2);
+    /// ```
     pub fn new(id: usize, shape: &[(i32, i32)]) -> Self {
         let mut unique_transformations = HashSet::new();
         let mut current_shape: Vec<(i32, i32)> = shape.to_vec();
@@ -69,14 +103,26 @@ impl Piece {
     }
 }
 
-/// Returns all 21 standard Blokus pieces
+/// Returns all 21 standard Blokus pieces with their transformations
 /// 
-/// Creates the complete set of polyomino pieces used in Blokus,
-/// from the single square (monomino) to the various pentominoes.
-/// Each piece is created with all its possible transformations.
+/// Creates the complete set of polyomino pieces used in standard Blokus gameplay.
+/// The pieces progress from simple (monomino, domino) to complex (pentomino) shapes:
+/// 
+/// - **Monomino (1)**: Single square
+/// - **Domino (1)**: Two connected squares  
+/// - **Triomino (2)**: Three connected squares in L and line shapes
+/// - **Tetromino (5)**: Four connected squares in various configurations
+/// - **Pentomino (12)**: Five connected squares in all possible configurations
+/// 
+/// Each piece is created with all its possible transformations pre-computed,
+/// making move generation efficient during gameplay.
 /// 
 /// # Returns
-/// Vector containing all 21 Blokus pieces with their transformations
+/// Vector containing all 21 Blokus pieces, each with complete transformation sets
+/// 
+/// # Performance Note
+/// This function performs significant computation generating transformations.
+/// Consider caching the result rather than calling repeatedly.
 pub fn get_blokus_pieces() -> Vec<Piece> {
     vec![
         Piece::new(0, &[(0, 0)]), // 1
@@ -103,13 +149,23 @@ pub fn get_blokus_pieces() -> Vec<Piece> {
     ]
 }
 
-/// Returns information about all Blokus pieces
+/// Returns summary information about all Blokus pieces
 /// 
-/// Returns a vector of tuples containing (piece_id, number_of_transformations)
-/// for each piece. Useful for UI display and piece management.
+/// Provides a lightweight overview of piece complexity by returning
+/// the number of unique transformations each piece has. This is useful
+/// for UI displays, piece selection interfaces, and complexity analysis.
 /// 
 /// # Returns
-/// Vector of (piece_id, transformation_count) tuples
+/// Vector of (piece_id, transformation_count) tuples for all 21 pieces
+/// 
+/// # Usage
+/// Helpful for creating piece selection menus or analyzing game complexity:
+/// ```
+/// let piece_info = get_piece_info();
+/// for (id, transform_count) in piece_info {
+///     println!("Piece {}: {} orientations", id, transform_count);
+/// }
+/// ```
 pub fn get_piece_info() -> Vec<(usize, usize)> {
     get_blokus_pieces()
         .iter()
@@ -119,15 +175,32 @@ pub fn get_piece_info() -> Vec<(usize, usize)> {
 
 /// Represents a move in Blokus
 /// 
-/// Contains the piece ID, transformation index, and placement coordinates.
-/// Special case: PASS_MOVE constant represents a pass move.
+/// Contains all information needed to place a piece on the board:
+/// piece selection, orientation, and board position. The special
+/// constant PASS_MOVE represents a player passing their turn.
+/// 
+/// # Format
+/// BlokusMove(piece_id, transformation_index, row, column)
+/// - `piece_id`: Which piece to place (0-20)
+/// - `transformation_index`: Which rotation/reflection to use
+/// - `row`: Board row position (0-19)  
+/// - `column`: Board column position (0-19)
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct BlokusMove(pub usize, pub usize, pub usize, pub usize);
 
 impl fmt::Display for BlokusMove {
-    /// Formats the move for display
+    /// Formats the move for display in human-readable form
     /// 
-    /// Shows either "PASS" for pass moves or "P{piece}T{transformation}@({row},{col})" for piece placements.
+    /// Creates a compact string representation suitable for move history,
+    /// debugging, and user interfaces.
+    /// 
+    /// # Format
+    /// - Pass moves: "PASS"
+    /// - Piece placements: "P{piece}T{transformation}@({row},{col})"
+    /// 
+    /// # Examples
+    /// - "PASS" - Player passes their turn
+    /// - "P5T2@(10,7)" - Place piece 5, transformation 2, at row 10, column 7
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if *self == PASS_MOVE {
             write!(f, "PASS")
@@ -139,25 +212,42 @@ impl fmt::Display for BlokusMove {
 
 /// Represents the complete state of a Blokus game
 /// 
-/// Contains the board state, current player, available pieces for each player,
-/// move tracking, and game progress information.
+/// Encapsulates all information needed to represent a Blokus game at any point:
+/// board state, player inventories, turn order, and game progress tracking.
+/// Implements the GameState trait for compatibility with MCTS algorithms.
+/// 
+/// # Game State Components
+/// - **Board**: 20x20 grid with player pieces (1-4) and empty spaces (0)
+/// - **Player Pieces**: Each player's remaining piece inventory
+/// - **Turn Management**: Current player and first-move tracking
+/// - **Move History**: Coordinates of the most recent move for highlighting
+/// - **Game Progress**: Pass counting for termination detection
 #[derive(Debug, Clone)]
 pub struct BlokusState {
-    /// The game board as a 2D vector (20x20)
+    /// The game board as a 2D vector (20x20), 0=empty, 1-4=player pieces
     board: Vec<Vec<i32>>,
-    /// Current player (1, 2, 3, or 4)
+    /// Current player's turn (1, 2, 3, or 4)
     current_player: i32,
-    /// Available pieces for each player
+    /// Available pieces for each player, indexed by player_id - 1
     player_pieces: Vec<Vec<Piece>>,
-    /// Whether each player is making their first move
+    /// Whether each player is making their first move (corner requirement)
     is_first_move: [bool; 4],
-    /// Coordinates of the last move made
+    /// Coordinates of the last move made, used for board highlighting
     last_move_coords: Option<Vec<(usize, usize)>>,
-    /// Number of consecutive passes by all players
+    /// Number of consecutive passes by all players (game ends at 4)
     consecutive_passes: u8,
 }
 
 impl fmt::Display for BlokusState {
+    /// Formats the game board for text-based display
+    /// 
+    /// Creates a simple ASCII representation of the 20x20 board suitable
+    /// for debugging, logging, and basic console output.
+    /// 
+    /// # Format
+    /// - Empty squares: "."
+    /// - Player pieces: "1", "2", "3", "4" (corresponding to player IDs)
+    /// - Each row on a separate line with spaces between squares
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for row in &self.board {
             for &cell in row {
@@ -250,28 +340,28 @@ impl GameState for BlokusState {
     }
 
     fn is_terminal(&self) -> bool {
-        // Game ends when all 4 players pass consecutively
+        // Primary termination condition: all 4 players pass consecutively
         if self.consecutive_passes >= 4 {
             return true;
         }
         
-        // Additional safety check: if all players have no pieces left, game is over
+        // Early termination: if all players have placed all pieces
         if self.player_pieces.iter().all(|pieces| pieces.is_empty()) {
             return true;
         }
         
-        // Additional safety check: if no player can make any move, game is over
-        // This prevents infinite loops in case of bugs
+        // Optimization: if 3 players have passed and current player has no valid moves,
+        // we can terminate early rather than wait for the 4th pass
         if self.consecutive_passes >= 3 {
-            // Check if the current player can make any move
             let player_idx = (self.current_player - 1) as usize;
             let available_pieces = &self.player_pieces[player_idx];
             
             if available_pieces.is_empty() {
-                return true; // Current player has no pieces, will pass, making it 4 consecutive passes
+                return true; // Current player has no pieces, will pass, making it 4 consecutive
             }
             
             // Quick check if current player has any valid moves
+            // This prevents needless computation when game is effectively over
             let has_valid_moves = available_pieces.iter().any(|piece| {
                 piece.transformations.iter().any(|shape| {
                     (0..20).any(|r| {
@@ -283,7 +373,7 @@ impl GameState for BlokusState {
             });
             
             if !has_valid_moves {
-                return true; // Current player will be forced to pass, making it 4 consecutive passes
+                return true; // Current player will be forced to pass, making it 4 consecutive
             }
         }
         
@@ -295,6 +385,7 @@ impl GameState for BlokusState {
             return None;
         }
 
+        // Calculate scores: count remaining squares for each player (lower is better)
         let mut scores = [0; 4];
         for i in 0..4 {
             scores[i] = self.player_pieces[i].iter().map(|p| p.transformations[0].len()).sum::<usize>() as i32;
@@ -325,11 +416,20 @@ impl GameState for BlokusState {
 impl BlokusState {
     /// Creates a new Blokus game with default starting state
     /// 
-    /// Sets up a 20x20 empty board with all pieces available for each player.
-    /// Player 1 starts first.
+    /// Initializes a fresh game with an empty 20x20 board and all players
+    /// having their complete set of 21 pieces. Player 1 starts first,
+    /// and all players are marked as needing to make their first move
+    /// (which requires covering a corner square).
     /// 
     /// # Returns
-    /// A new BlokusState ready to play
+    /// A new BlokusState ready for gameplay
+    /// 
+    /// # Corner Assignment
+    /// Players must place their first piece covering these corners:
+    /// - Player 1: Top-left (0,0)
+    /// - Player 2: Top-right (0,19)  
+    /// - Player 3: Bottom-right (19,19)
+    /// - Player 4: Bottom-left (19,0)
     pub fn new() -> Self {
         let board = vec![vec![0; 20]; 20];
         let player_pieces = vec![
@@ -348,23 +448,45 @@ impl BlokusState {
         }
     }
 
-    /// Returns the board size (always 20 for Blokus)
+    /// Returns the board size (always 20 for standard Blokus)
+    /// 
+    /// # Returns
+    /// Board dimension (20) - Blokus is played on a fixed 20x20 grid
     pub fn get_board_size(&self) -> usize {
         20 // Blokus board is 20x20
     }
 
-    /// Returns the line size (not applicable for Blokus, returns 1)
+    /// Returns the line size (not applicable for Blokus)
+    /// 
+    /// Blokus doesn't use a "line size" concept like Connect 4 or Gomoku.
+    /// This method exists for GameState trait compatibility.
+    /// 
+    /// # Returns
+    /// Always returns 1 as a default value
     pub fn get_line_size(&self) -> usize {
         1 // Blokus doesn't have a line size concept, return 1 as default
     }
 
-    /// Checks if a move is legal in the current game state
+    /// Checks if a move is legal for the current player in the current game state
+    /// 
+    /// Validates both pass moves (always legal) and piece placement moves.
+    /// For piece placements, checks that the piece exists in the player's
+    /// inventory, the transformation index is valid, and the placement
+    /// follows Blokus rules (corner touching, no edge adjacency, etc.).
     /// 
     /// # Arguments
-    /// * `mv` - The move to check
+    /// * `mv` - The move to validate (either piece placement or pass)
     /// 
     /// # Returns
-    /// True if the move is legal, false otherwise
+    /// `true` if the move is legal according to Blokus rules, `false` otherwise
+    /// 
+    /// # Rule Validation
+    /// - Pass moves are always legal
+    /// - Piece must exist in current player's inventory
+    /// - Transformation index must be valid for the piece
+    /// - First moves must cover the player's designated corner
+    /// - Subsequent moves must touch corner-to-corner with existing pieces
+    /// - No edge-to-edge contact with same player's pieces allowed
     pub fn is_legal(&self, mv: &BlokusMove) -> bool {
         // Handle pass move - always legal
         if *mv == PASS_MOVE {
@@ -385,18 +507,25 @@ impl BlokusState {
         self.is_valid_move(player_idx, shape, mv.2, mv.3)
     }
 
-    /// Checks if a move is valid for a given player at the specified position
+    /// Checks if a piece placement is valid at the specified position
     /// 
-    /// Internal helper function that performs the actual move validation logic.
+    /// Internal helper function that performs the core move validation logic
+    /// according to Blokus rules. Handles both first-move corner requirements
+    /// and subsequent corner-touching/edge-avoidance rules.
     /// 
     /// # Arguments
-    /// * `player_idx` - Index of the player (0-3)
-    /// * `shape` - The piece shape to place
-    /// * `r` - Row position
-    /// * `c` - Column position
+    /// * `player_idx` - Zero-based player index (0-3)
+    /// * `shape` - The piece shape to place (transformation coordinates)
+    /// * `r` - Board row position for piece origin
+    /// * `c` - Board column position for piece origin
     /// 
     /// # Returns
-    /// True if the move is valid, false otherwise
+    /// `true` if the placement is valid according to Blokus rules
+    /// 
+    /// # Validation Steps
+    /// 1. Check all piece squares fit on board and are empty
+    /// 2. For first move: verify piece covers the player's corner
+    /// 3. For subsequent moves: verify corner-touching and no edge contact
     fn is_valid_move(&self, player_idx: usize, shape: &[(i32, i32)], r: usize, c: usize) -> bool {
         let player_id = (player_idx + 1) as i32;
         let mut corner_touch = false;
@@ -453,13 +582,23 @@ impl BlokusState {
         corner_touch
     }
 
-    /// Returns the available pieces for a player
+    /// Returns the piece IDs available to a specific player
+    /// 
+    /// Provides a list of piece IDs that the player can still place.
+    /// Useful for UI displays and move generation optimization.
     /// 
     /// # Arguments
     /// * `player` - Player ID (1-4)
     /// 
     /// # Returns
-    /// Vector of piece IDs available to the player
+    /// Vector of piece IDs (0-20) still available to the player.
+    /// Returns empty vector for invalid player IDs.
+    /// 
+    /// # Usage
+    /// ```
+    /// let available = state.get_available_pieces(1);
+    /// println!("Player 1 can place pieces: {:?}", available);
+    /// ```
     pub fn get_available_pieces(&self, player: i32) -> Vec<usize> {
         let player_idx = (player - 1) as usize;
         if player_idx < self.player_pieces.len() {
@@ -469,13 +608,22 @@ impl BlokusState {
         }
     }
 
-    /// Returns the pieces available to a specific player
+    /// Returns a reference to the pieces available to a specific player
+    /// 
+    /// Provides direct access to the complete piece objects (including
+    /// transformations) for a player. Useful for detailed analysis,
+    /// UI rendering, and move generation.
     /// 
     /// # Arguments
     /// * `player` - Player ID (1-4)
     /// 
     /// # Returns
-    /// Reference to the vector of pieces available to the player
+    /// Reference to the vector of Piece objects available to the player.
+    /// Returns reference to empty vector for invalid player IDs.
+    /// 
+    /// # Performance Note
+    /// Returns a reference to avoid cloning the potentially large piece data.
+    /// Callers should not modify the returned pieces.
     pub fn get_player_pieces(&self, player: i32) -> &Vec<Piece> {
         let player_idx = (player - 1) as usize;
         if player_idx < self.player_pieces.len() {
@@ -493,23 +641,28 @@ impl FromStr for BlokusMove {
 
     /// Creates a BlokusMove from a string representation
     /// 
-    /// Expected format is "(piece_idx,trans_idx,r,c)" where all values are integers.
+    /// Parses move strings in the format "(piece_id,trans_idx,row,col)" where
+    /// all values are non-negative integers. This format is used for game
+    /// notation, move history, and network communication.
     /// 
     /// # Arguments
     /// * `s` - String in format "(piece,transformation,row,col)" (e.g., "(5,2,3,4)")
     /// 
     /// # Returns
-    /// Ok(BlokusMove) if parsing succeeds, Err(String) if format is invalid
+    /// `Ok(BlokusMove)` if parsing succeeds, `Err(String)` with error description if invalid
     /// 
-    /// # Examples
-    /// ```
-    /// use std::str::FromStr;
-    /// let move_obj = BlokusMove::from_str("(5,2,3,4)").unwrap();
-    /// assert_eq!(move_obj.0, 5);  // piece_idx
-    /// assert_eq!(move_obj.1, 2);  // trans_idx
-    /// assert_eq!(move_obj.2, 3);  // row
-    /// assert_eq!(move_obj.3, 4);  // col
-    /// ```
+    /// # Format Requirements
+    /// - Must be enclosed in parentheses
+    /// - Four comma-separated integers
+    /// - piece_id: 0-20 (not validated here)
+    /// - trans_idx: 0+ (not validated here)  
+    /// - row, col: 0-19 (not validated here)
+    /// 
+    /// # Error Cases
+    /// - Missing or extra parentheses
+    /// - Wrong number of comma-separated values
+    /// - Non-numeric values
+    /// - Negative numbers
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         if s.starts_with('(') && s.ends_with(')') {

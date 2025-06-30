@@ -1,221 +1,176 @@
-# 🎮 Parallel Multi-Game MCTS Arena
+# Parallel Multi-Game MCTS Arena
 
-**A smart AI that can play 4 different board games!**
+A multi-threaded Monte Carlo Tree Search engine that plays four classic board games with configurable AI opponents.
 
-This program uses a powerful AI to play board games. The AI can think very fast because it uses many CPU cores at the same time.
+## Supported Games
 
-## 🎯 Games You Can Play
+**Gomoku (Five in a Row)**
+- Board: 15×15 grid (configurable)
+- Goal: Get 5 pieces in a row (configurable)
+- Players: 2
 
-**Four classic games are available:**
-- 🔵 **Gomoku** (Five in a Row)
-- 🔴 **Connect 4** 
-- ⚫ **Othello** (Reversi)
-- 🟦 **Blokus**
+**Connect 4**
+- Board: 7×6 grid (configurable)
+- Goal: Get 4 pieces in a row (configurable)
+- Players: 2
 
-The AI uses Monte Carlo Tree Search (MCTS) algorithm to find the best moves. It runs on multiple threads to think faster and play better.
+**Othello (Reversi)**
+- Board: 8×8 grid (configurable)
+- Goal: Have the most pieces when the board is full
+- Players: 2
 
----
+**Blokus**
+- Board: 20×20 grid
+- Goal: Place as many polyomino pieces as possible
+- Players: 2-4
 
-*This project was created with help from GitHub Copilot.*
+## Features
 
-## 📋 Game Rules
+**AI Engine**
+- Parallel Monte Carlo Tree Search (MCTS) algorithm
+- Multi-threaded search with configurable thread count
+- Virtual losses to prevent thread collisions
+- Memory-efficient node recycling
+- Tree reuse between moves for improved performance
+- Real-time search statistics
 
-### 🔵 Gomoku (Five in a Row)
-- **Goal**: Get 5 pieces in a row to win
-- **Board**: 15×15 grid
-- **Players**: 2 players (you vs AI, or AI vs AI)
+**Interface**
+- Terminal-based UI with mouse and keyboard support
+- Resizable panels with drag-and-drop boundaries
+- Live AI analysis and move history
+- Game-specific controls and optimizations
+- Debug mode with detailed search statistics
 
-### 🔴 Connect 4
-- **Goal**: Get 4 pieces in a row to win  
-- **Board**: 7×6 grid (pieces drop down due to gravity)
-- **Players**: 2 players (you vs AI, or AI vs AI)
+**Configuration**
+- Adjustable board sizes and win conditions
+- Configurable AI parameters (exploration factor, search time, thread count)
+- Human vs AI or AI vs AI gameplay modes
+- Command-line interface for automation
 
-### ⚫ Othello (Reversi)
-- **Goal**: Have the most pieces when the board is full
-- **Board**: 8×8 grid
-- **Players**: 2 players (you vs AI, or AI vs AI)
+## Installation
 
-### 🟦 Blokus
-- **Goal**: Place as many of your pieces as possible
-- **Board**: 20×20 grid
-- **Players**: 2, 3, or 4 players (humans or AI)
-- **Special**: Uses colorful puzzle pieces (polyominoes)
+**Prerequisites**
+- Rust toolchain (install from [rustup.rs](https://rustup.rs/))
+- Modern terminal (Windows Terminal recommended)
 
-## ✨ What Makes This Special
-
-### 🎮 Game Features
-- **4 Different Games**: All games use the same smart AI
-- **Easy to Change**: Adjust board size, winning conditions, and more
-- **Human vs AI**: Play against the computer or watch AI vs AI
-- **Live Information**: See what the AI is thinking in real-time
-- **Move History**: Review all moves made during the game
-
-### 🧠 AI Features
-- **Very Fast**: Uses multiple CPU cores to think quickly
-- **Smart Decisions**: Balances trying new moves vs. using good known moves
-- **Memory Efficient**: Reuses memory to run faster
-- **Adjustable**: Change how long the AI thinks and how it behaves
-- **AI-Only Mode**: Watch AI play against itself for learning
-- **Shared Memory**: AI remembers between moves for better play
-- **Live Stats**: See AI progress and statistics while it thinks
-
-### 💻 Interface Features
-- **Works Everywhere**: Adapts to any terminal size
-- **Mouse + Keyboard**: Use whichever you prefer
-- **Real-time Info**: See AI statistics and move analysis
-- **Debug Mode**: Detailed view of AI decision-making process
-- **Scrollable**: Navigate through long information lists
-- **Smart Cursors**: Each game has optimized controls (Connect4 drops to bottom automatically)
-- **Easy Navigation**: Use PageUp/PageDown to scroll through information
-
-## 🚀 How to Install and Run
-
-### What You Need
-- **Rust Programming Language**: Get it from [rustup.rs](https://rustup.rs/)
-- **Operating System**: Windows, macOS, or Linux (tested on Windows)
-- **Terminal**: Any modern terminal (Windows Terminal recommended)
-
-### 📦 Installation Steps
-
-1. **Download the code:**
-   ```bash
-   git clone https://github.com/aryanbdps9/parallel-mcts-arena-rs.git
-   cd parallel-mcts-arena-rs
-   ```
-
-2. **Build the program:**
-   ```bash
-   cargo build --release
-   ```
-
-3. **Run the program:**
-   ```bash
-   cargo run --release
-   ```
-
-*Note: Use `--release` for the best performance!*
-
-## 🎮 How to Play
-
-### Getting Started
-When you start the program, you will see a simple menu:
-
-1. **Choose a Game**: Pick from Gomoku, Connect 4, Othello, or Blokus
-2. **Set Up Players**: Choose if each player is a human or AI
-3. **Adjust Settings**: Change game rules or AI behavior (optional)
-4. **Play**: Use mouse clicks or keyboard to make your moves
-
-*Note: If you use `--ai-only` mode, you skip step 2 and watch AI vs AI immediately.*
-
-### 🔧 Command Line Options
-
-You can customize the AI and game settings:
-
-| Option | Short | Default | What it does |
-|--------|--------|---------|--------------|
-| `--exploration-factor` | `-e` | 4.0 | How much AI explores new moves |
-| `--search-iterations` | `-s` | 1000000 | How many moves AI considers |
-| `--max-nodes` | `-m` | 1000000 | Maximum AI memory usage |
-| `--num-threads` | `-n` | 8 | CPU cores AI can use |
-| `--game` | `-g` | None | Start with specific game |
-| `--board-size` | `-b` | 15 | Board size (15 for Gomoku, 8 for Othello) |
-| `--line-size` | `-l` | 5 | Pieces needed to win (5 for Gomoku, 4 for Connect4) |
-| `--timeout-secs` | | 60 | Max seconds AI can think per move |
-| `--stats-interval-secs` | | 20 | How often to show AI progress |
-| `--ai-only` | | false | Skip human setup, watch AI vs AI |
-| `--shared-tree` | | true | AI remembers between moves |
-
-**Example:** Start Gomoku AI vs AI with faster thinking:
+**Build and Run**
 ```bash
-cargo run --release -- --game Gomoku --ai-only --num-threads 16 --timeout-secs 30
+git clone https://github.com/aryanbdps9/parallel-mcts-arena-rs.git
+cd parallel-mcts-arena-rs
+cargo build --release
+cargo run --release
 ```
 
-## ⌨️ Controls
+Use `--release` for optimal performance.
 
-### 🕹️ While Playing Games
+## Usage
 
-**Movement:**
-- **Arrow Keys** ← ↑ → ↓: Move cursor around the board
-- **Enter** or **Space**: Place your piece at cursor position
-- **Mouse Click**: Click anywhere on board to place piece
+**Interactive Mode**
+Launch the application and use the menu system:
+1. Select a game from the main menu
+2. Configure players (Human or AI)
+3. Adjust settings (optional)
+4. Start playing
 
-**Game Controls:**
-- **R**: Restart current game
-- **Esc**: Return to main menu
-- **Q**: Quit the program
+**Command Line Mode**
+```bash
+# Start specific game with AI vs AI
+cargo run --release -- --game Gomoku --ai-only
 
-**Information:**
-- **PageUp/PageDown**: Scroll through AI statistics and debug info
-- **Home/End**: Go to top/bottom of information panels
+# Custom board size and AI settings
+cargo run --release -- --game Gomoku --board-size 19 --exploration-factor 1.4 --num-threads 16
 
-### 🟦 Special Blokus Controls
-*When playing Blokus, you get extra controls for pieces:*
+# Fast AI games for analysis
+cargo run --release -- --ai-only --timeout-secs 10
+```
 
-- **R**: Rotate selected piece
-- **P**: Pass your turn (when you can't place any pieces)
-- **Number Keys 1-9**: Select different pieces quickly
-- **E**: Expand all player piece lists
-- **C**: Collapse all player piece lists
+## Command Line Options
 
-### 📋 Menu Navigation
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--exploration-factor` | `-e` | 4.0 | MCTS exploration vs exploitation balance |
+| `--search-iterations` | `-s` | 1000000 | Maximum MCTS iterations per move |
+| `--max-nodes` | `-m` | 1000000 | Maximum nodes in search tree |
+| `--num-threads` | `-n` | 8 | Parallel search threads |
+| `--timeout-secs` | | 60 | Maximum AI thinking time per move |
+| `--game` | `-g` | None | Start with specific game |
+| `--board-size` | `-b` | 15 | Board size (game-dependent) |
+| `--line-size` | `-l` | 5 | Pieces needed to win (game-dependent) |
+| `--ai-only` | | false | Skip player setup, run AI vs AI |
+| `--shared-tree` | | true | Reuse search tree between moves |
+| `--stats-interval-secs` | | 20 | Statistics update frequency |
 
-- **Up/Down Arrow Keys**: Move through menu options
-- **Left/Right Arrow Keys**: Change setting values (in settings menu)
-- **Enter**: Select/confirm your choice
-- **Esc**: Go back to previous menu
-- **Q**: Quit program
+## Controls
 
-### 🖱️ Mouse Controls
+**Game Navigation**
+- Arrow keys: Move cursor
+- Enter/Space: Place piece
+- Mouse click: Direct placement
+- R: Restart game
+- Esc: Return to menu
+- Q: Quit application
 
-- **Left Click**: Place move on game board
-- **Right Click**: Special actions (varies by game)
-- **Scroll Wheel**: Scroll through information panels
-- **Drag**: Resize panels (grab the borders between sections)
+**Information Panels**
+- Page Up/Down: Scroll statistics and move history
+- Home/End: Jump to top/bottom of panels
+- Mouse drag: Resize panel boundaries
 
-## 💡 Tips for Better Play
+**Blokus-Specific**
+- R: Rotate selected piece
+- P: Pass turn
+- Number keys (1-9): Quick piece selection
+- E: Expand all piece lists
+- C: Collapse all piece lists
 
-### Getting the Best AI Performance
-- Use `--release` build for maximum speed
-- Increase `--num-threads` to match your CPU cores
-- Adjust `--timeout-secs` based on how long you want to wait
-- Use `--ai-only` mode to study AI strategies
+**Menu Navigation**
+- Up/Down arrows: Navigate options
+- Left/Right arrows: Adjust values
+- Enter: Confirm selection
+- Esc: Go back
 
-### Understanding the AI
-- **Higher exploration factor** = AI tries more new moves
-- **More search iterations** = AI thinks deeper but slower
-- **Shared tree mode** = AI learns from previous moves in the game
+## Technical Details
 
-## 🔧 Technical Details
+**Monte Carlo Tree Search (MCTS)**
+- Builds a tree of possible game moves through simulation
+- Uses PUCT (Predictor + Upper Confidence bounds applied to Trees) for node selection
+- Balances exploration of new moves vs exploitation of good moves
+- Parallel implementation with virtual losses to prevent thread conflicts
 
-### What is MCTS?
-Monte Carlo Tree Search (MCTS) is a smart algorithm that:
-1. **Builds a tree** of possible game moves
-2. **Simulates** thousands of random games
-3. **Learns** which moves lead to wins
-4. **Chooses** the move with the highest win rate
+**Performance Optimizations**
+- Multi-threaded search using Rayon thread pool
+- Node recycling to reduce memory allocations
+- Tree reuse between moves for consistent game analysis
+- Lock-free statistics gathering where possible
+- Thread-local buffers for move generation
 
-### Why is it Fast?
-- **Parallel Processing**: Uses multiple CPU cores simultaneously
-- **Smart Memory**: Reuses calculations and memory efficiently  
-- **Virtual Losses**: Prevents multiple threads from exploring the same moves
-- **Tree Pruning**: Removes unnecessary branches to save memory
+**Architecture**
+- GameState trait provides unified interface for all games
+- Wrapper types allow generic MCTS engine to work with any game
+- Terminal UI built with Ratatui and Crossterm
+- Async communication between UI and AI threads
 
-### Built With
-- **Rust**: Fast, safe systems programming language
-- **Ratatui**: Terminal user interface framework
-- **Rayon**: Data parallelism library
-- **Crossterm**: Cross-platform terminal manipulation
+**Dependencies**
+- Rust: Systems programming language with memory safety
+- Ratatui: Terminal user interface framework
+- Crossterm: Cross-platform terminal manipulation
+- Rayon: Data parallelism library
+- Parking Lot: High-performance synchronization primitives
+- Clap: Command line argument parsing
 
----
+## Performance Tips
 
-## 📄 License
+**Optimal Settings**
+- Use `--release` build for maximum performance
+- Set `--num-threads` to match your CPU core count
+- Increase `--timeout-secs` for stronger play at the cost of speed
+- Enable `--shared-tree` for consistent game analysis
 
-This project is open source. Check the LICENSE file for details.
+**AI Tuning**
+- Higher `--exploration-factor`: More exploration of new moves
+- Lower `--exploration-factor`: More exploitation of proven moves
+- More `--search-iterations`: Deeper analysis but slower moves
+- More `--max-nodes`: Better memory utilization for complex positions
 
-## 🤝 Contributing
+## License
 
-Found a bug or want to add a feature? Feel free to open an issue or submit a pull request!
-
----
-
-**Happy Learning! 🎮✨**
+This project is open source. See the LICENSE file for details.

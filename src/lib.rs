@@ -366,16 +366,30 @@ impl<S: GameState> MCTS<S> {
         }
     }
 
+    /// Gets the exploration parameter used in the UCB1 formula
+    /// 
+    /// # Returns
+    /// The exploration parameter (C_puct value)
     pub fn get_exploration_parameter(&self) -> f64 {
         self.exploration_parameter
     }
 
+    /// Gets the maximum number of nodes allowed in the tree
+    /// 
+    /// # Returns
+    /// Maximum node count before tree pruning occurs
     pub fn get_max_nodes(&self) -> usize {
         self.max_nodes
     }
 
     /// Advances the root of the tree to the node corresponding to the given move.
-    /// This version recycles unused subtrees to reduce memory allocation/deallocation.
+    /// 
+    /// This is used when a move is made in the actual game to reuse the search tree.
+    /// The subtree corresponding to the selected move becomes the new root,
+    /// and all other subtrees are recycled to save memory.
+    /// 
+    /// # Arguments
+    /// * `mv` - The move that was made in the game
     pub fn advance_root(&mut self, mv: &S::Move) {
         let (new_root, nodes_to_recycle, new_tree_size) = {
             let children = self.root.children.read();
@@ -413,6 +427,14 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Counts the total number of nodes in a subtree (including the root of the subtree)
+    /// 
+    /// Used for memory management and tree statistics.
+    /// 
+    /// # Arguments
+    /// * `root` - The root node of the subtree to count
+    /// 
+    /// # Returns
+    /// Total number of nodes in the subtree
     fn count_subtree_nodes(&self, root: &Arc<Node<S::Move>>) -> usize {
         let mut count = 0;
         let mut stack = vec![root.clone()];
@@ -427,7 +449,12 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Prunes weak children from the tree to save memory and computation.
-    /// Call this periodically during search to maintain tree efficiency.
+    /// 
+    /// Removes nodes with visit counts below the threshold to control memory usage
+    /// and focus computation on promising paths. Call this periodically during search.
+    /// 
+    /// # Arguments
+    /// * `min_visits_threshold` - Minimum number of visits required to keep a node
     pub fn prune_tree(&mut self, min_visits_threshold: i32) {
         let pruned_nodes = self.root.prune_weak_children(min_visits_threshold);
         if !pruned_nodes.is_empty() {
@@ -445,7 +472,10 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Automatically prunes the tree based on visit statistics
-    /// Removes children with less than 1% of the root's visits
+    /// 
+    /// Removes children with less than 1% of the root's visits to keep the tree
+    /// focused on the most promising moves. This is a heuristic-based pruning
+    /// that doesn't require manual threshold setting.
     pub fn auto_prune(&mut self) {
         let root_visits = self.root.visits.load(Ordering::Relaxed);
         let min_visits = std::cmp::max(1, root_visits / 100); // At least 1% of root visits
@@ -453,7 +483,12 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Returns statistics for the children of the root node.
-    /// The stats are a map from a move to a tuple of (wins, visits).
+    /// 
+    /// Provides detailed statistics about each possible move from the current position.
+    /// Used for move analysis and debugging the search behavior.
+    /// 
+    /// # Returns
+    /// HashMap mapping moves to (wins, visits) tuples
     pub fn get_root_children_stats(&self) -> std::collections::HashMap<S::Move, (f64, i32)> {
         let children = self.root.children.read();
         children
@@ -466,8 +501,12 @@ impl<S: GameState> MCTS<S> {
             .collect()
     }
 
-    /// Returns the stats for the root node.
-    /// The stats are a tuple of (wins, visits).
+    /// Returns the statistics for the root node.
+    /// 
+    /// Provides overall statistics about the search from the current position.
+    /// 
+    /// # Returns
+    /// Tuple of (wins, visits) for the root node
     pub fn get_root_stats(&self) -> (f64, i32) {
         let wins = self.root.wins.load(Ordering::Relaxed) as f64;
         let visits = self.root.visits.load(Ordering::Relaxed);
@@ -475,6 +514,13 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Returns debug information about the current MCTS state
+    /// 
+    /// Provides a formatted string with detailed information about the search tree,
+    /// including root statistics, tree size, configuration, and top moves.
+    /// Useful for debugging and monitoring search progress.
+    /// 
+    /// # Returns
+    /// Multi-line debug string with tree statistics and top moves
     pub fn get_debug_info(&self) -> String {
         let root_visits = self.root.visits.load(Ordering::Relaxed);
         let root_wins = self.root.wins.load(Ordering::Relaxed);
@@ -517,7 +563,13 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Ensures the root node is fully expanded with all possible moves.
+    /// 
     /// This prevents the issue where only one move gets explored due to early exploitation.
+    /// By expanding all possible moves at the root, we ensure that the search considers
+    /// all options and doesn't get stuck in local optima.
+    /// 
+    /// # Arguments
+    /// * `state` - The current game state to get possible moves from
     fn ensure_root_expanded(&mut self, state: &S) {
         let mut children_guard = self.root.children.write();
         if children_guard.is_empty() && !state.is_terminal() {
@@ -823,6 +875,18 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Runs a single MCTS simulation with virtual loss support.
+    /// 
+    /// This is the core of the MCTS algorithm. It performs:
+    /// 1. Selection: Traverse tree using PUCT to select promising paths
+    /// 2. Expansion: Add new nodes to the tree when reaching a leaf
+    /// 3. Simulation: Play out a random game from the new position
+    /// 4. Backpropagation: Update statistics along the path
+    /// 
+    /// Virtual losses are used to coordinate parallel threads and prevent
+    /// multiple threads from exploring the same path simultaneously.
+    /// 
+    /// # Arguments
+    /// * `state` - The current game state to simulate from
     fn run_simulation(&self, state: &S) {
         let mut current_state = state.clone();
         let mut path: Vec<Arc<Node<S::Move>>> = Vec::with_capacity(64); // Pre-allocate reasonable capacity
@@ -868,7 +932,7 @@ impl<S: GameState> MCTS<S> {
                             (m.clone(), n.clone(), puct)
                         })
                 );
-                
+
                 // If no expanded children exist, we need to break out of selection and go to expansion
                 if candidates.is_empty() {
                     drop(children_guard);
@@ -1046,7 +1110,13 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Prunes children based on visit percentage relative to the best child
-    /// Removes children with less than the specified percentage of the most visited child's visits
+    /// 
+    /// Removes children with less than the specified percentage of the most visited child's visits.
+    /// This is more aggressive than absolute threshold pruning and helps focus on the most
+    /// promising moves while preserving exploration diversity.
+    /// 
+    /// # Arguments
+    /// * `min_percentage` - Minimum percentage of the best child's visits required to keep a child (0.0-1.0)
     pub fn prune_children_by_percentage(&mut self, min_percentage: f64) {
         let mut children = self.root.children.write();
         
@@ -1087,7 +1157,16 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Returns grid-based statistics for games like Gomoku and Othello
-    /// Returns (visits_grid, values_grid, wins_grid, root_value) where each grid is board_size x board_size
+    /// 
+    /// Provides spatial analysis of the search tree for coordinate-based games.
+    /// Each position on the grid shows how many times that move was considered
+    /// and its expected value from the MCTS search.
+    /// 
+    /// # Arguments
+    /// * `board_size` - Size of the game board (NxN)
+    /// 
+    /// # Returns
+    /// Tuple of (visits_grid, values_grid, wins_grid, root_value) where each grid is board_size x board_size
     pub fn get_grid_stats(&self, board_size: usize) -> (Vec<Vec<i32>>, Vec<Vec<f64>>, Vec<Vec<f64>>, f64) {
         let mut visits_grid = vec![vec![0; board_size]; board_size];
         let mut values_grid = vec![vec![0.0; board_size]; board_size];
@@ -1117,6 +1196,16 @@ impl<S: GameState> MCTS<S> {
     }
     
     /// Extract coordinates from a move for grid display (helper function)
+    /// 
+    /// Attempts to parse row and column coordinates from a move's Debug representation.
+    /// This is used for spatial visualization of search statistics on grid-based games.
+    /// 
+    /// # Arguments
+    /// * `mv` - The move to extract coordinates from
+    /// * `_board_size` - Board size (unused but kept for future validation)
+    /// 
+    /// # Returns
+    /// Optional tuple of (row, column) coordinates if parsing succeeds
     fn extract_move_coordinates(&self, mv: &S::Move, _board_size: usize) -> Option<(usize, usize)> {
         // This is a trait-based approach that will need to be implemented per game type
         // For now, we'll use std::fmt::Debug to parse coordinates from the move string

@@ -62,6 +62,9 @@ impl fmt::Display for MoveWrapper {
 }
 
 impl fmt::Display for GameWrapper {
+    /// Formats the game state for display
+    /// 
+    /// Delegates to the specific game's Display implementation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             GameWrapper::Gomoku(g) => write!(f, "{}", g),

@@ -1,7 +1,21 @@
 //! # Blokus UI Module
 //!
 //! This module provides specialized UI components for the Blokus game,
-//! including piece selection, ghost piece previews, and player status.
+//! including piece selection interfaces, ghost piece previews, and
+//! multi-player status displays.
+//!
+//! ## Key Features  
+//! - **Interactive Piece Selection**: Expandable/collapsible piece lists per player
+//! - **Ghost Piece Preview**: Visual preview of piece placement before confirming
+//! - **Player Status Tracking**: Real-time display of remaining pieces and scores
+//! - **Transformation Support**: Piece rotation and reflection through all valid orientations
+//! - **Scrollable Interfaces**: Handle large piece lists with keyboard navigation
+//!
+//! ## UI Components
+//! - **Board Rendering**: 20x20 grid with colored player pieces and highlights
+//! - **Piece Selection Panel**: Multi-player piece inventory with visual previews
+//! - **Player Status Panel**: Score tracking and game progress indicators
+//! - **Debug Information**: Development aids for piece selection and placement
 
 use crate::app::App;
 use crate::game_wrapper::GameWrapper;
@@ -11,7 +25,11 @@ use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientatio
 use mcts::GameState;
 use std::collections::HashSet;
 
-/// Configuration for Blokus UI display
+/// Configuration state for Blokus-specific UI elements
+///
+/// Manages the state of piece selection, player panel expansion, scrolling,
+/// and piece transformations for the Blokus game interface. Provides methods
+/// for interactive manipulation of these UI elements.
 pub struct BlokusUIConfig {
     /// Whether each player's piece list is expanded
     pub players_expanded: [bool; 4],
@@ -38,19 +56,22 @@ impl Default for BlokusUIConfig {
 }
 
 impl BlokusUIConfig {
-    /// Toggle expansion state for a player
+    /// Toggles the expansion state of a player's piece list
+    ///
+    /// # Arguments
+    /// * `player_idx` - Zero-based player index (0-3)
     pub fn toggle_player_expand(&mut self, player_idx: usize) {
         if player_idx < 4 {
             self.players_expanded[player_idx] = !self.players_expanded[player_idx];
         }
     }
 
-    /// Expand all players
+    /// Expands all player piece lists for full visibility
     pub fn expand_all(&mut self) {
         self.players_expanded = [true, true, true, true];
     }
 
-    /// Collapse all players
+    /// Collapses all player piece lists to save screen space
     pub fn collapse_all(&mut self) {
         self.players_expanded = [false, false, false, false];
     }
@@ -75,26 +96,49 @@ impl BlokusUIConfig {
         self.piece_selection_scroll = self.piece_selection_scroll.saturating_add(1);
     }
 
-    /// Select a piece by index
+    /// Selects a piece by its index for preview and placement
+    ///
+    /// # Arguments
+    /// * `piece_idx` - Index of the piece to select
     pub fn select_piece(&mut self, piece_idx: usize) {
         self.selected_piece_idx = Some(piece_idx);
         self.selected_transformation_idx = 0; // Reset transformation when selecting new piece
     }
 
-    /// Rotate the selected piece (cycle through transformations)
+    /// Rotates the selected piece through its available transformations
+    ///
+    /// Cycles through all rotations and reflections of the currently selected piece.
+    ///
+    /// # Arguments
+    /// * `total_transformations` - Total number of transformations available for the piece
     pub fn rotate_piece(&mut self, total_transformations: usize) {
         if total_transformations > 0 {
             self.selected_transformation_idx = (self.selected_transformation_idx + 1) % total_transformations;
         }
     }
 
-    /// Get the currently selected piece and transformation
+    /// Gets the currently selected piece and transformation indices
+    ///
+    /// # Returns
+    /// Option containing (piece_index, transformation_index) if a piece is selected
     pub fn get_selected_piece_info(&self) -> Option<(usize, usize)> {
         self.selected_piece_idx.map(|piece_idx| (piece_idx, self.selected_transformation_idx))
     }
 }
 
-/// Draw the Blokus board with ghost pieces
+/// Renders the Blokus game board with ghost piece preview
+///
+/// Displays the 20x20 Blokus board with colored player pieces, highlights
+/// the last move, and shows a translucent ghost piece preview when a human 
+/// player has selected a piece for placement.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `state` - Current Blokus game state
+/// * `area` - Screen area to render within
+/// * `selected_piece` - Optional tuple of (piece_id, transformation, row, col) for ghost preview
+/// * `cursor_pos` - Current cursor position as (row, col)
+/// * `show_cursor` - Whether to display the cursor (false during AI turns)
 pub fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect, selected_piece: Option<(usize, usize, usize, usize)>, cursor_pos: (u16, u16), show_cursor: bool) {
     let board = state.get_board();
     let board_height = board.len();
@@ -186,7 +230,16 @@ pub fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect, selecte
     f.render_widget(paragraph, inner_area);
 }
 
-/// Draw the piece selection panel for all players
+/// Renders the piece selection panel for all players
+///
+/// Displays expandable/collapsible lists of available pieces for each player,
+/// with visual piece previews and color-coded player indicators. Supports
+/// keyboard navigation and piece selection for the current player.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing UI configuration and game state
+/// * `area` - Screen area to render within
 pub fn draw_blokus_piece_selection(f: &mut Frame, app: &App, area: Rect) {
     if let GameWrapper::Blokus(blokus_state) = &app.game_wrapper {
         // Calculate area for content and scrollbar
@@ -412,7 +465,15 @@ pub fn draw_blokus_piece_selection(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Draw the player status panel
+/// Renders the player status panel showing game progress
+///
+/// Displays current scores, remaining pieces, and turn order for all players
+/// in the Blokus game. Uses color-coded indicators to match board display.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing game and player information
+/// * `area` - Screen area to render within
 pub fn draw_blokus_player_status(f: &mut Frame, app: &App, area: Rect) {
     if let GameWrapper::Blokus(blokus_state) = &app.game_wrapper {
         let block = Block::default().title("Players").borders(Borders::ALL);

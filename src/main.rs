@@ -74,9 +74,33 @@ struct Args {
     shared_tree: bool,
 }
 
+/// Main entry point for the Parallel Multi-Game MCTS Engine
+/// 
+/// This function:
+/// 1. Parses command line arguments using clap
+/// 2. Adjusts default parameters based on the selected game
+/// 3. Creates and configures the main App instance
+/// 4. Launches the terminal user interface
+/// 
+/// # Returns
+/// `io::Result<()>` - Ok if the application runs successfully, or an IO error
+/// 
+/// # Examples
+/// ```bash
+/// # Run with default settings
+/// cargo run --release
+/// 
+/// # Run Gomoku with custom settings
+/// cargo run --release -- --game Gomoku --board-size 19 --exploration-factor 1.4
+/// 
+/// # Run AI vs AI mode
+/// cargo run --release -- --ai-only --timeout-secs 10
+/// ```
 fn main() -> io::Result<()> {
     let mut args = Args::parse();
 
+    // Apply game-specific default configurations
+    // This ensures that each game uses appropriate default settings
     if let Some(game_name) = &args.game {
         match game_name.as_str() {
             "Gomoku" => {
@@ -104,6 +128,7 @@ fn main() -> io::Result<()> {
         }
     }
 
+    // Ensure we have at least one thread for the AI
     let num_threads = if args.num_threads > 0 {
         args.num_threads
     } else {

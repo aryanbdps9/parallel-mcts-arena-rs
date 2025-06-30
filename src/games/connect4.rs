@@ -195,10 +195,24 @@ impl Connect4State {
         }
     }
 
+    /// Gets the number of pieces needed in a row to win
+    /// 
+    /// # Returns
+    /// The line size (typically 4 for standard Connect 4)
     pub fn get_line_size(&self) -> usize {
         self.line_size
     }
 
+    /// Checks if a move is legal in the current game state
+    /// 
+    /// A move is legal if the column is within bounds and the top row
+    /// of that column is empty (pieces can be dropped).
+    /// 
+    /// # Arguments
+    /// * `mv` - The move to check
+    /// 
+    /// # Returns
+    /// true if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &Connect4Move) -> bool {
         mv.0 < self.width && self.board[0][mv.0] == 0
     }

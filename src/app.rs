@@ -65,6 +65,19 @@ pub struct AIWorker {
 }
 
 impl AIWorker {
+    /// Creates a new AI worker thread
+    /// 
+    /// Spawns a background thread that handles MCTS search requests and maintains
+    /// a persistent search tree. The worker can be controlled via message passing
+    /// and will automatically stop when requested.
+    /// 
+    /// # Arguments
+    /// * `exploration_constant` - C_puct value for MCTS exploration vs exploitation balance
+    /// * `num_threads` - Number of parallel threads for MCTS search
+    /// * `max_nodes` - Maximum number of nodes allowed in the search tree
+    /// 
+    /// # Returns
+    /// New AIWorker instance ready to process search requests
     pub fn new(exploration_constant: f64, num_threads: usize, max_nodes: usize) -> Self {
         let (tx_req, rx_req) = mpsc::channel();
         let (tx_resp, rx_resp) = mpsc::channel();
@@ -119,15 +132,34 @@ impl AIWorker {
         }
     }
 
+    /// Starts an AI search for the given game state
+    /// 
+    /// Sends a search request to the AI worker thread. The search will run
+    /// asynchronously and the result can be retrieved using try_recv().
+    /// 
+    /// # Arguments
+    /// * `state` - Current game state to search from
+    /// * `timeout_secs` - Maximum time to spend searching (in seconds)
     pub fn start_search(&self, state: GameWrapper, timeout_secs: u64) {
         self.tx_req.send(AIRequest::Search(state, timeout_secs)).unwrap();
     }
 
+    /// Attempts to receive a response from the AI worker
+    /// 
+    /// Non-blocking call that returns None if no response is available yet.
+    /// Should be called periodically to check for completed searches.
+    /// 
+    /// # Returns
+    /// Some(AIResponse) if a response is available, None otherwise
     pub fn try_recv(&self) -> Option<AIResponse> {
         self.rx_resp.try_recv().ok()
     }
 
     /// Explicitly stop the AI worker
+    /// 
+    /// Interrupts any ongoing search and signals the worker thread to stop.
+    /// The worker will finish processing the current request and then exit.
+    /// This is automatically called when the AIWorker is dropped.
     pub fn stop(&self) {
         // Set the stop flag first to interrupt any ongoing search
         self.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -135,12 +167,24 @@ impl AIWorker {
         self.tx_req.send(AIRequest::Stop).ok();
     }
 
+    /// Advances the AI's search tree root to reflect a move that was made
+    /// 
+    /// When a move is made in the game, this tells the AI to update its internal
+    /// search tree so that future searches start from the new position. This
+    /// allows the AI to reuse previous search results.
+    /// 
+    /// # Arguments
+    /// * `move_made` - The move that was made in the game
     pub fn advance_root(&self, move_made: &MoveWrapper) {
         self.tx_req.send(AIRequest::AdvanceRoot(move_made.clone())).ok();
     }
 }
 
 impl Drop for AIWorker {
+    /// Cleanup when AIWorker is dropped
+    /// 
+    /// Ensures the worker thread is properly stopped and joined to prevent
+    /// resource leaks. Gives the thread a reasonable time to finish gracefully.
     fn drop(&mut self) {
         // Stop the worker gracefully
         self.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -231,6 +275,26 @@ pub struct App {
 }
 
 impl App {
+    /// Creates a new application instance with the specified configuration
+    /// 
+    /// Initializes all application state including game options, AI workers, UI components,
+    /// and player configurations. The application can start in different modes depending
+    /// on the provided parameters.
+    /// 
+    /// # Arguments
+    /// * `exploration_constant` - C_puct value for MCTS exploration vs exploitation balance
+    /// * `num_threads` - Number of parallel threads for AI search
+    /// * `max_nodes` - Maximum number of nodes allowed in the MCTS search tree
+    /// * `game_name` - Optional specific game to start with (skips game selection)
+    /// * `board_size` - Size of the game board (game-specific interpretation)
+    /// * `line_size` - Number of pieces needed in a row to win (for applicable games)
+    /// * `timeout_secs` - Maximum time AI can spend per move (seconds)
+    /// * `stats_interval_secs` - How often to update AI statistics (seconds)
+    /// * `ai_only` - Whether to run in AI-vs-AI mode (no human players)
+    /// * `shared_tree` - Whether the AI should reuse search trees between moves
+    /// 
+    /// # Returns
+    /// New App instance ready to run the game engine
     pub fn new(
         exploration_constant: f64,
         num_threads: usize,
@@ -387,6 +451,16 @@ impl App {
         }
     }
 
+    /// Updates the application state for one frame
+    /// 
+    /// This is the main update loop that handles:
+    /// - AI move processing and timing
+    /// - Game state updates after moves
+    /// - Automatic move history scrolling
+    /// - Game over detection
+    /// - Background AI search coordination
+    /// 
+    /// Should be called once per frame in the main UI loop.
     pub fn update(&mut self) {
         if self.mode == AppMode::InGame {
             if self.game_status == GameStatus::InProgress {
@@ -447,10 +521,18 @@ impl App {
         self.update_history_auto_scroll();
     }
 
+    /// Gets the name of the currently selected game
+    /// 
+    /// # Returns
+    /// Static string reference to the selected game's name
     pub fn get_selected_game_name(&self) -> &'static str {
         self.games[self.game_selection_state.selected().unwrap_or(0)].0
     }
 
+    /// Moves the game selection cursor to the next option
+    /// 
+    /// Wraps around to the beginning when reaching the end of the list.
+    /// Includes settings and quit options in the navigation.
     pub fn select_next_game(&mut self) {
         let i = match self.game_selection_state.selected() {
             Some(i) => (i + 1) % (self.games.len() + 2), // +2 for Settings and Quit
@@ -459,6 +541,10 @@ impl App {
         self.game_selection_state.select(Some(i));
     }
 
+    /// Moves the game selection cursor to the previous option
+    /// 
+    /// Wraps around to the end when reaching the beginning of the list.
+    /// Includes settings and quit options in the navigation.
     pub fn select_prev_game(&mut self) {
         let i = match self.game_selection_state.selected() {
             Some(i) => (i + self.games.len() + 1) % (self.games.len() + 2),
@@ -467,6 +553,11 @@ impl App {
         self.game_selection_state.select(Some(i));
     }
 
+    /// Starts the selected game and transitions to the appropriate next state
+    /// 
+    /// Creates a new game instance, resets game state, and either goes to
+    /// player configuration (normal mode) or directly to gameplay (AI-only mode).
+    /// Also handles special options like Settings and Quit.
     pub fn start_game(&mut self) {
         if let Some(selected) = self.game_selection_state.selected() {
             if selected < self.games.len() {
@@ -575,6 +666,11 @@ impl App {
         self.board_cursor = (initial_row as u16, initial_col as u16);
     }
 
+    /// Resets the current game to its initial state
+    /// 
+    /// Creates a fresh game instance while preserving player configuration.
+    /// Clears move history, resets game status, and positions the cursor
+    /// appropriately for the game type.
     pub fn reset_game(&mut self) {
         // Get the currently selected game and reset its state without changing player config
         if let Some(selected) = self.game_selection_state.selected() {
@@ -618,14 +714,25 @@ impl App {
     }
 
     // Settings navigation methods
+    
+    /// Moves to the next setting in the settings menu
+    /// 
+    /// Wraps around to the first setting when reaching the end.
     pub fn select_next_setting(&mut self) {
         self.selected_settings_index = (self.selected_settings_index + 1) % 11; // 9 settings + separator + back
     }
 
+    /// Moves to the previous setting in the settings menu
+    /// 
+    /// Wraps around to the last setting when reaching the beginning.
     pub fn select_prev_setting(&mut self) {
         self.selected_settings_index = (self.selected_settings_index + 10) % 11;
     }
 
+    /// Increases the value of the currently selected setting
+    /// 
+    /// Each setting has its own valid range and increment amount.
+    /// Boolean settings get toggled instead of incremented.
     pub fn increase_setting(&mut self) {
         match self.selected_settings_index {
             0 => self.settings_board_size = (self.settings_board_size + 1).min(25),
@@ -641,6 +748,11 @@ impl App {
         }
     }
 
+    /// Decreases the value of the currently selected setting
+    /// 
+    /// Each setting has its own valid range and decrement amount.
+    /// Boolean settings get toggled instead of decremented.
+    /// Values are clamped to their minimum allowed values.
     pub fn decrease_setting(&mut self) {
         match self.selected_settings_index {
             0 => self.settings_board_size = self.settings_board_size.saturating_sub(1).max(3),
@@ -657,7 +769,10 @@ impl App {
     }
 
     /// Gracefully shut down the application
-    /// This ensures all threads are properly stopped before exiting
+    /// 
+    /// Ensures all threads are properly stopped before exiting.
+    /// This is especially important when AI is in the middle of a search.
+    /// Gives threads time to complete their current operations cleanly.
     pub fn shutdown(&mut self) {
         // Explicitly stop the AI worker
         self.ai_worker.stop();
@@ -668,25 +783,42 @@ impl App {
     }
 
     // Debug and history scrolling methods
+    
+    /// Scrolls the debug panel up by one line
     pub fn scroll_debug_up(&mut self) {
         self.debug_scroll = self.debug_scroll.saturating_sub(1);
     }
 
+    /// Scrolls the debug panel down by one line
     pub fn scroll_debug_down(&mut self) {
         self.debug_scroll = self.debug_scroll.saturating_add(1);
     }
 
+    /// Scrolls the move history panel up by one line
+    /// 
+    /// Disables auto-scroll when user manually scrolls.
     pub fn scroll_move_history_up(&mut self) {
         self.history_scroll = self.history_scroll.saturating_sub(1);
         self.on_user_history_scroll();
     }
 
+    /// Scrolls the move history panel down by one line
+    /// 
+    /// Disables auto-scroll when user manually scrolls.
     pub fn scroll_move_history_down(&mut self) {
         self.history_scroll = self.history_scroll.saturating_add(1);
         self.on_user_history_scroll();
     }
 
     // Enhanced Blokus functionality
+    
+    /// Selects a Blokus piece for placement
+    /// 
+    /// Only allows selection of pieces that are available to the current player.
+    /// Automatically tries to find a valid cursor position for the selected piece.
+    /// 
+    /// # Arguments
+    /// * `piece_idx` - Index of the piece to select
     pub fn blokus_select_piece(&mut self, piece_idx: usize) {
         // Only allow selection of available pieces
         if let GameWrapper::Blokus(state) = &self.game_wrapper {
@@ -701,6 +833,16 @@ impl App {
     }
 
     /// Check if a Blokus piece would fit within board bounds at the given position
+    /// 
+    /// Validates that the piece transformation would not extend outside the board.
+    /// Used for cursor movement validation and ghost piece display.
+    /// 
+    /// # Arguments
+    /// * `piece_idx` - Index of the piece to check
+    /// * `transformation_idx` - Transformation index (rotation/reflection)
+    /// 
+    /// # Returns
+    /// true if the piece fits within bounds, false otherwise
     fn would_blokus_piece_fit_at_cursor(&self, piece_idx: usize, transformation_idx: usize) -> bool {
         if let GameWrapper::Blokus(state) = &self.game_wrapper {
             let board = state.get_board();

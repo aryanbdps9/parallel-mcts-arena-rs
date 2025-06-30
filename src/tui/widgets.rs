@@ -1,7 +1,20 @@
 //! # UI Widgets Module
 //!
-//! This module contains functions for drawing the different UI components (widgets)
-//! on the screen, such as the game board, statistics, and menus.
+//! This module contains functions for rendering the different UI components (widgets)
+//! of the terminal user interface, including game boards, statistics panels, menus,
+//! and game-specific overlays.
+//!
+//! ## Main Components
+//! - **Game Selection Menu**: Main menu for choosing games and accessing settings
+//! - **Settings Menu**: Configuration interface for game parameters and AI settings
+//! - **Player Configuration**: Setup interface for human vs AI players
+//! - **Game View**: In-game interface with board, stats, and controls
+//! - **Move History**: Scrollable display of game moves with auto-scroll
+//! - **Debug Statistics**: Real-time AI search statistics and performance metrics
+//!
+//! ## Game-Specific Views
+//! - **Standard View**: Layout for 2-player games (Othello, Connect4, Gomoku)
+//! - **Blokus View**: Specialized 4-player layout with piece selection panels
 
 use crate::app::{App, AppMode, GameStatus, Player};
 use crate::game_wrapper::GameWrapper;
@@ -11,6 +24,14 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use mcts::GameState;
 
+/// Main rendering function that dispatches to appropriate view based on application mode
+///
+/// This function serves as the entry point for all UI rendering, determining which
+/// interface to display based on the current application state.
+///
+/// # Arguments
+/// * `app` - Mutable reference to the application state
+/// * `frame` - Ratatui frame for rendering widgets
 pub fn render(app: &mut App, frame: &mut Frame) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -27,6 +48,15 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 }
 
+/// Draws the main game selection menu
+///
+/// Displays a list of available games plus settings and quit options.
+/// Shows different titles for AI-only mode vs normal mode.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Mutable application state (for list widget state)
+/// * `area` - Screen area to render within
 fn draw_game_selection_menu(f: &mut Frame, app: &mut App, area: Rect) {
     let mut items: Vec<ListItem> = app
         .games
@@ -55,6 +85,15 @@ fn draw_game_selection_menu(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.game_selection_state);
 }
 
+/// Draws the settings configuration menu
+///
+/// Displays all configurable game parameters including board size, AI settings,
+/// and gameplay options. Shows current values and allows adjustment.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing settings values
+/// * `area` - Screen area to render within
 fn draw_settings_menu(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -100,6 +139,15 @@ fn draw_settings_menu(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(instructions, chunks[1]);
 }
 
+/// Draws the player configuration menu
+///
+/// Allows setting each player as Human or AI before starting a game.
+/// In AI-only mode, shows informational message about automatic AI assignment.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing player configurations
+/// * `area` - Screen area to render within
 fn draw_player_config_menu(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -157,6 +205,15 @@ fn draw_player_config_menu(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(instructions, chunks[1]);
 }
 
+/// Dispatches to appropriate game view renderer
+///
+/// Determines whether to use the standard 2-player layout or the specialized
+/// Blokus 4-player layout based on the current game type.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing game information
+/// * `area` - Screen area to render within
 fn draw_game_view(f: &mut Frame, app: &App, area: Rect) {
     if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
         draw_blokus_game_view(f, app, area);
@@ -165,6 +222,16 @@ fn draw_game_view(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Renders the standard game view for 2-player games
+///
+/// Uses a three-panel vertical layout: game board at top, game info in middle,
+/// and horizontally split debug stats and move history at bottom.
+/// Supports resizable panels via layout configuration.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing layout and game data
+/// * `area` - Screen area to render within
 fn draw_standard_game_view(f: &mut Frame, app: &App, area: Rect) {
     // Use the layout config to get the main areas
     let (board_area, instructions_area, stats_area) = app.layout_config.get_main_layout(area);
@@ -183,6 +250,16 @@ fn draw_standard_game_view(f: &mut Frame, app: &App, area: Rect) {
     draw_move_history(f, app, history_area);
 }
 
+/// Renders the specialized Blokus game view
+///
+/// Uses a custom layout with the game board on the left, piece selection panel
+/// in the center, player status on the right, and game info/stats at the bottom.
+/// Includes ghost piece preview and drag-and-drop piece placement.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing Blokus-specific UI state
+/// * `area` - Screen area to render within
 fn draw_blokus_game_view(f: &mut Frame, app: &App, area: Rect) {
     // First split vertically to have the main game area and bottom info area
     let vertical_chunks = Layout::default()
@@ -238,6 +315,16 @@ fn draw_blokus_game_view(f: &mut Frame, app: &App, area: Rect) {
     draw_move_history(f, app, stats_chunks[1]);
 }
 
+/// Draws the debug statistics panel
+///
+/// Displays real-time AI search statistics including node counts, evaluations,
+/// and top move candidates. Shows scrollable content with draggable panel borders.
+/// Updates automatically during AI thinking phases.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing MCTS statistics
+/// * `area` - Screen area to render within
 fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
     // Split area for content and scrollbar
     let chunks = if area.width > 5 {
@@ -316,6 +403,16 @@ fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Draws the game information panel
+///
+/// Shows current game status, active player with color-coded indicators,
+/// AI thinking status, basic statistics, and context-appropriate instructions.
+/// Adapts display format based on game type (2-player vs 4-player).
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing game and player information
+/// * `area` - Screen area to render within
 fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
     let mut text = vec![
         Line::from(format!("Game: {}  |  Status: {:?}", app.get_selected_game_name(), app.game_status)),
@@ -484,6 +581,17 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+/// Draws the move history panel
+///
+/// Displays a scrollable, color-coded history of all moves made in the current game.
+/// Uses different formatting for 2-player games (side-by-side pairs) vs 4-player
+/// Blokus (4 moves per line). Supports auto-scroll to follow recent moves and
+/// manual scrolling with preserved position.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing move history and scroll settings
+/// * `area` - Screen area to render within
 fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
     // Split area for content and scrollbar
     let chunks = if area.width > 5 {
@@ -551,7 +659,18 @@ fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Format two-player game moves side-by-side with colors
+/// Formats move history for 2-player games with color-coded side-by-side display
+///
+/// Groups moves in pairs per line when space allows, with appropriate spacing
+/// and color coding for each player. Falls back to separate lines for long moves.
+///
+/// # Arguments
+/// * `move_history` - Slice of move history entries to format
+/// * `max_width` - Maximum display width for text fitting
+/// * `app` - Application state for color and symbol lookup
+///
+/// # Returns
+/// Vector of styled text lines ready for display
 fn format_two_player_moves_sidebyside_colored<'a>(move_history: &'a [crate::app::MoveHistoryEntry], max_width: usize, app: &'a App) -> Vec<Line<'a>> {
     use ratatui::prelude::*;
     let mut result = Vec::new();
@@ -608,7 +727,18 @@ fn format_two_player_moves_sidebyside_colored<'a>(move_history: &'a [crate::app:
     result
 }
 
-/// Format Blokus (4-player) moves side-by-side with colors
+/// Formats move history for 4-player Blokus with grouped rounds
+///
+/// Groups moves by rounds (4 moves per round) with round headers and
+/// color-coded player moves. Handles text wrapping for long move descriptions.
+///
+/// # Arguments
+/// * `move_history` - Slice of move history entries to format
+/// * `max_width` - Maximum display width for text fitting
+/// * `app` - Application state for color and symbol lookup
+///
+/// # Returns
+/// Vector of styled text lines ready for display
 fn format_blokus_moves_sidebyside_colored<'a>(move_history: &'a [crate::app::MoveHistoryEntry], max_width: usize, app: &'a App) -> Vec<Line<'a>> {
     use ratatui::prelude::*;
     let mut result = Vec::new();
@@ -661,6 +791,15 @@ fn format_blokus_moves_sidebyside_colored<'a>(move_history: &'a [crate::app::Mov
     result
 }
 
+/// Dispatches board rendering to appropriate game-specific function
+///
+/// Creates a bordered frame and delegates to the correct board renderer
+/// based on the current game type.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing game board data
+/// * `area` - Screen area to render within
 fn draw_board(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title("Game Board");
     let inner_area = block.inner(area);
@@ -672,6 +811,16 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Renders game boards for standard 2-player games
+///
+/// Handles display of Othello, Connect4, and Gomoku boards with appropriate
+/// symbols and colors for each game type. Shows cursor position for human players
+/// and highlights the last move made.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing board and cursor data
+/// * `area` - Screen area to render within
 fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
     let board = app.game_wrapper.get_board();
     let board_height = board.len();
@@ -764,6 +913,16 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Renders the Blokus game board with piece placement visualization
+///
+/// Displays the 20x20 Blokus board with colored squares for each player's pieces.
+/// Highlights the most recent move and can show ghost pieces for preview during
+/// human player turns.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `state` - Current Blokus game state
+/// * `area` - Screen area to render within
 fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect) {
     let board = state.get_board();
     let board_height = board.len();

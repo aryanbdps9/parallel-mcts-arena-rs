@@ -12,6 +12,14 @@ use crossterm::event::{KeyCode, MouseEventKind};
 use ratatui::layout::Rect;
 use mcts::GameState;
 
+/// Handles keyboard input based on the current application mode
+/// 
+/// Routes key presses to the appropriate handler function depending on
+/// which screen/menu is currently active.
+/// 
+/// # Arguments
+/// * `app` - Mutable reference to the application state
+/// * `key_code` - The key that was pressed
 pub fn handle_key_press(app: &mut App, key_code: KeyCode) {
     match app.mode {
         AppMode::GameSelection => handle_game_selection_input(key_code, app),
@@ -22,10 +30,26 @@ pub fn handle_key_press(app: &mut App, key_code: KeyCode) {
     }
 }
 
+/// Handles mouse events by delegating to the mouse module
+/// 
+/// # Arguments
+/// * `app` - Mutable reference to the application state
+/// * `kind` - Type of mouse event (click, drag, scroll, etc.)
+/// * `col` - Column position of the mouse event
+/// * `row` - Row position of the mouse event
+/// * `terminal_size` - Size of the terminal for coordinate calculations
 pub fn handle_mouse_event(app: &mut App, kind: MouseEventKind, col: u16, row: u16, terminal_size: Rect) {
     mouse::handle_mouse_event(app, kind, col, row, terminal_size);
 }
 
+/// Handles keyboard input in the game selection menu
+/// 
+/// Supports navigation with arrow keys, selection with Enter,
+/// and quitting with Q or Escape.
+/// 
+/// # Arguments
+/// * `key_code` - The key that was pressed
+/// * `app` - Mutable reference to the application state
 fn handle_game_selection_input(key_code: KeyCode, app: &mut App) {
     match key_code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
@@ -73,6 +97,14 @@ fn handle_game_selection_input(key_code: KeyCode, app: &mut App) {
     }
 }
 
+/// Handles keyboard input in the settings menu
+/// 
+/// Supports navigation with arrow keys, value adjustment with left/right arrows,
+/// and returning to the main menu with Escape.
+/// 
+/// # Arguments
+/// * `key_code` - The key that was pressed
+/// * `app` - Mutable reference to the application state
 fn handle_settings_input(key_code: KeyCode, app: &mut App) {
     match key_code {
         KeyCode::Char('q') => app.should_quit = true,
@@ -90,6 +122,14 @@ fn handle_settings_input(key_code: KeyCode, app: &mut App) {
     }
 }
 
+/// Handles keyboard input in the player configuration menu
+/// 
+/// Supports navigation with arrow keys, player type cycling with left/right or space,
+/// and starting the game with Enter when "Start Game" is selected.
+/// 
+/// # Arguments
+/// * `key_code` - The key that was pressed
+/// * `app` - Mutable reference to the application state
 fn handle_player_config_input(key_code: KeyCode, app: &mut App) {
     match key_code {
         KeyCode::Char('q') => app.should_quit = true,
@@ -112,6 +152,14 @@ fn handle_player_config_input(key_code: KeyCode, app: &mut App) {
     }
 }
 
+/// Handles keyboard input during active gameplay
+/// 
+/// Supports move input, game controls, debug toggles, scrolling, and navigation.
+/// Only allows move input when it's a human player's turn and the game is in progress.
+/// 
+/// # Arguments
+/// * `key_code` - The key that was pressed
+/// * `app` - Mutable reference to the application state
 fn handle_ingame_input(key_code: KeyCode, app: &mut App) {
     if app.game_status != GameStatus::InProgress {
         return;
@@ -214,6 +262,14 @@ fn handle_ingame_input(key_code: KeyCode, app: &mut App) {
     }
 }
 
+/// Handles keyboard input on the game over screen
+/// 
+/// Supports restarting the game with R or Enter, returning to game selection
+/// with Escape, and quitting with Q.
+/// 
+/// # Arguments
+/// * `key_code` - The key that was pressed
+/// * `app` - Mutable reference to the application state
 fn handle_game_over_input(key_code: KeyCode, app: &mut App) {
     match key_code {
         KeyCode::Char('q') => app.should_quit = true,
@@ -223,6 +279,16 @@ fn handle_game_over_input(key_code: KeyCode, app: &mut App) {
     }
 }
 
+/// Checks if the current player is human (vs AI)
+/// 
+/// Maps the game's internal player ID to the UI player configuration
+/// to determine if the current player should accept human input.
+/// 
+/// # Arguments
+/// * `app` - Reference to the application state
+/// 
+/// # Returns
+/// true if the current player is human, false if AI
 fn is_current_player_human(app: &App) -> bool {
     let game_player_id = app.game_wrapper.get_current_player();
     let ui_player_id = match &app.game_wrapper {
@@ -243,6 +309,13 @@ fn is_current_player_human(app: &App) -> bool {
         .any(|(id, p_type)| *id == ui_player_id && *p_type == Player::Human)
 }
 
+/// Moves the board cursor up by one row
+/// 
+/// For Blokus, validates that the selected piece would still fit at the new position.
+/// For other games, simply moves the cursor if within bounds.
+/// 
+/// # Arguments
+/// * `app` - Mutable reference to the application state
 fn move_cursor_up(app: &mut App) {
     if app.board_cursor.0 > 0 {
         let new_row = app.board_cursor.0 - 1;
@@ -257,6 +330,13 @@ fn move_cursor_up(app: &mut App) {
     }
 }
 
+/// Moves the board cursor down by one row
+/// 
+/// For Blokus, validates that the selected piece would still fit at the new position.
+/// For other games, simply moves the cursor if within bounds.
+/// 
+/// # Arguments
+/// * `app` - Mutable reference to the application state
 fn move_cursor_down(app: &mut App) {
     let board = app.game_wrapper.get_board();
     let max_row = board.len() as u16;
@@ -273,6 +353,13 @@ fn move_cursor_down(app: &mut App) {
     }
 }
 
+/// Moves the board cursor left by one column
+/// 
+/// For Blokus, validates that the selected piece would still fit at the new position.
+/// For other games, simply moves the cursor if within bounds.
+/// 
+/// # Arguments
+/// * `app` - Mutable reference to the application state
 fn move_cursor_left(app: &mut App) {
     if app.board_cursor.1 > 0 {
         let new_col = app.board_cursor.1 - 1;
@@ -291,6 +378,14 @@ fn move_cursor_left(app: &mut App) {
     }
 }
 
+/// Moves the board cursor right by one column
+/// 
+/// For Blokus, validates that the selected piece would still fit at the new position.
+/// For Connect4, updates the cursor to the lowest available position in the new column.
+/// For other games, simply moves the cursor if within bounds.
+/// 
+/// # Arguments
+/// * `app` - Mutable reference to the application state
 fn move_cursor_right(app: &mut App) {
     let board = app.game_wrapper.get_board();
     let max_col = if !board.is_empty() { board[0].len() as u16 } else { 0 };
@@ -311,6 +406,13 @@ fn move_cursor_right(app: &mut App) {
     }
 }
 
+/// Updates the Connect4 cursor to the lowest available position in the current column
+/// 
+/// In Connect4, pieces fall due to gravity, so the cursor should always point
+/// to where a piece would actually land if dropped in the current column.
+/// 
+/// # Arguments
+/// * `app` - Mutable reference to the application state
 fn update_connect4_cursor_row(app: &mut App) {
     let board = app.game_wrapper.get_board();
     let board_height = board.len();
@@ -329,6 +431,14 @@ fn update_connect4_cursor_row(app: &mut App) {
     }
 }
 
+/// Attempts to make a move at the current cursor position
+/// 
+/// Creates the appropriate move type based on the current game and validates
+/// it before applying. If the move is legal, it's added to the move history
+/// and the game state is updated.
+/// 
+/// # Arguments
+/// * `app` - Mutable reference to the application state
 fn make_move(app: &mut App) {
     let (row, col) = (app.board_cursor.0 as usize, app.board_cursor.1 as usize);
     
