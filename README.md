@@ -48,12 +48,19 @@ The AI uses a massively parallel implementation of Monte Carlo Tree Search (MCTS
 - **Smart Search**: The AI knows how to balance exploring new moves and using moves it knows are good.
 - **Memory Pool**: Reuses memory to run faster.
 - **AI Settings**: You can change how the AI works, like how long it can think.
+- **Timeout Control**: Set maximum thinking time per move to ensure responsive gameplay.
+- **AI-Only Mode**: Run AI vs AI games for analysis and testing. When enabled, skips player configuration and goes straight to the game.
+- **Shared Tree**: Option to share search tree between moves for improved performance.
+- **Real-time Statistics**: View AI thinking progress and statistics during gameplay.
 
 ### UI Features
 - **Resizable Window**: The UI adapts to the terminal size.
-- **Live AI Info**: See real-time data from the AI.
+- **Live AI Info**: See real-time data from the AI including move statistics and search depth.
 - **Mouse and Keyboard**: Use your mouse or keyboard to play.
-- **Debug View**: A special view to see details about the AI's search.
+- **Debug View**: A special view to see details about the AI's search including top moves and win rates.
+- **Move History**: Track all moves made in the game with scrollable history.
+- **Game-Specific Cursors**: Each game has optimized cursor behavior (e.g., Connect4 cursor automatically drops to the lowest available position).
+- **Scrollable Panels**: Use PageUp/PageDown to scroll through debug information and move history.
 
 ## How to Install and Run
 
@@ -84,9 +91,11 @@ The AI uses a massively parallel implementation of Monte Carlo Tree Search (MCTS
 
 When you run the program, you will see a menu where you can:
 1.  **Pick a game**: Choose from Gomoku, Connect 4, Othello, or Blokus.
-2.  **Set players**: Choose if each player is a human or an AI.
+2.  **Set players**: Choose if each player is a human or an AI (skipped in AI-only mode).
 3.  **Change settings**: Change game rules or how the AI behaves.
 4.  **Play**: Use your mouse or keyboard to make moves.
+
+**Note**: When AI-only mode is enabled (via `--ai-only` flag or settings), the player configuration step is skipped and you'll go directly to watching the AI play.
 
 ### Command Line Options
 
@@ -94,7 +103,35 @@ You can also run the program with options from the command line.
 
 | Option | Short | Default | Description |
 |---|---|---|---|
-| `--exploration-factor` | `-e` | 1.4 | The exploration factor for the MCTS algorithm. |
-| `--search-iterations` | `-s` | 10000 | The number of search iterations for the MCTS algorithm. |
+| `--exploration-factor` | `-e` | 4.0 | The exploration factor for the MCTS algorithm. |
+| `--search-iterations` | `-s` | 1000000 | The number of search iterations for the MCTS algorithm. |
 | `--max-nodes` | `-m` | 1000000 | The maximum number of nodes in the MCTS search tree. |
-| `--num-threads` | `-n` | (number of logical cores) | Number of CPU threads for the AI to use. |
+| `--num-threads` | `-n` | 8 | Number of CPU threads for the AI to use. |
+| `--board-size` | `-b` | 15 | Board size (15 for Gomoku, 7 for Connect4, 8 for Othello). |
+| `--line-size` | `-l` | 5 | Number of pieces in a row to win (5 for Gomoku, 4 for Connect4). |
+| `--timeout-secs` | | 60 | Maximum time AI can think per move (in seconds). |
+| `--stats-interval-secs` | | 20 | How often to send statistics updates (in seconds). |
+| `--ai-only` | | false | Whether this is an AI vs AI only game. |
+| `--shared-tree` | | true | Whether to share the search tree between moves. |
+
+### Keyboard Controls
+
+#### In Game:
+- **Arrow Keys**: Move the cursor around the board
+- **Enter/Space**: Make a move at the current cursor position
+- **PageUp/PageDown**: Scroll through debug statistics
+- **Home/End**: Reset debug and history scroll positions
+- **R**: Restart the current game
+- **Esc**: Return to the main menu
+- **Q**: Quit the application
+
+#### In Menus:
+- **Up/Down**: Navigate menu options
+- **Left/Right**: Adjust settings values (in settings menu)
+- **Enter**: Select/confirm choice
+- **Esc**: Go back to previous menu
+- **Q**: Quit the application
+
+### Mouse Controls:
+- **Click**: Place a move on the board (in-game)
+- **Scroll**: Scroll through debug information (in-game)

@@ -36,8 +36,14 @@ fn draw_game_selection_menu(f: &mut Frame, app: &mut App, area: Rect) {
     items.push(ListItem::new("Settings"));
     items.push(ListItem::new("Quit"));
 
+    let title = if app.ai_only {
+        "Select a Game (AI-Only Mode)"
+    } else {
+        "Select a Game"
+    };
+
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Select a Game"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
             Style::default()
                 .add_modifier(Modifier::BOLD)
@@ -60,6 +66,10 @@ fn draw_settings_menu(f: &mut Frame, app: &App, area: Rect) {
         format!("AI Threads: {}", app.settings_ai_threads),
         format!("Max Nodes: {}", app.settings_max_nodes),
         format!("Exploration Constant: {:.2}", app.settings_exploration_constant),
+        format!("Timeout (secs): {}", app.timeout_secs),
+        format!("Stats Interval (secs): {}", app.stats_interval_secs),
+        format!("AI Only Mode: {}", if app.ai_only { "Yes" } else { "No" }),
+        format!("Shared Tree: {}", if app.shared_tree { "Yes" } else { "No" }),
         "".to_string(), // Separator
         "Back".to_string(),
     ];
@@ -122,36 +132,97 @@ fn draw_player_config_menu(f: &mut Frame, app: &App, area: Rect) {
     };
     items.push(ListItem::new("Start Game").style(start_style));
 
+    let title = if app.ai_only {
+        format!("{} - Player Configuration (AI Only Mode)", app.get_selected_game_name())
+    } else {
+        format!("{} - Player Configuration", app.get_selected_game_name())
+    };
+
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(format!("{} - Player Configuration", app.get_selected_game_name())))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_symbol("> ");
 
     f.render_widget(list, chunks[0]);
 
     // Instructions
-    let instructions = Paragraph::new("Use Up/Down to navigate, Left/Right/Space to toggle player type, Enter to confirm, Esc to go back")
+    let instructions_text = if app.ai_only {
+        "AI Only Mode: All players will be set to AI automatically. Enter to start game, Esc to go back"
+    } else {
+        "Use Up/Down to navigate, Left/Right/Space to toggle player type, Enter to confirm, Esc to go back"
+    };
+    
+    let instructions = Paragraph::new(instructions_text)
         .block(Block::default().borders(Borders::ALL).title("Instructions"));
     f.render_widget(instructions, chunks[1]);
 }
 
 fn draw_game_view(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
+    // Split the main area into board and info sections
+    let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(area);
 
-    draw_board(f, app, chunks[0]);
-    draw_info(f, app, chunks[1]);
+    // Draw the game board
+    draw_board(f, app, main_chunks[0]);
+    
+    // Split the info area into game info and debug/history
+    let info_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(main_chunks[1]);
+
+    // Draw game info at the top
+    draw_game_info(f, app, info_chunks[0]);
+    
+    // Split the bottom area for debug stats and move history
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(info_chunks[1]);
+
+    // Draw debug statistics and move history
+    draw_debug_stats(f, app, bottom_chunks[0]);
+    draw_move_history(f, app, bottom_chunks[1]);
 }
 
-fn draw_info(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(area);
+fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
+    let mut text = vec![Line::from("Debug Statistics")];
+    
+    if let Some(stats) = &app.last_search_stats {
+        text.push(Line::from(""));
+        text.push(Line::from(format!("AI Status: Active")));
+        text.push(Line::from(format!("Total Nodes: {}", stats.total_nodes)));
+        text.push(Line::from(format!("Root Visits: {}", stats.root_visits)));
+        text.push(Line::from(format!("Root Value: {:.3}", stats.root_value)));
+        text.push(Line::from(""));
+        
+        // Show top moves with their statistics
+        let mut sorted_children: Vec<_> = stats.children_stats.iter().collect();
+        sorted_children.sort_by_key(|(_, (_, visits))| *visits);
+        sorted_children.reverse();
+        
+        text.push(Line::from("Top AI Moves:"));
+        for (i, (move_str, (value, visits))) in sorted_children.iter().take(10).enumerate() {
+            let line = format!("{}. {}: {:.3} ({})", i + 1, move_str, value, visits);
+            text.push(Line::from(line));
+        }
+    } else {
+        text.push(Line::from(""));
+        text.push(Line::from("AI Status: Idle"));
+        text.push(Line::from("Waiting for MCTS statistics..."));
+    }
 
-    draw_game_info(f, app, chunks[0]);
-    draw_move_history(f, app, chunks[1]);
+    // Apply scrolling offset
+    let visible_lines: Vec<Line> = text
+        .into_iter()
+        .skip(app.debug_scroll as usize)
+        .take(area.height.saturating_sub(2) as usize)
+        .collect();
+
+    let paragraph = Paragraph::new(visible_lines)
+        .block(Block::default().borders(Borders::ALL).title("Debug Stats"));
+    f.render_widget(paragraph, area);
 }
 
 fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
@@ -179,21 +250,25 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
     text.push(Line::from(current_player_text));
     text.push(Line::from(""));
 
-    // Show AI statistics if available
-    if let Some(stats) = &app.last_search_stats {
-        let mut sorted_children: Vec<_> = stats.children_stats.iter().collect();
-        sorted_children.sort_by_key(|(_, (_, visits))| *visits);
-        sorted_children.reverse();
-
-        text.push(Line::from(format!("AI Nodes: {}", stats.total_nodes)));
-        text.push(Line::from(format!("Root Visits: {}", stats.root_visits)));
-        text.push(Line::from(format!("Root Value: {:.3}", stats.root_value)));
-        text.push(Line::from(""));
-        text.push(Line::from("Top Moves:"));
-        for (m, (q, n)) in sorted_children.iter().take(5) {
-            text.push(Line::from(format!("  {}: {:.3} ({})", m, q, n)));
+    // Show AI status
+    if app.is_current_player_ai() {
+        if let Some(start_time) = app.ai_thinking_start {
+            let elapsed = start_time.elapsed().as_secs();
+            let remaining = app.timeout_secs.saturating_sub(elapsed);
+            text.push(Line::from(format!("AI Status: Thinking... ({}s / {}s)", elapsed, app.timeout_secs)));
+            text.push(Line::from(format!("Time Remaining: {}s", remaining)));
+        } else {
+            text.push(Line::from("AI Status: Starting search..."));
         }
-        text.push(Line::from(""));
+    } else {
+        text.push(Line::from("AI Status: Ready"));
+    }
+    text.push(Line::from(""));
+
+    // Show basic statistics if available
+    if let Some(stats) = &app.last_search_stats {
+        text.push(Line::from(format!("Nodes Searched: {}", stats.total_nodes)));
+        text.push(Line::from(format!("Root Value: {:.3}", stats.root_value)));
     }
 
     // Game-specific instructions
@@ -201,7 +276,7 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
         AppMode::InGame => {
             if app.game_status == GameStatus::InProgress {
                 match player_type {
-                    Player::Human => "Use arrow keys to move cursor, Enter/Space to make move",
+                    Player::Human => "Use arrow keys to move cursor, Enter/Space to make move, PageUp/PageDown to scroll debug info",
                     Player::AI => "AI is thinking...",
                 }
             } else {
@@ -213,6 +288,7 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
     };
 
     if !instructions.is_empty() {
+        text.push(Line::from(""));
         text.push(Line::from(instructions));
     }
 
@@ -231,12 +307,20 @@ fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
                 GameWrapper::Blokus(_) => format!("P{}", entry.player),
                 _ => if entry.player == 1 { "X".to_string() } else { "O".to_string() },
             };
-            ListItem::new(format!("{}. {}: {}", i + 1, player_symbol, entry.a_move))
+            let move_str = format!("{}. {}: {}", i + 1, player_symbol, entry.a_move);
+            ListItem::new(move_str)
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Move History"));
+    // Apply scrolling - show items starting from scroll offset
+    let visible_items: Vec<ListItem> = items
+        .into_iter()
+        .skip(app.history_scroll as usize)
+        .take(area.height.saturating_sub(2) as usize)
+        .collect();
+
+    let list = List::new(visible_items)
+        .block(Block::default().borders(Borders::ALL).title(format!("Move History ({})", app.move_history.len())));
     f.render_widget(list, area);
 }
 
@@ -270,19 +354,49 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
         for (c, &cell) in row.iter().enumerate() {
             let is_cursor = (r as u16, c as u16) == app.board_cursor;
             
-            let (symbol, style) = match cell {
-                1 => ("X", Style::default().fg(Color::Red)),
-                -1 => ("O", Style::default().fg(Color::Blue)),
-                _ => {
-                    if is_cursor {
-                        ("▢", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                    } else {
-                        ("·", Style::default().fg(Color::DarkGray))
+            let (symbol, style) = match &app.game_wrapper {
+                GameWrapper::Connect4(_) => {
+                    match cell {
+                        1 => ("🔴", Style::default().fg(Color::Red)),
+                        -1 => ("🔵", Style::default().fg(Color::Blue)),
+                        _ => {
+                            if is_cursor {
+                                ("⬜", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                            } else {
+                                ("⚫", Style::default().fg(Color::DarkGray))
+                            }
+                        }
+                    }
+                }
+                GameWrapper::Othello(_) => {
+                    match cell {
+                        1 => ("⚫", Style::default().fg(Color::White).bg(Color::Black)),
+                        -1 => ("⚪", Style::default().fg(Color::Black).bg(Color::White)),
+                        _ => {
+                            if is_cursor {
+                                ("▢", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                            } else {
+                                ("·", Style::default().fg(Color::DarkGray))
+                            }
+                        }
+                    }
+                }
+                _ => { // Gomoku and others
+                    match cell {
+                        1 => ("X", Style::default().fg(Color::Red)),
+                        -1 => ("O", Style::default().fg(Color::Blue)),
+                        _ => {
+                            if is_cursor {
+                                ("▢", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                            } else {
+                                ("·", Style::default().fg(Color::DarkGray))
+                            }
+                        }
                     }
                 }
             };
 
-            let final_style = if is_cursor && cell != 0 {
+            let final_style = if is_cursor && cell != 0 {  
                 style.bg(Color::Yellow)
             } else {
                 style
@@ -293,7 +407,9 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
         board_lines.push(Line::from(line_spans));
     }
 
-    let paragraph = Paragraph::new(board_lines);
+    let game_name = app.get_selected_game_name();
+    let paragraph = Paragraph::new(board_lines)
+        .block(Block::default().borders(Borders::ALL).title(format!("{} Board", game_name)));
     f.render_widget(paragraph, area);
 }
 
@@ -308,18 +424,18 @@ fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect) {
         return;
     }
 
-    // For Blokus, create a more compact display
+    // For Blokus, create a more compact display with player colors
     let mut board_lines = Vec::new();
     
     for row in board.iter() {
         let mut line_spans = Vec::new();
         for &cell in row.iter() {
             let (symbol, style) = match cell {
-                1 => ("1", Style::default().fg(Color::Black).bg(Color::Red)),
-                2 => ("2", Style::default().fg(Color::Black).bg(Color::Blue)),
-                3 => ("3", Style::default().fg(Color::Black).bg(Color::Green)),
-                4 => ("4", Style::default().fg(Color::Black).bg(Color::Yellow)),
-                _ => ("·", Style::default().fg(Color::DarkGray)),
+                1 => ("■", Style::default().fg(Color::Red)),      // Player 1: Red
+                2 => ("■", Style::default().fg(Color::Blue)),     // Player 2: Blue  
+                3 => ("■", Style::default().fg(Color::Green)),    // Player 3: Green
+                4 => ("■", Style::default().fg(Color::Yellow)),   // Player 4: Yellow
+                _ => ("·", Style::default().fg(Color::DarkGray)), // Empty space
             };
 
             line_spans.push(Span::styled(symbol, style));
@@ -327,6 +443,7 @@ fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect) {
         board_lines.push(Line::from(line_spans));
     }
 
-    let paragraph = Paragraph::new(board_lines);
+    let paragraph = Paragraph::new(board_lines)
+        .block(Block::default().borders(Borders::ALL).title("Blokus Board"));
     f.render_widget(paragraph, area);
 }

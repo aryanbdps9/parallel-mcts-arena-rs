@@ -27,6 +27,18 @@ pub fn handle_mouse_event(app: &mut App, kind: MouseEventKind, col: u16, row: u1
                 handle_board_click(app, col, row);
             }
         }
+        MouseEventKind::ScrollUp => {
+            if app.mode == AppMode::InGame {
+                // Scroll debug stats up
+                app.scroll_debug_up();
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if app.mode == AppMode::InGame {
+                // Scroll debug stats down  
+                app.scroll_debug_down();
+            }
+        }
         _ => {}
     }
 }
@@ -62,7 +74,7 @@ fn handle_settings_input(key_code: KeyCode, app: &mut App) {
         KeyCode::Left => app.decrease_setting(),
         KeyCode::Right => app.increase_setting(),
         KeyCode::Enter => {
-            if app.selected_settings_index == 6 { // "Back" option
+            if app.selected_settings_index == 10 { // "Back" option (9 settings + separator + back = index 10)
                 app.mode = AppMode::GameSelection;
             }
         }
@@ -114,6 +126,10 @@ fn handle_ingame_input(key_code: KeyCode, app: &mut App) {
         KeyCode::Left => move_cursor_left(app),
         KeyCode::Right => move_cursor_right(app),
         KeyCode::Enter | KeyCode::Char(' ') => make_move(app),
+        KeyCode::PageUp => app.scroll_debug_up(),
+        KeyCode::PageDown => app.scroll_debug_down(),
+        KeyCode::Home => app.reset_debug_scroll(),
+        KeyCode::End => app.reset_history_scroll(),
         _ => {}
     }
 }
@@ -169,6 +185,10 @@ fn move_cursor_down(app: &mut App) {
 fn move_cursor_left(app: &mut App) {
     if app.board_cursor.1 > 0 {
         app.board_cursor.1 -= 1;
+        // For Connect4, update cursor to lowest available position in new column
+        if let GameWrapper::Connect4(_) = app.game_wrapper {
+            update_connect4_cursor_row(app);
+        }
     }
 }
 
@@ -177,6 +197,28 @@ fn move_cursor_right(app: &mut App) {
     let max_col = if !board.is_empty() { board[0].len() as u16 } else { 0 };
     if app.board_cursor.1 < max_col.saturating_sub(1) {
         app.board_cursor.1 += 1;
+        // For Connect4, update cursor to lowest available position in new column
+        if let GameWrapper::Connect4(_) = app.game_wrapper {
+            update_connect4_cursor_row(app);
+        }
+    }
+}
+
+fn update_connect4_cursor_row(app: &mut App) {
+    let board = app.game_wrapper.get_board();
+    let board_height = board.len();
+    let col = app.board_cursor.1 as usize;
+    
+    if col < board[0].len() {
+        // Find the lowest empty row in this column
+        for r in (0..board_height).rev() {
+            if board[r][col] == 0 {
+                app.board_cursor.0 = r as u16;
+                return;
+            }
+        }
+        // If column is full, stay at the top
+        app.board_cursor.0 = 0;
     }
 }
 
@@ -197,6 +239,9 @@ fn make_move(app: &mut App) {
         let current_player = app.game_wrapper.get_current_player();
         app.move_history.push(crate::app::MoveHistoryEntry::new(current_player, player_move.clone()));
         app.game_wrapper.make_move(&player_move);
+        
+        // Advance the AI worker's MCTS tree root to reflect the move that was just made
+        app.ai_worker.advance_root(&player_move);
         
         // Check for game over
         if app.game_wrapper.is_terminal() {
