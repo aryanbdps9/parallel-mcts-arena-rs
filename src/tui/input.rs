@@ -33,11 +33,35 @@ fn handle_game_selection_input(key_code: KeyCode, app: &mut App) {
         KeyCode::Enter => {
             if let Some(selected) = app.game_selection_state.selected() {
                 if selected < app.games.len() {
-                    // Selected a game
-                    app.start_game();
+                    // Selected a game - initialize it and go to player config
+                    let factory = &app.games[selected].1;
+                    app.game_wrapper = factory();
+                    app.game_status = crate::app::GameStatus::InProgress;
+                    app.last_search_stats = None;
+                    app.move_history.clear();
+
+                    let num_players = app.game_wrapper.get_num_players();
+                    
+                    // Only reset player options if we don't have the right number of players
+                    // or if we don't have any player options configured yet
+                    if app.player_options.is_empty() || app.player_options.len() != num_players as usize {
+                        app.player_options = (1..=num_players).map(|i| (i, crate::app::Player::Human)).collect();
+                        app.selected_player_config_index = 0;
+                    }
+
+                    // If AI-only mode is enabled, skip player config and go straight to game
+                    if app.ai_only {
+                        // Set all players to AI
+                        for (_, player_type) in &mut app.player_options {
+                            *player_type = crate::app::Player::AI;
+                        }
+                        app.confirm_player_config();
+                    } else {
+                        app.mode = crate::app::AppMode::PlayerConfig;
+                    }
                 } else if selected == app.games.len() {
                     // Selected Settings (games + settings)
-                    app.mode = AppMode::Settings;
+                    app.mode = crate::app::AppMode::Settings;
                 } else if selected == app.games.len() + 1 {
                     // Selected Quit (games + settings + quit)
                     app.should_quit = true;
@@ -68,7 +92,11 @@ fn handle_settings_input(key_code: KeyCode, app: &mut App) {
 fn handle_player_config_input(key_code: KeyCode, app: &mut App) {
     match key_code {
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => app.cycle_player_type(),
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+            if app.selected_player_config_index < app.player_options.len() {
+                app.cycle_player_type();
+            }
+        }
         KeyCode::Up => app.select_prev_player_config(),
         KeyCode::Down => app.select_next_player_config(),
         KeyCode::Enter => {
@@ -265,10 +293,23 @@ fn handle_game_over_input(key_code: KeyCode, app: &mut App) {
 }
 
 fn is_current_player_human(app: &App) -> bool {
-    let current_player_id = app.game_wrapper.get_current_player();
+    let game_player_id = app.game_wrapper.get_current_player();
+    let ui_player_id = match &app.game_wrapper {
+        GameWrapper::Blokus(_) => game_player_id, // Blokus already uses 1,2,3,4
+        _ => {
+            // For 2-player games, map 1->1 and -1->2
+            if game_player_id == 1 {
+                1
+            } else if game_player_id == -1 {
+                2
+            } else {
+                game_player_id // fallback
+            }
+        }
+    };
     app.player_options
         .iter()
-        .any(|(id, p_type)| *id == current_player_id && *p_type == Player::Human)
+        .any(|(id, p_type)| *id == ui_player_id && *p_type == Player::Human)
 }
 
 fn move_cursor_up(app: &mut App) {

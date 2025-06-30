@@ -316,10 +316,23 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16) {
 
 /// Check if current player is human
 fn is_current_player_human(app: &App) -> bool {
-    let current_player_id = app.game_wrapper.get_current_player();
+    let game_player_id = app.game_wrapper.get_current_player();
+    let ui_player_id = match &app.game_wrapper {
+        GameWrapper::Blokus(_) => game_player_id, // Blokus already uses 1,2,3,4
+        _ => {
+            // For 2-player games, map 1->1 and -1->2
+            if game_player_id == 1 {
+                1
+            } else if game_player_id == -1 {
+                2
+            } else {
+                game_player_id // fallback
+            }
+        }
+    };
     app.player_options
         .iter()
-        .any(|(id, p_type)| *id == current_player_id && *p_type == Player::Human)
+        .any(|(id, p_type)| *id == ui_player_id && *p_type == Player::Human)
 }
 
 /// Make a move at the current cursor position

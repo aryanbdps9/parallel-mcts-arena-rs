@@ -324,17 +324,30 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
     ];
 
     // Show current player
-    let current_player = app.game_wrapper.get_current_player();
+    let game_player_id = app.game_wrapper.get_current_player();
+    let ui_player_id = match &app.game_wrapper {
+        GameWrapper::Blokus(_) => game_player_id, // Blokus already uses 1,2,3,4
+        _ => {
+            // For 2-player games, map 1->1 and -1->2
+            if game_player_id == 1 {
+                1
+            } else if game_player_id == -1 {
+                2
+            } else {
+                game_player_id // fallback
+            }
+        }
+    };
     let player_type = app.player_options
         .iter()
-        .find(|(id, _)| *id == current_player)
+        .find(|(id, _)| *id == ui_player_id)
         .map(|(_, p_type)| p_type)
         .unwrap_or(&Player::Human);
 
     let current_player_text = match app.game_wrapper {
-        GameWrapper::Blokus(_) => format!("Current Player: Player {} ({:?})", current_player, player_type),
+        GameWrapper::Blokus(_) => format!("Current Player: Player {} ({:?})", ui_player_id, player_type),
         _ => {
-            let symbol = if current_player == 1 { "X" } else { "O" };
+            let symbol = if ui_player_id == 1 { "X" } else { "O" };
             format!("Current Player: {} ({:?})", symbol, player_type)
         }
     };
@@ -477,11 +490,28 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Create board display with cursor
-    let mut board_lines = Vec::new();
-    
+    // Calculate column width based on board size for optimal display
+    // Since row height is 1, we need column width to be closer to 1 for square cells
+    let col_width = match &app.game_wrapper {
+        GameWrapper::Connect4(_) => 2, // Reduced for better aspect ratio
+        GameWrapper::Othello(_) => 2,  // Reduced for better aspect ratio
+        _ => 2, // Standard width for X/O
+    };
+
+    // Create row layout
+    let row_constraints = vec![Constraint::Length(1); board_height];
+    let board_area = Layout::default()
+        .constraints(row_constraints)
+        .split(area);
+
     for (r, row) in board.iter().enumerate() {
-        let mut line_spans = Vec::new();
+        // Create column layout for this row
+        let col_constraints = vec![Constraint::Length(col_width); board_width];
+        let row_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(col_constraints)
+            .split(board_area[r]);
+
         for (c, &cell) in row.iter().enumerate() {
             let is_cursor = (r as u16, c as u16) == app.board_cursor;
             
@@ -489,23 +519,23 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
                 GameWrapper::Connect4(_) => {
                     match cell {
                         1 => ("🔴", Style::default().fg(Color::Red)),
-                        -1 => ("🔵", Style::default().fg(Color::Blue)),
+                        -1 => ("🟡", Style::default().fg(Color::Yellow)),
                         _ => {
-                            if is_cursor {
-                                ("⬜", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                            if is_cursor && !app.is_current_player_ai() {
+                                ("▓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
                             } else {
-                                ("⚫", Style::default().fg(Color::DarkGray))
+                                ("·", Style::default().fg(Color::DarkGray))
                             }
                         }
                     }
                 }
                 GameWrapper::Othello(_) => {
                     match cell {
-                        1 => ("⚫", Style::default().fg(Color::White).bg(Color::Black)),
-                        -1 => ("⚪", Style::default().fg(Color::Black).bg(Color::White)),
+                        1 => ("⚫", Style::default().fg(Color::White)),
+                        -1 => ("⚪", Style::default().fg(Color::White)),
                         _ => {
-                            if is_cursor {
-                                ("▢", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                            if is_cursor && !app.is_current_player_ai() {
+                                ("▓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
                             } else {
                                 ("·", Style::default().fg(Color::DarkGray))
                             }
@@ -517,8 +547,8 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
                         1 => ("X", Style::default().fg(Color::Red)),
                         -1 => ("O", Style::default().fg(Color::Blue)),
                         _ => {
-                            if is_cursor {
-                                ("▢", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                            if is_cursor && !app.is_current_player_ai() {
+                                ("▓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
                             } else {
                                 ("·", Style::default().fg(Color::DarkGray))
                             }
@@ -533,15 +563,12 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
                 style
             };
 
-            line_spans.push(Span::styled(format!("{} ", symbol), final_style));
+            let paragraph = Paragraph::new(symbol)
+                .style(final_style)
+                .alignment(Alignment::Center);
+            f.render_widget(paragraph, row_area[c]);
         }
-        board_lines.push(Line::from(line_spans));
     }
-
-    let game_name = app.get_selected_game_name();
-    let paragraph = Paragraph::new(board_lines)
-        .block(Block::default().borders(Borders::ALL).title(format!("{} Board", game_name)));
-    f.render_widget(paragraph, area);
 }
 
 fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect) {
@@ -555,18 +582,37 @@ fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect) {
         return;
     }
 
-    // For Blokus, create a more compact display with player colors
+    // Get last move positions for highlighting
+    let last_move_positions: std::collections::HashSet<(usize, usize)> = state.get_last_move()
+        .map(|coords| coords.into_iter().collect())
+        .unwrap_or_default();
+
+    // For Blokus, create a symmetrical grid with touching squares
     let mut board_lines = Vec::new();
     
-    for row in board.iter() {
+    for (r, row) in board.iter().enumerate() {
         let mut line_spans = Vec::new();
-        for &cell in row.iter() {
+        for (c, &cell) in row.iter().enumerate() {
+            let is_last_move = last_move_positions.contains(&(r, c));
+            
             let (symbol, style) = match cell {
-                1 => ("■", Style::default().fg(Color::Red)),      // Player 1: Red
-                2 => ("■", Style::default().fg(Color::Blue)),     // Player 2: Blue  
-                3 => ("■", Style::default().fg(Color::Green)),    // Player 3: Green
-                4 => ("■", Style::default().fg(Color::Yellow)),   // Player 4: Yellow
-                _ => ("·", Style::default().fg(Color::DarkGray)), // Empty space
+                1 => {
+                    let color = if is_last_move { Color::LightRed } else { Color::Red };
+                    ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                }
+                2 => {
+                    let color = if is_last_move { Color::LightBlue } else { Color::Blue };
+                    ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                }
+                3 => {
+                    let color = if is_last_move { Color::LightGreen } else { Color::Green };
+                    ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                }
+                4 => {
+                    let color = if is_last_move { Color::LightYellow } else { Color::Yellow };
+                    ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                }
+                _ => ("░░", Style::default().fg(Color::DarkGray)), // Empty space
             };
 
             line_spans.push(Span::styled(symbol, style));

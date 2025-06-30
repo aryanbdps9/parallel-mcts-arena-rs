@@ -144,30 +144,30 @@ pub fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect, selecte
                 
                 if is_legal {
                     // Legal ghost piece preview (cyan)
-                    ("▢", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                    ("▓▓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
                 } else {
                     // Illegal ghost piece preview (red)
-                    ("▢", Style::default().fg(Color::Red).add_modifier(Modifier::DIM))
+                    ("▓▓", Style::default().fg(Color::Red).add_modifier(Modifier::DIM))
                 }
             } else {
                 match cell {
                     1 => {
                         let color = if is_last_move { Color::LightRed } else { Color::Red };
-                        ("■", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                        ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
                     }
                     2 => {
                         let color = if is_last_move { Color::LightBlue } else { Color::Blue };
-                        ("■", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                        ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
                     }
                     3 => {
                         let color = if is_last_move { Color::LightGreen } else { Color::Green };
-                        ("■", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                        ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
                     }
                     4 => {
                         let color = if is_last_move { Color::LightYellow } else { Color::Yellow };
-                        ("■", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                        ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
                     }
-                    _ => ("·", Style::default().fg(Color::DarkGray)), // Empty space
+                    _ => ("┼┼", Style::default().fg(Color::DarkGray)), // Empty space with grid
                 }
             };
 

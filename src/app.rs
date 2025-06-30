@@ -442,8 +442,13 @@ impl App {
                 self.move_history.clear();
 
                 let num_players = self.game_wrapper.get_num_players();
-                self.player_options = (1..=num_players).map(|i| (i, Player::Human)).collect();
-                self.selected_player_config_index = 0;
+
+                // Only reset player options if we don't have the right number of players
+                // or if we don't have any player options configured yet
+                if self.player_options.is_empty() || self.player_options.len() != num_players as usize {
+                    self.player_options = (1..=num_players).map(|i| (i, Player::Human)).collect();
+                    self.selected_player_config_index = 0;
+                }
 
                 // If AI-only mode is enabled, skip player config and go straight to game
                 if self.ai_only {
@@ -500,11 +505,13 @@ impl App {
     }
 
     pub fn cycle_player_type(&mut self) {
-        let (_, player_type) = &mut self.player_options[self.selected_player_config_index];
-        *player_type = match *player_type {
-            Player::Human => Player::AI,
-            Player::AI => Player::Human,
-        };
+        if self.selected_player_config_index < self.player_options.len() {
+            let (_, player_type) = &mut self.player_options[self.selected_player_config_index];
+            *player_type = match *player_type {
+                Player::Human => Player::AI,
+                Player::AI => Player::Human,
+            };
+        }
     }
 
     pub fn confirm_player_config(&mut self) {
@@ -534,7 +541,45 @@ impl App {
     }
 
     pub fn reset_game(&mut self) {
-        self.start_game();
+        // Get the currently selected game and reset its state without changing player config
+        if let Some(selected) = self.game_selection_state.selected() {
+            if selected < self.games.len() {
+                let factory = &self.games[selected].1;
+                self.game_wrapper = factory();
+                self.game_status = GameStatus::InProgress;
+                self.last_search_stats = None;
+                self.move_history.clear();
+
+                // Reset cursor position based on game type
+                let (initial_row, initial_col) = match &self.game_wrapper {
+                    GameWrapper::Gomoku(_) => {
+                        let board = self.game_wrapper.get_board();
+                        let size = board.len();
+                        (size / 2, size / 2)
+                    }
+                    GameWrapper::Connect4(_) => {
+                        let board = self.game_wrapper.get_board();
+                        let width = if !board.is_empty() { board[0].len() } else { 7 };
+                        (0, width / 2)
+                    }
+                    GameWrapper::Othello(_) => {
+                        let board = self.game_wrapper.get_board();
+                        let size = board.len();
+                        (size / 2 - 1, size / 2 - 1)
+                    }
+                    GameWrapper::Blokus(_) => (10, 10), // Center of Blokus board
+                };
+                
+                self.board_cursor = (initial_row as u16, initial_col as u16);
+                self.mode = AppMode::InGame;
+                
+                // Clear any Blokus-specific selections
+                if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
+                    self.blokus_ui_config.selected_piece_idx = None;
+                    self.blokus_ui_config.selected_transformation_idx = 0;
+                }
+            }
+        }
     }
 
     // Settings navigation methods
@@ -724,11 +769,32 @@ impl App {
         self.blokus_ui_config.scroll_panel_down();
     }
 
+    /// Map game player ID to UI player ID
+    /// 
+    /// Games like Connect4, Gomoku, and Othello use 1 and -1 for players,
+    /// but our UI uses 1 and 2. This method provides the mapping.
+    fn map_game_player_to_ui_player(&self, game_player_id: i32) -> i32 {
+        match &self.game_wrapper {
+            GameWrapper::Blokus(_) => game_player_id, // Blokus already uses 1,2,3,4
+            _ => {
+                // For 2-player games, map 1->1 and -1->2
+                if game_player_id == 1 {
+                    1
+                } else if game_player_id == -1 {
+                    2
+                } else {
+                    game_player_id // fallback
+                }
+            }
+        }
+    }
+
     pub fn is_current_player_ai(&self) -> bool {
-        let current_player_id = self.game_wrapper.get_current_player();
+        let game_player_id = self.game_wrapper.get_current_player();
+        let ui_player_id = self.map_game_player_to_ui_player(game_player_id);
         self.player_options
             .iter()
-            .any(|(id, p_type)| *id == current_player_id && *p_type == Player::AI)
+            .any(|(id, p_type)| *id == ui_player_id && *p_type == Player::AI)
     }
 
     pub fn check_game_over(&mut self) {
