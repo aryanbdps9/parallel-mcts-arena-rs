@@ -13,8 +13,6 @@ categories = ["games", "command-line-utilities"]
 
 # Runtime Dependencies
 [dependencies]
-# Random number generation for MCTS simulations
-rand = "0.9.1"
 # Command line argument parsing
 clap = { version = "4.5.40", features = ["derive"] }
 # Parallel processing for multi-threaded MCTS

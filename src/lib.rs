@@ -19,7 +19,8 @@
 //! let (best_move, stats) = mcts.search(&game_state, 0, 0, 30); // 30 second timeout
 //! ```
 
-use rand::Rng;
+use rand_xoshiro::Xoshiro256PlusPlus;
+use rand_xoshiro::rand_core::{RngCore, SeedableRng};
 use std::collections::HashMap;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -27,6 +28,32 @@ use parking_lot::{RwLock, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+thread_local! {
+    static RNG: std::cell::RefCell<Xoshiro256PlusPlus> = std::cell::RefCell::new(
+        Xoshiro256PlusPlus::from_seed([1; 32])
+    );
+}
+
+fn with_rng<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut Xoshiro256PlusPlus) -> R,
+{
+    RNG.with(|rng| f(&mut *rng.borrow_mut()))
+}
+
+fn random_range(min: usize, max: usize) -> usize {
+    with_rng(|rng| {
+        let range = max - min;
+        min + (rng.next_u64() as usize) % range
+    })
+}
+
+fn random_f64() -> f64 {
+    with_rng(|rng| {
+        (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    })
+}
 
 /// Statistics about the MCTS search
 #[derive(Debug, Clone, Default)]
@@ -781,7 +808,7 @@ impl<S: GameState> MCTS<S> {
             if possible_moves.is_empty() {
                 panic!("No possible moves available - game should be terminal");
             }
-            possible_moves[rand::rng().random_range(0..possible_moves.len())].clone()
+            possible_moves[random_range(0, possible_moves.len())].clone()
         } else {
             children
                 .iter()
@@ -881,7 +908,7 @@ impl<S: GameState> MCTS<S> {
             if possible_moves.is_empty() {
                 panic!("No possible moves available - game should be terminal");
             }
-            possible_moves[rand::rng().random_range(0..possible_moves.len())].clone()
+            possible_moves[random_range(0, possible_moves.len())].clone()
         } else {
             children
                 .iter()
@@ -956,7 +983,7 @@ impl<S: GameState> MCTS<S> {
             if possible_moves.is_empty() {
                 panic!("No possible moves available - game should be terminal");
             }
-            possible_moves[rand::rng().random_range(0..possible_moves.len())].clone()
+            possible_moves[random_range(0, possible_moves.len())].clone()
         } else {
             children
                 .iter()
@@ -1095,7 +1122,7 @@ impl<S: GameState> MCTS<S> {
                 let selected_idx = if best_indices.len() == 1 {
                     best_indices[0]
                 } else {
-                    best_indices[rand::rng().random_range(0..best_indices.len())]
+                    best_indices[random_range(0, best_indices.len())]
                 };
                 let selected = &candidates[selected_idx];
                 (selected.0.clone(), selected.1.clone())
@@ -1154,7 +1181,7 @@ impl<S: GameState> MCTS<S> {
                             let visit_factor = (visits as f64).sqrt() / 10.0; // Encourage expansion for well-visited nodes
                             let expansion_probability = (depth_factor + visit_factor).min(1.0);
                             
-                            rand::rng().random::<f64>() < expansion_probability
+                            random_f64() < expansion_probability
                         }
                     }
                 }
@@ -1228,7 +1255,7 @@ impl<S: GameState> MCTS<S> {
                 break;
             }
             
-            let move_index = rand::rng().random_range(0..moves_len);
+            let move_index = random_range(0, moves_len);
             let mv = &moves_cache[move_index];
             sim_state.make_move(mv);
             simulation_moves += 1;
