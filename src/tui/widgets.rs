@@ -815,7 +815,7 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
 ///
 /// Handles display of Othello, Connect4, and Gomoku boards with appropriate
 /// symbols and colors for each game type. Shows cursor position for human players
-/// and highlights the last move made.
+/// and highlights the last move made. Includes row and column labels for navigation.
 ///
 /// # Arguments
 /// * `f` - Ratatui frame for rendering
@@ -833,42 +833,103 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Calculate column width based on board size for optimal display
-    // Since row height is 1, we need column width to be closer to 1 for square cells
     let col_width = match &app.game_wrapper {
         GameWrapper::Connect4(_) => 2, // Reduced for better aspect ratio
         GameWrapper::Othello(_) => 2,  // Reduced for better aspect ratio
         _ => 2, // Standard width for X/O
     };
 
-    // Create row layout
-    let row_constraints = vec![Constraint::Length(1); board_height];
-    let board_area = Layout::default()
-        .constraints(row_constraints)
+    // Determine if we need row labels (not for Connect4)
+    let needs_row_labels = !matches!(app.game_wrapper, GameWrapper::Connect4(_));
+    let row_label_width = if needs_row_labels { 2 } else { 0 };
+
+    // Create layout with space for labels
+    let mut layout_constraints = Vec::new();
+    
+    // Column header row
+    layout_constraints.push(Constraint::Length(1));
+    
+    // Board rows
+    for _ in 0..board_height {
+        layout_constraints.push(Constraint::Length(1));
+    }
+    
+    let rows_layout = Layout::default()
+        .constraints(layout_constraints)
         .split(area);
 
-    for (r, row) in board.iter().enumerate() {
-        // Create column layout for this row
-        let col_constraints = vec![Constraint::Length(col_width); board_width];
-        let row_area = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(col_constraints)
-            .split(board_area[r]);
+    // Draw column labels
+    let col_label_constraints = if needs_row_labels {
+        let mut constraints = vec![Constraint::Length(row_label_width)]; // Space for row label
+        constraints.extend(vec![Constraint::Length(col_width); board_width]);
+        constraints
+    } else {
+        vec![Constraint::Length(col_width); board_width]
+    };
 
+    let col_label_area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(col_label_constraints)
+        .split(rows_layout[0]);
+
+    // Draw column labels with cursor for Connect4
+    let col_start_idx = if needs_row_labels { 1 } else { 0 };
+    for c in 0..board_width {
+        let col_letter = char::from(b'A' + (c as u8));
+        let is_cursor_col = matches!(app.game_wrapper, GameWrapper::Connect4(_)) && 
+                           (c as u16) == app.board_cursor.1 && 
+                           !app.is_current_player_ai();
+        
+        let style = if is_cursor_col {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::Blue)
+        } else {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        };
+        
+        let paragraph = Paragraph::new(col_letter.to_string())
+            .style(style)
+            .alignment(Alignment::Center);
+        f.render_widget(paragraph, col_label_area[col_start_idx + c]);
+    }
+
+    // Draw board rows with row labels
+    for (r, row) in board.iter().enumerate() {
+        let row_area = rows_layout[r + 1]; // +1 because first row is column labels
+        
+        let row_constraints = if needs_row_labels {
+            let mut constraints = vec![Constraint::Length(row_label_width)]; // Space for row label
+            constraints.extend(vec![Constraint::Length(col_width); board_width]);
+            constraints
+        } else {
+            vec![Constraint::Length(col_width); board_width]
+        };
+
+        let cell_areas = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(row_constraints)
+            .split(row_area);
+
+        // Draw row label if needed
+        if needs_row_labels {
+            let row_number = (r + 1).to_string();
+            let paragraph = Paragraph::new(row_number)
+                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center);
+            f.render_widget(paragraph, cell_areas[0]);
+        }
+
+        // Draw board cells
+        let cell_start_idx = if needs_row_labels { 1 } else { 0 };
         for (c, &cell) in row.iter().enumerate() {
-            let is_cursor = (r as u16, c as u16) == app.board_cursor;
+            let is_cursor = matches!(app.game_wrapper, GameWrapper::Connect4(_)) == false && 
+                           (r as u16, c as u16) == app.board_cursor;
             
             let (symbol, style) = match &app.game_wrapper {
                 GameWrapper::Connect4(_) => {
                     match cell {
                         1 => ("🔴", Style::default().fg(Color::Red)),
                         -1 => ("🟡", Style::default().fg(Color::Yellow)),
-                        _ => {
-                            if is_cursor && !app.is_current_player_ai() {
-                                ("▓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                            } else {
-                                ("·", Style::default().fg(Color::DarkGray))
-                            }
-                        }
+                        _ => ("·", Style::default().fg(Color::DarkGray))
                     }
                 }
                 GameWrapper::Othello(_) => {
@@ -908,7 +969,7 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
             let paragraph = Paragraph::new(symbol)
                 .style(final_style)
                 .alignment(Alignment::Center);
-            f.render_widget(paragraph, row_area[c]);
+            f.render_widget(paragraph, cell_areas[cell_start_idx + c]);
         }
     }
 }

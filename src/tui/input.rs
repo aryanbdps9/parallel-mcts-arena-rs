@@ -312,11 +312,17 @@ fn is_current_player_human(app: &App) -> bool {
 /// Moves the board cursor up by one row
 /// 
 /// For Blokus, validates that the selected piece would still fit at the new position.
+/// For Connect4, this is disabled since navigation is column-based.
 /// For other games, simply moves the cursor if within bounds.
 /// 
 /// # Arguments
 /// * `app` - Mutable reference to the application state
 fn move_cursor_up(app: &mut App) {
+    // Connect4 uses column-based navigation only
+    if matches!(app.game_wrapper, GameWrapper::Connect4(_)) {
+        return;
+    }
+
     if app.board_cursor.0 > 0 {
         let new_row = app.board_cursor.0 - 1;
         // For Blokus, check if the selected piece would fit at the new position
@@ -333,11 +339,17 @@ fn move_cursor_up(app: &mut App) {
 /// Moves the board cursor down by one row
 /// 
 /// For Blokus, validates that the selected piece would still fit at the new position.
+/// For Connect4, this is disabled since navigation is column-based.
 /// For other games, simply moves the cursor if within bounds.
 /// 
 /// # Arguments
 /// * `app` - Mutable reference to the application state
 fn move_cursor_down(app: &mut App) {
+    // Connect4 uses column-based navigation only
+    if matches!(app.game_wrapper, GameWrapper::Connect4(_)) {
+        return;
+    }
+
     let board = app.game_wrapper.get_board();
     let max_row = board.len() as u16;
     if app.board_cursor.0 < max_row.saturating_sub(1) {
