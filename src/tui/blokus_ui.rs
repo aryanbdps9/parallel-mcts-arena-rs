@@ -310,6 +310,19 @@ pub fn draw_blokus_piece_selection(f: &mut Frame, app: &App, area: Rect) {
                 // Show all pieces (0-20), graying out unavailable ones
                 let total_pieces_to_show = if is_current { 21 } else { visible_pieces.min(21) };
                 
+                // Add top border for the entire grid
+                if is_current && total_pieces_to_show > 0 {
+                    let separator_width = 1; // Each separator is 1 character: │
+                    let content_width = pieces_per_row * 7 + (pieces_per_row - 1) * separator_width; // 7*5 + 4*1 = 39
+                    let total_grid_width = content_width + 2; // +2 for left and right borders
+                    let available_width = inner_area.width as usize;
+                    let padding = if available_width > total_grid_width { (available_width - total_grid_width) / 2 } else { 0 };
+                    
+                    let top_border = "┌".to_string() + &"─".repeat(content_width) + "┐";
+                    let padded_border = " ".repeat(padding) + &top_border;
+                    all_lines.push(Line::from(Span::styled(padded_border, Style::default().fg(Color::DarkGray))));
+                }
+                
                 // Show pieces in rows
                 for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
                     let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
@@ -366,22 +379,53 @@ pub fn draw_blokus_piece_selection(f: &mut Frame, app: &App, area: Rect) {
                             .map(|(_, lines, _)| lines.len())
                             .max()
                             .unwrap_or(1);
-                        let piece_width = 8;
+                        let piece_width = 7; // Increased from 6 to 7 for better centering of 3-char strings
                         
-                        // First line: piece keys/names
+                        // First line: piece keys/names with subtle column highlighting
                         let mut key_line_spans = Vec::new();
+                        
+                        // Calculate padding for centering - use FULL grid width for consistency
+                        let separator_width = 1; // Each separator is 1 character: │
+                        let content_width = pieces_per_row * piece_width + (pieces_per_row - 1) * separator_width; // total content width
+                        let total_grid_width = content_width + 2; // +2 for left and right borders
+                        let available_width = inner_area.width as usize;
+                        let padding = if available_width > total_grid_width { (available_width - total_grid_width) / 2 } else { 0 };
+                        
+                        // Add left padding and border
+                        let left_padding = " ".repeat(padding);
+                        key_line_spans.push(Span::styled(left_padding + "│", Style::default().fg(Color::DarkGray)));
+                        
                         for (i, (piece_name, _, style)) in pieces_in_row.iter().enumerate() {
                             let padded_name = format!("{:^width$}", piece_name, width = piece_width);
                             key_line_spans.push(Span::styled(padded_name, *style));
-                            if i < pieces_in_row.len() - 1 {
-                                key_line_spans.push(Span::styled("  ", Style::default()));
+                            if i < pieces_per_row - 1 {
+                                // Add visible column separator
+                                key_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
                             }
                         }
+                        
+                        // Fill remaining columns with empty cells if row is incomplete
+                        for i in pieces_in_row.len()..pieces_per_row {
+                            let empty_cell = " ".repeat(piece_width);
+                            key_line_spans.push(Span::styled(empty_cell, Style::default()));
+                            if i < pieces_per_row - 1 {
+                                key_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                            }
+                        }
+                        
+                        // Add right border
+                        key_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                        
                         all_lines.push(Line::from(key_line_spans));
                         
-                        // Show each line of the pieces
+                        // Show each line of the pieces with column separators
                         for line_idx in 0..max_height {
                             let mut shape_line_spans = Vec::new();
+                            
+                            // Add left padding and border
+                            let left_padding = " ".repeat(padding);
+                            shape_line_spans.push(Span::styled(left_padding + "│", Style::default().fg(Color::DarkGray)));
+                            
                             for (i, (_, piece_visual_lines, style)) in pieces_in_row.iter().enumerate() {
                                 let piece_line = if line_idx < piece_visual_lines.len() {
                                     format!("{:^width$}", piece_visual_lines[line_idx], width = piece_width)
@@ -389,13 +433,47 @@ pub fn draw_blokus_piece_selection(f: &mut Frame, app: &App, area: Rect) {
                                     " ".repeat(piece_width)
                                 };
                                 shape_line_spans.push(Span::styled(piece_line, *style));
-                                if i < pieces_in_row.len() - 1 {
-                                    shape_line_spans.push(Span::styled("  ", Style::default()));
+                                if i < pieces_per_row - 1 {
+                                    // Add visible column separator
+                                    shape_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
                                 }
                             }
+                            
+                            // Fill remaining columns with empty cells if row is incomplete
+                            for i in pieces_in_row.len()..pieces_per_row {
+                                let empty_cell = " ".repeat(piece_width);
+                                shape_line_spans.push(Span::styled(empty_cell, Style::default()));
+                                if i < pieces_per_row - 1 {
+                                    shape_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                                }
+                            }
+                            
+                            // Add right border
+                            shape_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                            
                             all_lines.push(Line::from(shape_line_spans));
                         }
+                        
+                        // Add a proper row separator that spans the full width
+                        if chunk_start + pieces_per_row < total_pieces_to_show {
+                            let left_padding = " ".repeat(padding);
+                            let row_separator = "├".to_string() + &"─".repeat(content_width) + "┤";
+                            all_lines.push(Line::from(Span::styled(left_padding + &row_separator, Style::default().fg(Color::DarkGray))));
+                        }
                     }
+                }
+                
+                // Add bottom border for the entire grid
+                if is_current && total_pieces_to_show > 0 {
+                    let separator_width = 1; // Each separator is 1 character: │
+                    let content_width = pieces_per_row * 7 + (pieces_per_row - 1) * separator_width; // 7*5 + 4*1 = 39
+                    let total_grid_width = content_width + 2; // +2 for left and right borders
+                    let available_width = inner_area.width as usize;
+                    let padding = if available_width > total_grid_width { (available_width - total_grid_width) / 2 } else { 0 };
+                    
+                    let bottom_border = "└".to_string() + &"─".repeat(content_width) + "┘";
+                    let padded_border = " ".repeat(padding) + &bottom_border;
+                    all_lines.push(Line::from(Span::styled(padded_border, Style::default().fg(Color::DarkGray))));
                 }
                 
                 // No "more pieces" line needed since we show all pieces for current player

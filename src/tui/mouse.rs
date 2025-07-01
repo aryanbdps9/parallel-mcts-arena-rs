@@ -419,7 +419,7 @@ fn handle_blokus_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
 }
 
 /// Handle clicks on the Blokus board
-fn handle_blokus_board_click(app: &mut App, col: u16, row: u16, board_area: Rect) {
+fn handle_blokus_board_click(app: &mut App, col: u16, row: u16, _board_area: Rect) {
     let board = app.game_wrapper.get_board();
     let board_height = board.len();
     let board_width = if board_height > 0 { board[0].len() } else { 0 };
@@ -429,14 +429,13 @@ fn handle_blokus_board_click(app: &mut App, col: u16, row: u16, board_area: Rect
     let board_start_row = 1; // Border
     
     if col >= board_start_col && row >= board_start_row {
-        let available_width = board_area.width.saturating_sub(2);
-        let available_height = board_area.height.saturating_sub(2);
+        // Each board cell is rendered as 2 characters wide (██, ▓▓, ┼┼)
+        let cell_width = 2;
+        let cell_height = 1;
         
-        let cell_width = (available_width as f32 / board_width as f32) as u16;
-        let cell_height = (available_height as f32 / board_height as f32) as u16;
-        
-        let board_col = ((col - board_start_col) / cell_width.max(1)) as usize;
-        let board_row = ((row - board_start_row) / cell_height.max(1)) as usize;
+        // Calculate which board cell was clicked
+        let board_col = ((col - board_start_col) / cell_width) as usize;
+        let board_row = ((row - board_start_row) / cell_height) as usize;
         
         if board_row < board_height && board_col < board_width {
             // Update cursor position
@@ -465,61 +464,87 @@ fn handle_blokus_board_click(app: &mut App, col: u16, row: u16, board_area: Rect
 fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16) {
     let current_player = app.game_wrapper.get_current_player();
     
-    // Check if clicking on expand/collapse area
-    if col <= 5 { 
-        let estimated_player = match row {
-            0..=10 => 1,
-            11..=21 => 2,
-            22..=32 => 3,
-            33..=43 => 4,
-            _ => return,
-        };
+    // Check if clicking on expand/collapse area (only the very first few columns)
+    if col <= 1 { // Reduced from 3 to 1 to only catch the very left edge
+        // Simple row-based calculation for player headers
+        // Each player header is roughly 1 row + content, but we'll use a simple approximation
+        let estimated_rows_per_player = 20; // Generous estimate
+        let clicked_player = (row / estimated_rows_per_player).min(3) as usize;
         
-        if estimated_player >= 1 && estimated_player <= 4 {
-            app.blokus_ui_config.toggle_player_expand((estimated_player - 1) as usize);
+        if clicked_player < 4 {
+            app.blokus_ui_config.toggle_player_expand(clicked_player);
         }
         return;
     }
     
-    // Check if clicking on pieces for the current player
+    // Only handle piece selection for the current player
     if let GameWrapper::Blokus(ref state) = app.game_wrapper {
         let available_pieces = state.get_available_pieces(current_player);
+        let available_set: std::collections::HashSet<usize> = available_pieces.iter().cloned().collect();
         
-        // Calculate which piece was clicked based on the expanded state
-        let mut piece_row = 0;
-        for player_idx in 0..4 {
-            if !app.blokus_ui_config.players_expanded[player_idx] {
-                piece_row += 1; // Just the header row
-                continue;
+        // Very precise column detection based on exact rendering layout
+        let pieces_per_row = 5;
+        let piece_width = 7;     // Each piece is now 7 characters wide (for better centering)
+        let separator_width = 1; // 1 character between pieces (│ separator)
+        
+        // Calculate the grid positioning (same logic as rendering)
+        let content_width = pieces_per_row * piece_width + (pieces_per_row - 1) * separator_width; // 7*5 + 4*1 = 39
+        let total_grid_width = content_width + 2; // +2 for left and right borders
+        let panel_width = 50; // Approximate panel width, adjust if needed
+        let grid_padding = if panel_width > total_grid_width { (panel_width - total_grid_width) / 2 } else { 0 };
+        let grid_start_col = grid_padding + 1; // +1 for left border
+        
+        // Check if click is within the grid area
+        if col < grid_start_col as u16 {
+            return; // Click is in padding area, ignore
+        }
+        
+        let grid_relative_col = col - grid_start_col as u16;
+        
+        // Find which piece column was clicked (0-4)
+        let mut piece_col = None;
+        let mut col_start = 0u16;
+        
+        for i in 0..pieces_per_row {
+            let piece_end = col_start + piece_width as u16;
+            
+            if grid_relative_col >= col_start && grid_relative_col < piece_end {
+                piece_col = Some(i);
+                break;
             }
             
-            // Player header
-            piece_row += 1;
+            col_start = piece_end + separator_width as u16;
+        }
+        
+        if let Some(col_idx) = piece_col {
+            // Account for the top border before calculating row
+            let grid_content_start_row = 1; // Top border takes 1 row
             
-            if player_idx == (current_player - 1) as usize {
-                // This is the current player - check if we clicked on a piece
-                let pieces_per_row = 5; // Display 5 pieces per row
-                let piece_area_start = piece_row;
-                
-                if row >= piece_area_start {
-                    let relative_row = row - piece_area_start;
-                    let piece_col = (col - 6) / 8; // Each piece takes ~8 characters width
-                    let piece_row_in_section = relative_row / 3; // Each piece takes ~3 rows height
-                    
-                    let piece_index = (piece_row_in_section * pieces_per_row + piece_col) as usize;
-                    
-                    if piece_index < available_pieces.len() {
-                        // Piece is available - select it
-                        let piece_id = available_pieces[piece_index];
-                        app.blokus_ui_config.select_piece(piece_id);
-                        return;
-                    }
-                }
-                break;
-            } else {
-                // Count rows for other players
-                let other_available = state.get_available_pieces((player_idx + 1) as i32);
-                piece_row += ((other_available.len() + 4) / 5 * 3) as u16; // 5 pieces per row, 3 rows per piece section
+            // Only process clicks that are after the top border
+            if row < grid_content_start_row {
+                return; // Click is on the top border, ignore
+            }
+            
+            // Adjust row to be relative to the actual grid content
+            let grid_relative_row = row - grid_content_start_row;
+            
+            // Each piece row consists of approximately:
+            // - 1 line for piece keys/names
+            // - ~3 lines for piece shapes (varies by piece height)
+            // - 1 line for row separator (except for last row)
+            // So roughly 5 lines per piece row (including separator)
+            let estimated_lines_per_piece_row = 5;
+            
+            // Calculate piece row, accounting for row separators
+            let piece_row = (grid_relative_row / estimated_lines_per_piece_row) as usize;
+            let piece_row = piece_row.min(4); // Clamp to 0-4 (5 rows max)
+            
+            // Calculate piece index
+            let piece_index = piece_row * pieces_per_row + col_idx as usize;
+            
+            // Final validation
+            if piece_index < 21 && available_set.contains(&piece_index) {
+                app.blokus_ui_config.select_piece(piece_index);
             }
         }
     }
