@@ -319,9 +319,9 @@ fn handle_settings_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect
         let settings_area_start = 1; // Top border
         if row >= settings_area_start {
             let clicked_index = (row - settings_area_start) as usize;
-            if clicked_index < 11 { // 9 settings + separator + back
+            if clicked_index < 12 { // 10 settings + separator + back
                 app.selected_settings_index = clicked_index;
-                if app.selected_settings_index == 10 { // "Back" option
+                if app.selected_settings_index == 11 { // "Back" option
                     app.mode = AppMode::GameSelection;
                 }
             }

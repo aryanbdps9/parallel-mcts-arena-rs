@@ -113,7 +113,7 @@ fn handle_settings_input(key_code: KeyCode, app: &mut App) {
         KeyCode::Left => app.decrease_setting(),
         KeyCode::Right => app.increase_setting(),
         KeyCode::Enter => {
-            if app.selected_settings_index == 10 { // "Back" option (9 settings + separator + back = index 10)
+            if app.selected_settings_index == 11 { // "Back" option (10 settings + separator + back = index 11)
                 app.mode = AppMode::GameSelection;
             }
         }

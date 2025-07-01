@@ -4,6 +4,11 @@
 name = "parallel-mcts-arena"
 version = "0.1.0"
 edition = "2021"
+description = "A multi-threaded Monte Carlo Tree Search engine that plays four classic board games with configurable AI opponents"
+readme = "README.md"
+license-file = "LICENSE"
+keywords = ["games", "mcts", "ai", "board-games", "tui"]
+categories = ["games", "command-line-utilities"]
 
 # Runtime Dependencies
 [dependencies]

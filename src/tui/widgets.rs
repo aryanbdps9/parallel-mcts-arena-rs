@@ -105,6 +105,7 @@ fn draw_settings_menu(f: &mut Frame, app: &App, area: Rect) {
         format!("Line Size: {}", app.settings_line_size),
         format!("AI Threads: {}", app.settings_ai_threads),
         format!("Max Nodes: {}", app.settings_max_nodes),
+        format!("Search Iterations: {}", app.settings_search_iterations),
         format!("Exploration Constant: {:.2}", app.settings_exploration_constant),
         format!("Timeout (secs): {}", app.timeout_secs),
         format!("Stats Interval (secs): {}", app.stats_interval_secs),

@@ -74,11 +74,12 @@ impl AIWorker {
     /// # Arguments
     /// * `exploration_constant` - C_puct value for MCTS exploration vs exploitation balance
     /// * `num_threads` - Number of parallel threads for MCTS search
+    /// * `search_iterations` - Maximum number of MCTS iterations per search
     /// * `max_nodes` - Maximum number of nodes allowed in the search tree
     /// 
     /// # Returns
     /// New AIWorker instance ready to process search requests
-    pub fn new(exploration_constant: f64, num_threads: usize, max_nodes: usize) -> Self {
+    pub fn new(exploration_constant: f64, num_threads: usize, search_iterations: u32, max_nodes: usize) -> Self {
         let (tx_req, rx_req) = mpsc::channel();
         let (tx_resp, rx_resp) = mpsc::channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -103,9 +104,9 @@ impl AIWorker {
                         }
                         let mcts_ref = mcts.as_mut().unwrap();
                         
-                        // Use timeout_secs directly and pass the stop flag for external interruption
+                        // Use the configurable search_iterations and timeout_secs, pass stop flag for external interruption
                         let (best_move, stats) =
-                            mcts_ref.search_with_stop(&state, 1000000, 1, timeout_secs, Some(stop_flag_clone.clone()));
+                            mcts_ref.search_with_stop(&state, search_iterations as i32, 1, timeout_secs, Some(stop_flag_clone.clone()));
                         
                         // Only send response if we haven't been stopped
                         if !stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
@@ -261,6 +262,7 @@ pub struct App {
     pub settings_line_size: usize,
     pub settings_ai_threads: usize,
     pub settings_max_nodes: usize,
+    pub settings_search_iterations: u32,
     pub settings_exploration_constant: f64,
     pub selected_settings_index: usize,
     // AI behavior settings
@@ -284,6 +286,7 @@ impl App {
     /// # Arguments
     /// * `exploration_constant` - C_puct value for MCTS exploration vs exploitation balance
     /// * `num_threads` - Number of parallel threads for AI search
+    /// * `search_iterations` - Maximum number of MCTS iterations per search
     /// * `max_nodes` - Maximum number of nodes allowed in the MCTS search tree
     /// * `game_name` - Optional specific game to start with (skips game selection)
     /// * `board_size` - Size of the game board (game-specific interpretation)
@@ -298,6 +301,7 @@ impl App {
     pub fn new(
         exploration_constant: f64,
         num_threads: usize,
+        search_iterations: u32,
         max_nodes: usize,
         game_name: Option<String>,
         board_size: usize,
@@ -322,7 +326,7 @@ impl App {
 
         let games: Vec<(&'static str, Box<dyn Fn() -> GameWrapper>)> = vec![
             (
-                "Gomoku",
+                "gomoku",
                 Box::new(move || {
                     GameWrapper::Gomoku(crate::games::gomoku::GomokuState::new(
                         gomoku_board_size, gomoku_line_size,
@@ -330,7 +334,7 @@ impl App {
                 }),
             ),
             (
-                "Connect4",
+                "connect4",
                 Box::new(move || {
                     GameWrapper::Connect4(crate::games::connect4::Connect4State::new(
                         connect4_width,
@@ -340,13 +344,13 @@ impl App {
                 }),
             ),
             (
-                "Othello",
+                "othello",
                 Box::new(move || {
                     GameWrapper::Othello(crate::games::othello::OthelloState::new(othello_board_size))
                 }),
             ),
             (
-                "Blokus",
+                "blokus",
                 Box::new(|| GameWrapper::Blokus(crate::games::blokus::BlokusState::new())),
             ),
         ];
@@ -355,7 +359,7 @@ impl App {
         let (initial_mode, initial_game_index) = if let Some(name) = game_name {
             let game_index = games
                 .iter()
-                .position(|(game_name, _)| *game_name == name)
+                .position(|(game_name, _)| *game_name == name.to_lowercase())
                 .unwrap_or(0);
             // If AI-only mode is enabled, skip player config and go straight to game
             if ai_only {
@@ -416,7 +420,7 @@ impl App {
             game_status: GameStatus::InProgress,
             player_options,
             selected_player_config_index: 0,
-            ai_worker: AIWorker::new(exploration_constant, num_threads, max_nodes),
+            ai_worker: AIWorker::new(exploration_constant, num_threads, search_iterations, max_nodes),
             last_search_stats: None,
             move_history: Vec::new(),
             show_debug: false,
@@ -437,6 +441,7 @@ impl App {
             settings_line_size: if line_size == 5 { 5 } else { line_size }, // Keep 5 as standard Gomoku default
             settings_ai_threads: num_threads,
             settings_max_nodes: max_nodes,
+            settings_search_iterations: search_iterations,
             settings_exploration_constant: exploration_constant,
             selected_settings_index: 0,
             // AI behavior settings
@@ -719,14 +724,14 @@ impl App {
     /// 
     /// Wraps around to the first setting when reaching the end.
     pub fn select_next_setting(&mut self) {
-        self.selected_settings_index = (self.selected_settings_index + 1) % 11; // 9 settings + separator + back
+        self.selected_settings_index = (self.selected_settings_index + 1) % 12; // 10 settings + separator + back
     }
 
     /// Moves to the previous setting in the settings menu
     /// 
     /// Wraps around to the last setting when reaching the beginning.
     pub fn select_prev_setting(&mut self) {
-        self.selected_settings_index = (self.selected_settings_index + 10) % 11;
+        self.selected_settings_index = (self.selected_settings_index + 11) % 12;
     }
 
     /// Increases the value of the currently selected setting
@@ -734,17 +739,36 @@ impl App {
     /// Each setting has its own valid range and increment amount.
     /// Boolean settings get toggled instead of incremented.
     pub fn increase_setting(&mut self) {
+        let old_ai_settings = (
+            self.settings_ai_threads,
+            self.settings_max_nodes,
+            self.settings_search_iterations,
+            self.settings_exploration_constant,
+        );
+        
         match self.selected_settings_index {
             0 => self.settings_board_size = (self.settings_board_size + 1).min(25),
             1 => self.settings_line_size = (self.settings_line_size + 1).min(10),
             2 => self.settings_ai_threads = (self.settings_ai_threads + 1).min(16),
             3 => self.settings_max_nodes = (self.settings_max_nodes + 100000).min(10000000),
-            4 => self.settings_exploration_constant = (self.settings_exploration_constant + 0.1).min(10.0),
-            5 => self.timeout_secs = (self.timeout_secs + 10).min(600), // Max 10 minutes
-            6 => self.stats_interval_secs = (self.stats_interval_secs + 5).min(120), // Max 2 minutes
-            7 => self.ai_only = !self.ai_only, // Toggle
-            8 => self.shared_tree = !self.shared_tree, // Toggle
+            4 => self.settings_search_iterations = (self.settings_search_iterations + 10000).min(10000000),
+            5 => self.settings_exploration_constant = (self.settings_exploration_constant + 0.1).min(10.0),
+            6 => self.timeout_secs = (self.timeout_secs + 10).min(600), // Max 10 minutes
+            7 => self.stats_interval_secs = (self.stats_interval_secs + 5).min(120), // Max 2 minutes
+            8 => self.ai_only = !self.ai_only, // Toggle
+            9 => self.shared_tree = !self.shared_tree, // Toggle
             _ => {} // separator or back
+        }
+        
+        // Recreate AI worker if AI-related settings changed
+        let new_ai_settings = (
+            self.settings_ai_threads,
+            self.settings_max_nodes,
+            self.settings_search_iterations,
+            self.settings_exploration_constant,
+        );
+        if old_ai_settings != new_ai_settings {
+            self.recreate_ai_worker();
         }
     }
 
@@ -754,17 +778,36 @@ impl App {
     /// Boolean settings get toggled instead of decremented.
     /// Values are clamped to their minimum allowed values.
     pub fn decrease_setting(&mut self) {
+        let old_ai_settings = (
+            self.settings_ai_threads,
+            self.settings_max_nodes,
+            self.settings_search_iterations,
+            self.settings_exploration_constant,
+        );
+        
         match self.selected_settings_index {
             0 => self.settings_board_size = self.settings_board_size.saturating_sub(1).max(3),
             1 => self.settings_line_size = self.settings_line_size.saturating_sub(1).max(3),
             2 => self.settings_ai_threads = self.settings_ai_threads.saturating_sub(1).max(1),
             3 => self.settings_max_nodes = self.settings_max_nodes.saturating_sub(100000).max(10000),
-            4 => self.settings_exploration_constant = (self.settings_exploration_constant - 0.1).max(0.1),
-            5 => self.timeout_secs = self.timeout_secs.saturating_sub(10).max(5), // Min 5 seconds
-            6 => self.stats_interval_secs = self.stats_interval_secs.saturating_sub(5).max(5), // Min 5 seconds
-            7 => self.ai_only = !self.ai_only, // Toggle
-            8 => self.shared_tree = !self.shared_tree, // Toggle
+            4 => self.settings_search_iterations = self.settings_search_iterations.saturating_sub(10000).max(1000),
+            5 => self.settings_exploration_constant = (self.settings_exploration_constant - 0.1).max(0.1),
+            6 => self.timeout_secs = self.timeout_secs.saturating_sub(10).max(5), // Min 5 seconds
+            7 => self.stats_interval_secs = self.stats_interval_secs.saturating_sub(5).max(5), // Min 5 seconds
+            8 => self.ai_only = !self.ai_only, // Toggle
+            9 => self.shared_tree = !self.shared_tree, // Toggle
             _ => {} // separator or back
+        }
+        
+        // Recreate AI worker if AI-related settings changed
+        let new_ai_settings = (
+            self.settings_ai_threads,
+            self.settings_max_nodes,
+            self.settings_search_iterations,
+            self.settings_exploration_constant,
+        );
+        if old_ai_settings != new_ai_settings {
+            self.recreate_ai_worker();
         }
     }
 
@@ -780,6 +823,23 @@ impl App {
         // Give threads more time to shut down gracefully
         // This is especially important when AI is in the middle of a search
         std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    /// Recreates the AI worker with current settings
+    /// 
+    /// This is called when AI-related settings are changed in the settings menu
+    /// to ensure the AI worker uses the updated configuration.
+    pub fn recreate_ai_worker(&mut self) {
+        // Stop the old worker first
+        self.ai_worker.stop();
+        
+        // Create a new worker with current settings
+        self.ai_worker = AIWorker::new(
+            self.settings_exploration_constant,
+            self.settings_ai_threads,
+            self.settings_search_iterations,
+            self.settings_max_nodes,
+        );
     }
 
     // Debug and history scrolling methods

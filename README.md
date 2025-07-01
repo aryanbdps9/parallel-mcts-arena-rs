@@ -2,7 +2,14 @@
 
 A multi-threaded Monte Carlo Tree Search engine that plays four classic board games with configurable AI opponents.
 
-## Supported Games
+## Supported Games**Performance Tips**
+
+**Optimal Settings**
+- Use `--release` build for maximum performance (essential for competitive AI play)
+- Set `--num-threads` to match your CPU core count (default: 8)
+- Increase `--timeout-secs` for stronger play at the cost of speed
+- Enable `--shared-tree` for consistent game analysis (enabled by default)
+- Use modern terminal (Windows Terminal, iTerm2, or similar) for best UI experience
 
 **Gomoku (Five in a Row)**
 - Board: 15×15 grid (configurable)
@@ -61,6 +68,15 @@ cargo build --release
 cargo run --release
 ```
 
+**Alternative execution methods:**
+```bash
+# Run the binary directly (after building)
+./target/release/play
+
+# Explicitly specify the binary name
+cargo run --release --bin play
+```
+
 Use `--release` for optimal performance.
 
 ## Usage
@@ -82,6 +98,9 @@ cargo run --release -- --game Gomoku --board-size 19 --exploration-factor 1.4 --
 
 # Fast AI games for analysis
 cargo run --release -- --ai-only --timeout-secs 10
+
+# Using the binary directly (after building with cargo build --release)
+./target/release/play --game Connect4 --ai-only --timeout-secs 5
 ```
 
 ## Command Line Options
@@ -156,6 +175,27 @@ cargo run --release -- --ai-only --timeout-secs 10
 - Rayon: Data parallelism library
 - Parking Lot: High-performance synchronization primitives
 - Clap: Command line argument parsing
+- Tokio: Asynchronous runtime
+- Num CPUs: CPU information and control
+
+## Troubleshooting
+
+**Performance Issues**
+- Ensure you're using `--release` builds for production use
+- Reduce `--num-threads` if experiencing system slowdowns
+- Lower `--max-nodes` if running out of memory
+- Disable debug features in release builds
+
+**UI Issues**
+- Ensure terminal supports mouse input and 256 colors
+- Try resizing terminal window if layout appears broken
+- Use Ctrl+C to force quit if application becomes unresponsive
+- Check terminal documentation for proper mouse support
+
+**Installation Issues**
+- Update Rust toolchain: `rustup update`
+- Clear cargo cache: `cargo clean` then rebuild
+- Ensure all dependencies are available for your platform
 
 ## Performance Tips
 
@@ -169,6 +209,7 @@ cargo run --release -- --ai-only --timeout-secs 10
 - Higher `--exploration-factor`: More exploration of new moves
 - Lower `--exploration-factor`: More exploitation of proven moves
 - More `--search-iterations`: Deeper analysis but slower moves
+- More `--timeout-secs`: Longer thinking time (searches may end early)
 - More `--max-nodes`: Better memory utilization for complex positions
 
 ## License

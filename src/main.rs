@@ -1,6 +1,6 @@
 //! # Parallel Multi-Game MCTS Engine
 //!
-//! This is the main entry point for a multi-game engine that supports Gomoku, Connect 4, 
+//! This is the main entry point for a multi-game engine that supports Gomoku, Connect 4,
 //! Othello, and Blokus. The engine uses a parallel Monte Carlo Tree Search (MCTS) algorithm
 //! for AI gameplay.
 //!
@@ -102,8 +102,8 @@ fn main() -> io::Result<()> {
     // Apply game-specific default configurations
     // This ensures that each game uses appropriate default settings
     if let Some(game_name) = &args.game {
-        match game_name.as_str() {
-            "Gomoku" => {
+        match game_name.as_str().to_lowercase().as_str() {
+            "gomoku" => {
                 if args.board_size == 15 {
                     args.board_size = 15; // Standard Gomoku board
                 }
@@ -111,7 +111,7 @@ fn main() -> io::Result<()> {
                     args.line_size = 5; // Standard Gomoku win condition
                 }
             }
-            "Connect4" => {
+            "connect4" => {
                 if args.board_size == 15 { // Changed from default
                     args.board_size = 7; // Standard Connect4 width
                 }
@@ -119,7 +119,7 @@ fn main() -> io::Result<()> {
                     args.line_size = 4; // Standard Connect4 win condition
                 }
             }
-            "Othello" => {
+            "othello" => {
                 if args.board_size == 15 { // Changed from default  
                     args.board_size = 8; // Standard Othello board
                 }
@@ -138,6 +138,7 @@ fn main() -> io::Result<()> {
     let mut app = App::new(
         args.exploration_factor,
         num_threads,
+        args.search_iterations,
         args.max_nodes,
         args.game,
         args.board_size,

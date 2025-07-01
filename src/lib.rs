@@ -10,11 +10,13 @@
 //! - **Memory Management**: Node recycling and automatic tree pruning
 //! - **PUCT Selection**: Enhanced UCB1 formula with prior probabilities
 //!
+//! ## Example Usage
+//! ```rust
 //! use mcts::{MCTS, GameState};
 //! 
 //! // Your game must implement GameState
-//! let mut mcts = MCTS::new(game_state, 1.4, 8, 1000000);
-//! let best_move = mcts.search_for_best_move(100000);
+//! let mut mcts = MCTS::new(1.4, 8, 1000000);
+//! let (best_move, stats) = mcts.search(&game_state, 0, 0, 30); // 30 second timeout
 //! ```
 
 use rand::Rng;
