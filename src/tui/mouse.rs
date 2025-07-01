@@ -414,7 +414,7 @@ fn handle_blokus_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     } else if col >= piece_area.x && col < piece_area.x + piece_area.width &&
               row >= piece_area.y && row < piece_area.y + piece_area.height {
         // Click on piece selection area
-        handle_blokus_piece_selection_click(app, col - piece_area.x, row - piece_area.y);
+        handle_blokus_piece_selection_click(app, col - piece_area.x, row - piece_area.y, piece_area.width);
     }
 }
 
@@ -461,7 +461,7 @@ fn handle_blokus_board_click(app: &mut App, col: u16, row: u16, _board_area: Rec
 }
 
 /// Handle clicks in Blokus piece selection area
-fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16) {
+fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_width: u16) {
     if let GameWrapper::Blokus(ref state) = app.game_wrapper {
         let current_player = app.game_wrapper.get_current_player();
         
@@ -476,6 +476,9 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16) {
         #[cfg(debug_assertions)]
         eprintln!("=== CLICK DEBUG: visual_row={}, scroll_offset={}, absolute_row={}, col={} ===", 
                   row, scroll_offset, absolute_row, col);
+        
+        #[cfg(debug_assertions)]
+        eprintln!("CLICK TYPE TEST: Testing what type of area this click is in...");
         
         // SIMPLIFIED APPROACH: Only handle clicks for the current player accurately
         // For other players, just handle expand/collapse clicks
@@ -512,12 +515,23 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16) {
                     let available_set: std::collections::HashSet<usize> = available_pieces.iter().cloned().collect();
                     
                     // Process the current player's piece grid with exact rendering logic
-                    if let Some(selected_piece) = try_select_piece_in_current_player_grid(
+                    // This function handles separators and invalid clicks correctly
+                    #[cfg(debug_assertions)]
+                    eprintln!("DEBUG: Calling try_select_piece_in_current_player_grid with area_width={}", area_width);
+                    
+                    match try_select_piece_in_current_player_grid(
                         absolute_row, col, &mut content_row, pieces_per_row,
-                        total_pieces_to_show, &pieces, &available_set
+                        total_pieces_to_show, &pieces, &available_set, area_width
                     ) {
-                        app.blokus_ui_config.select_piece(selected_piece);
-                        return;
+                        Some(selected_piece) => {
+                            app.blokus_ui_config.select_piece(selected_piece);
+                            return;
+                        }
+                        None => {
+                            // Click was within current player area but not on a valid piece
+                            // (separator, border, unavailable piece, etc.) - don't select anything
+                            return;
+                        }
                     }
                 } else {
                     // OTHER PLAYERS: Simulate their content more accurately 
@@ -590,16 +604,19 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16) {
             }
         }
         
-        // Controls section at bottom
-        content_row += 5; // 5 lines for controls
-        
         #[cfg(debug_assertions)]
-        eprintln!("DEBUG: Click not handled - absolute_row={}, final_content_row={}", 
-                  absolute_row, content_row);
+        eprintln!("DEBUG: Click not handled - absolute_row={}", absolute_row);
     }
 }
 
 /// Try to select a piece in the current player's grid
+/// 
+/// Expected behavior:
+/// - Each piece spans multiple rows (key line + shape lines) and should be clickable in ALL those rows
+/// - Vertical separators (│) between pieces should NOT be clickable
+/// - Horizontal separators (├─────┤) between rows of pieces should NOT be clickable  
+/// - Borders around the grid should NOT be clickable
+/// - Clicks on unavailable pieces should return None but still consume the click
 fn try_select_piece_in_current_player_grid(
     absolute_row: u16,
     col: u16,
@@ -608,7 +625,12 @@ fn try_select_piece_in_current_player_grid(
     total_pieces_to_show: usize,
     pieces: &[crate::games::blokus::Piece],
     available_set: &std::collections::HashSet<usize>,
+    area_width: u16,
 ) -> Option<usize> {
+    #[cfg(debug_assertions)]
+    eprintln!("DEBUG: try_select_piece_in_current_player_grid called with absolute_row={}, col={}, pieces_per_row={}, total_pieces_to_show={}, area_width={}", 
+              absolute_row, col, pieces_per_row, total_pieces_to_show, area_width);
+              
     // Top border line
     if total_pieces_to_show > 0 {
         if absolute_row == *content_row {
@@ -617,82 +639,157 @@ fn try_select_piece_in_current_player_grid(
         *content_row += 1;
     }
     
-    // Calculate grid dimensions
+    // Calculate grid dimensions - use the actual area width from rendering
     let piece_width = 7;
     let separator_width = 1;
     let content_width = pieces_per_row * piece_width + (pieces_per_row - 1) * separator_width;
-    let total_grid_width = content_width + 2;
+    let total_grid_width = content_width + 2; // +2 for left and right borders
     
-    let estimated_panel_width: usize = 50;
-    let available_width = estimated_panel_width.saturating_sub(5);
-    let padding = if available_width > total_grid_width { (available_width - total_grid_width) / 2 } else { 0 };
-    let grid_start_col = padding + 1;
+    // Use the actual area_width from the rendering to calculate padding exactly
+    let available_width = area_width as usize;
+    let padding = if available_width > total_grid_width { 
+        (available_width - total_grid_width) / 2 
+    } else { 
+        0 
+    };
     
-    // Process each row of pieces
+    // The grid content starts after padding + left border
+    let grid_content_start_col = padding + 1;
+    
+    #[cfg(debug_assertions)]
+    eprintln!("DEBUG: Grid params - piece_width={}, content_width={}, padding={}, grid_start={}", 
+              piece_width, content_width, padding, grid_content_start_col);
+    
+    #[cfg(debug_assertions)]
+    eprintln!("DEBUG: Click at absolute_row={}, col={}", absolute_row, col);
+    
+    #[cfg(debug_assertions)]
+    eprintln!("DEBUG: Starting chunk processing for {} pieces", total_pieces_to_show);
+    
+    // Process each row of pieces using direct coordinate mapping
     for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
         let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
         
-        // Calculate max height for this chunk
-        let mut max_height = 1;
+        #[cfg(debug_assertions)]
+        eprintln!("DEBUG: Processing chunk {}-{}, current content_row={}", 
+                  chunk_start, chunk_end-1, *content_row);
+        
+        // Calculate max height for this chunk - MUST match the rendering logic exactly
+        let mut pieces_in_row_visual_lines = Vec::new();
         for display_idx in chunk_start..chunk_end {
             if display_idx < pieces.len() && !pieces[display_idx].transformations.is_empty() {
                 let piece_shape = &pieces[display_idx].transformations[0];
                 let piece_visual_lines = create_visual_piece_shape(piece_shape);
-                max_height = max_height.max(piece_visual_lines.len());
+                pieces_in_row_visual_lines.push(piece_visual_lines);
             }
         }
         
-        // Key/name line
-        if absolute_row == *content_row {
-            if col >= grid_start_col as u16 && col < (grid_start_col + content_width) as u16 {
-                let grid_col = col - grid_start_col as u16;
-                let mut col_start = 0u16;
-                for piece_col in 0..pieces_per_row {
-                    let piece_end = col_start + piece_width as u16;
-                    if grid_col >= col_start && grid_col < piece_end {
+        // Calculate max_height exactly like the rendering code
+        let max_height = pieces_in_row_visual_lines.iter()
+            .map(|lines| lines.len())
+            .max()
+            .unwrap_or(1);
+        
+        #[cfg(debug_assertions)]
+        eprintln!("DEBUG: Calculated max_height={} for chunk {}-{}, visual_lines_count={}", 
+                  max_height, chunk_start, chunk_end-1, pieces_in_row_visual_lines.len());
+        
+        #[cfg(debug_assertions)]
+        for (i, lines) in pieces_in_row_visual_lines.iter().enumerate() {
+            eprintln!("DEBUG: Piece {} has {} visual lines", chunk_start + i, lines.len());
+        }
+        
+        // Calculate the row ranges for this chunk
+        let chunk_start_row = *content_row;
+        // Each chunk has: 1 name line + max_height shape lines + 1 separator line (if not last chunk)
+        let has_separator = chunk_start + pieces_per_row < total_pieces_to_show;
+        let chunk_total_rows = 1 + max_height + if has_separator { 1 } else { 0 };
+        let chunk_end_row = chunk_start_row + chunk_total_rows as u16;
+        
+        // Define the clickable area - be more generous to improve user experience
+        // Include name line + ALL shape lines + one extra row for visual tolerance
+        let clickable_start_row = chunk_start_row;
+        let clickable_end_row = chunk_start_row + (1 + max_height + 1) as u16; // name + shape + 1 extra
+        
+        #[cfg(debug_assertions)]
+        eprintln!("DEBUG: Chunk rows {}-{} (total: {}), clickable: {}-{}, has_separator={}", 
+                  chunk_start_row, chunk_end_row-1, chunk_total_rows, 
+                  clickable_start_row, clickable_end_row-1, has_separator);
+        
+        // Check if click is within this chunk's expanded clickable area
+        if absolute_row >= clickable_start_row && absolute_row < clickable_end_row {
+            #[cfg(debug_assertions)]
+            eprintln!("DEBUG: Click is within chunk row range - processing column detection");
+            
+            // Click is within this chunk - check column position
+            if col >= grid_content_start_col as u16 && col < (grid_content_start_col + content_width) as u16 {
+                let grid_col = col - grid_content_start_col as u16;
+                
+                #[cfg(debug_assertions)]
+                eprintln!("DEBUG: Click is within grid column range - grid_col={}, content_width={}", grid_col, content_width);
+                
+                // Calculate which piece column this click corresponds to
+                let pieces_in_chunk = chunk_end - chunk_start;
+                
+                #[cfg(debug_assertions)]
+                eprintln!("DEBUG: Processing {} pieces in chunk", pieces_in_chunk);
+                
+                // Use the exact same layout as the rendering:
+                // Each piece takes piece_width characters, followed by separator_width
+                // Grid structure: [piece0][sep][piece1][sep][piece2][sep][piece3][sep][piece4]
+                //                  0-6    7   8-14   15  16-22  23  24-30  31  32-38
+                
+                for piece_col in 0..pieces_in_chunk {
+                    // Calculate the exact column range for this piece
+                    let piece_start_col = piece_col * (piece_width + separator_width);
+                    let piece_end_col = piece_start_col + piece_width;
+                    
+                    #[cfg(debug_assertions)]
+                    eprintln!("DEBUG: Piece {} range: {}-{}, grid_col={}", 
+                              piece_col, piece_start_col, piece_end_col-1, grid_col);
+                    
+                    // Check if click is within this piece's column range (excluding separator)
+                    if grid_col >= piece_start_col as u16 && grid_col < piece_end_col as u16 {
                         let piece_idx = chunk_start + piece_col;
-                        if piece_idx < total_pieces_to_show && available_set.contains(&piece_idx) {
+                        
+                        #[cfg(debug_assertions)]
+                        eprintln!("DEBUG: Hit piece {} (available: {})", 
+                                  piece_idx, available_set.contains(&piece_idx));
+                        
+                        if available_set.contains(&piece_idx) {
+                            #[cfg(debug_assertions)]
+                            eprintln!("DEBUG: Returning Some({})", piece_idx);
                             return Some(piece_idx);
-                        }
-                        return None;
-                    }
-                    col_start = piece_end + separator_width as u16;
-                }
-            }
-            return None;
-        }
-        *content_row += 1;
-        
-        // Shape lines
-        for _shape_line in 0..max_height {
-            if absolute_row == *content_row {
-                if col >= grid_start_col as u16 && col < (grid_start_col + content_width) as u16 {
-                    let grid_col = col - grid_start_col as u16;
-                    let mut col_start = 0u16;
-                    for piece_col in 0..pieces_per_row {
-                        let piece_end = col_start + piece_width as u16;
-                        if grid_col >= col_start && grid_col < piece_end {
-                            let piece_idx = chunk_start + piece_col;
-                            if piece_idx < total_pieces_to_show && available_set.contains(&piece_idx) {
-                                return Some(piece_idx);
-                            }
+                        } else {
+                            // Piece exists but not available
+                            #[cfg(debug_assertions)]
+                            eprintln!("DEBUG: Piece {} not available, returning None", piece_idx);
                             return None;
                         }
-                        col_start = piece_end + separator_width as u16;
                     }
                 }
+                
+                #[cfg(debug_assertions)]
+                eprintln!("DEBUG: Click on vertical separator within chunk - not selecting anything");
+                // Click was within the grid but on a vertical separator - return None
                 return None;
             }
-            *content_row += 1;
+            // Click was in chunk row range but outside the grid - return None
+            #[cfg(debug_assertions)]
+            eprintln!("DEBUG: Click outside grid area within chunk - col={}, valid range {}-{}", 
+                      col, grid_content_start_col, grid_content_start_col + content_width);
+            return None;
+        } else {
+            #[cfg(debug_assertions)]
+            eprintln!("DEBUG: Click NOT within expanded clickable area - absolute_row={}, clickable range {}-{}", 
+                      absolute_row, clickable_start_row, clickable_end_row-1);
         }
         
-        // Row separator
-        if chunk_start + pieces_per_row < total_pieces_to_show {
-            if absolute_row == *content_row {
-                return None; // Click on separator
-            }
-            *content_row += 1;
-        }
+        // Update content_row to after this chunk (including separator if present)
+        *content_row = chunk_end_row;
+        
+        #[cfg(debug_assertions)]
+        eprintln!("DEBUG: Updated content_row to {} after chunk", *content_row);
     }
     
     // Bottom border
