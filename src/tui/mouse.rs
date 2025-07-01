@@ -462,92 +462,281 @@ fn handle_blokus_board_click(app: &mut App, col: u16, row: u16, _board_area: Rec
 
 /// Handle clicks in Blokus piece selection area
 fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16) {
-    let current_player = app.game_wrapper.get_current_player();
-    
-    // Check if clicking on expand/collapse area (only the very first few columns)
-    if col <= 1 { // Reduced from 3 to 1 to only catch the very left edge
-        // Simple row-based calculation for player headers
-        // Each player header is roughly 1 row + content, but we'll use a simple approximation
-        let estimated_rows_per_player = 20; // Generous estimate
-        let clicked_player = (row / estimated_rows_per_player).min(3) as usize;
-        
-        if clicked_player < 4 {
-            app.blokus_ui_config.toggle_player_expand(clicked_player);
-        }
-        return;
-    }
-    
-    // Only handle piece selection for the current player
     if let GameWrapper::Blokus(ref state) = app.game_wrapper {
-        let available_pieces = state.get_available_pieces(current_player);
-        let available_set: std::collections::HashSet<usize> = available_pieces.iter().cloned().collect();
+        let current_player = app.game_wrapper.get_current_player();
         
-        // Very precise column detection based on exact rendering layout
+        // IMPORTANT: Account for scrolling offset when determining click position
+        let scroll_offset = app.blokus_ui_config.panel_scroll_offset;
+        let absolute_row = row + scroll_offset as u16;
+        
+        // Get pieces for height calculations (same as rendering)
+        let pieces = crate::games::blokus::get_blokus_pieces();
+        
+        // For debugging: log the click information
+        #[cfg(debug_assertions)]
+        eprintln!("=== CLICK DEBUG: visual_row={}, scroll_offset={}, absolute_row={}, col={} ===", 
+                  row, scroll_offset, absolute_row, col);
+        
+        // SIMPLIFIED APPROACH: Only handle clicks for the current player accurately
+        // For other players, just handle expand/collapse clicks
+        let mut content_row = 0u16;
         let pieces_per_row = 5;
-        let piece_width = 7;     // Each piece is now 7 characters wide (for better centering)
-        let separator_width = 1; // 1 character between pieces (│ separator)
         
-        // Calculate the grid positioning (same logic as rendering)
-        let content_width = pieces_per_row * piece_width + (pieces_per_row - 1) * separator_width; // 7*5 + 4*1 = 39
-        let total_grid_width = content_width + 2; // +2 for left and right borders
-        let panel_width = 50; // Approximate panel width, adjust if needed
-        let grid_padding = if panel_width > total_grid_width { (panel_width - total_grid_width) / 2 } else { 0 };
-        let grid_start_col = grid_padding + 1; // +1 for left border
-        
-        // Check if click is within the grid area
-        if col < grid_start_col as u16 {
-            return; // Click is in padding area, ignore
+        // Process each player section
+        for player in 1..=4 {
+            let is_current = player == current_player;
+            let is_expanded = app.blokus_ui_config.players_expanded.get((player - 1) as usize).unwrap_or(&true);
+            
+            #[cfg(debug_assertions)]
+            eprintln!("DEBUG Player {}: content_row={}, is_current={}, is_expanded={}", 
+                      player, content_row, is_current, is_expanded);
+            
+            // Player header line
+            if absolute_row == content_row {
+                #[cfg(debug_assertions)]
+                eprintln!("DEBUG: Click on player {} header", player);
+                
+                // Check if clicking on expand/collapse area (first few columns)
+                if col <= 2 {
+                    app.blokus_ui_config.toggle_player_expand((player - 1) as usize);
+                }
+                return;
+            }
+            content_row += 1;
+            
+            if *is_expanded {
+                if is_current {
+                    // CURRENT PLAYER: Handle piece selection accurately
+                    let total_pieces_to_show = 21;
+                    let available_pieces = state.get_available_pieces(current_player);
+                    let available_set: std::collections::HashSet<usize> = available_pieces.iter().cloned().collect();
+                    
+                    // Process the current player's piece grid with exact rendering logic
+                    if let Some(selected_piece) = try_select_piece_in_current_player_grid(
+                        absolute_row, col, &mut content_row, pieces_per_row,
+                        total_pieces_to_show, &pieces, &available_set
+                    ) {
+                        app.blokus_ui_config.select_piece(selected_piece);
+                        return;
+                    }
+                } else {
+                    // OTHER PLAYERS: Simulate their content more accurately 
+                    let visible_pieces = 10;
+                    let total_pieces_to_show = visible_pieces.min(21);
+                    
+                    // Simulate the exact same logic as rendering for other players
+                    let mut other_player_content_rows = 0u16;
+                    
+                    // Top border (only if total_pieces_to_show > 0)
+                    if total_pieces_to_show > 0 {
+                        other_player_content_rows += 1; // top border line
+                    }
+                    
+                    // Process each chunk of pieces (same as rendering)
+                    for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
+                        let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
+                        
+                        // Calculate max height for this chunk
+                        let mut max_height = 1;
+                        for display_idx in chunk_start..chunk_end {
+                            if display_idx < pieces.len() && !pieces[display_idx].transformations.is_empty() {
+                                let piece_shape = &pieces[display_idx].transformations[0];
+                                let piece_visual_lines = create_visual_piece_shape(piece_shape);
+                                max_height = max_height.max(piece_visual_lines.len());
+                            }
+                        }
+                        
+                        // Key/name line
+                        other_player_content_rows += 1;
+                        
+                        // Shape lines
+                        other_player_content_rows += max_height as u16;
+                        
+                        // Row separator (if not last chunk)
+                        if chunk_start + pieces_per_row < total_pieces_to_show {
+                            other_player_content_rows += 1;
+                        }
+                    }
+                    
+                    // Bottom border (only for current player in rendering, but let's be safe)
+                    // Actually, looking at the rendering code, bottom border is only for current player
+                    // So we don't add it here
+                    
+                    #[cfg(debug_assertions)]
+                    eprintln!("DEBUG: Other player {} simulated content rows: {}", player, other_player_content_rows);
+                    
+                    // Check if click is within this player's content area
+                    if absolute_row >= content_row && absolute_row < content_row + other_player_content_rows {
+                        #[cfg(debug_assertions)]
+                        eprintln!("DEBUG: Click consumed by other player {} content", player);
+                        return;
+                    }
+                    
+                    content_row += other_player_content_rows;
+                }
+            } else {
+                // Collapsed player - just the summary line
+                if absolute_row == content_row {
+                    #[cfg(debug_assertions)]
+                    eprintln!("DEBUG: Click on collapsed player {} summary", player);
+                    return;
+                }
+                content_row += 1;
+            }
+            
+            // Separator between players (empty line)
+            if player < 4 {
+                content_row += 1;
+            }
         }
         
-        let grid_relative_col = col - grid_start_col as u16;
+        // Controls section at bottom
+        content_row += 5; // 5 lines for controls
         
-        // Find which piece column was clicked (0-4)
-        let mut piece_col = None;
-        let mut col_start = 0u16;
+        #[cfg(debug_assertions)]
+        eprintln!("DEBUG: Click not handled - absolute_row={}, final_content_row={}", 
+                  absolute_row, content_row);
+    }
+}
+
+/// Try to select a piece in the current player's grid
+fn try_select_piece_in_current_player_grid(
+    absolute_row: u16,
+    col: u16,
+    content_row: &mut u16,
+    pieces_per_row: usize,
+    total_pieces_to_show: usize,
+    pieces: &[crate::games::blokus::Piece],
+    available_set: &std::collections::HashSet<usize>,
+) -> Option<usize> {
+    // Top border line
+    if total_pieces_to_show > 0 {
+        if absolute_row == *content_row {
+            return None; // Click on border
+        }
+        *content_row += 1;
+    }
+    
+    // Calculate grid dimensions
+    let piece_width = 7;
+    let separator_width = 1;
+    let content_width = pieces_per_row * piece_width + (pieces_per_row - 1) * separator_width;
+    let total_grid_width = content_width + 2;
+    
+    let estimated_panel_width: usize = 50;
+    let available_width = estimated_panel_width.saturating_sub(5);
+    let padding = if available_width > total_grid_width { (available_width - total_grid_width) / 2 } else { 0 };
+    let grid_start_col = padding + 1;
+    
+    // Process each row of pieces
+    for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
+        let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
         
-        for i in 0..pieces_per_row {
-            let piece_end = col_start + piece_width as u16;
-            
-            if grid_relative_col >= col_start && grid_relative_col < piece_end {
-                piece_col = Some(i);
-                break;
+        // Calculate max height for this chunk
+        let mut max_height = 1;
+        for display_idx in chunk_start..chunk_end {
+            if display_idx < pieces.len() && !pieces[display_idx].transformations.is_empty() {
+                let piece_shape = &pieces[display_idx].transformations[0];
+                let piece_visual_lines = create_visual_piece_shape(piece_shape);
+                max_height = max_height.max(piece_visual_lines.len());
             }
-            
-            col_start = piece_end + separator_width as u16;
         }
         
-        if let Some(col_idx) = piece_col {
-            // Account for the top border before calculating row
-            let grid_content_start_row = 1; // Top border takes 1 row
-            
-            // Only process clicks that are after the top border
-            if row < grid_content_start_row {
-                return; // Click is on the top border, ignore
+        // Key/name line
+        if absolute_row == *content_row {
+            if col >= grid_start_col as u16 && col < (grid_start_col + content_width) as u16 {
+                let grid_col = col - grid_start_col as u16;
+                let mut col_start = 0u16;
+                for piece_col in 0..pieces_per_row {
+                    let piece_end = col_start + piece_width as u16;
+                    if grid_col >= col_start && grid_col < piece_end {
+                        let piece_idx = chunk_start + piece_col;
+                        if piece_idx < total_pieces_to_show && available_set.contains(&piece_idx) {
+                            return Some(piece_idx);
+                        }
+                        return None;
+                    }
+                    col_start = piece_end + separator_width as u16;
+                }
             }
-            
-            // Adjust row to be relative to the actual grid content
-            let grid_relative_row = row - grid_content_start_row;
-            
-            // Each piece row consists of approximately:
-            // - 1 line for piece keys/names
-            // - ~3 lines for piece shapes (varies by piece height)
-            // - 1 line for row separator (except for last row)
-            // So roughly 5 lines per piece row (including separator)
-            let estimated_lines_per_piece_row = 5;
-            
-            // Calculate piece row, accounting for row separators
-            let piece_row = (grid_relative_row / estimated_lines_per_piece_row) as usize;
-            let piece_row = piece_row.min(4); // Clamp to 0-4 (5 rows max)
-            
-            // Calculate piece index
-            let piece_index = piece_row * pieces_per_row + col_idx as usize;
-            
-            // Final validation
-            if piece_index < 21 && available_set.contains(&piece_index) {
-                app.blokus_ui_config.select_piece(piece_index);
+            return None;
+        }
+        *content_row += 1;
+        
+        // Shape lines
+        for _shape_line in 0..max_height {
+            if absolute_row == *content_row {
+                if col >= grid_start_col as u16 && col < (grid_start_col + content_width) as u16 {
+                    let grid_col = col - grid_start_col as u16;
+                    let mut col_start = 0u16;
+                    for piece_col in 0..pieces_per_row {
+                        let piece_end = col_start + piece_width as u16;
+                        if grid_col >= col_start && grid_col < piece_end {
+                            let piece_idx = chunk_start + piece_col;
+                            if piece_idx < total_pieces_to_show && available_set.contains(&piece_idx) {
+                                return Some(piece_idx);
+                            }
+                            return None;
+                        }
+                        col_start = piece_end + separator_width as u16;
+                    }
+                }
+                return None;
             }
+            *content_row += 1;
+        }
+        
+        // Row separator
+        if chunk_start + pieces_per_row < total_pieces_to_show {
+            if absolute_row == *content_row {
+                return None; // Click on separator
+            }
+            *content_row += 1;
         }
     }
+    
+    // Bottom border
+    if total_pieces_to_show > 0 {
+        if absolute_row == *content_row {
+            return None; // Click on border
+        }
+        *content_row += 1;
+    }
+    
+    None
+}
+
+/// Create visual piece shape (helper function to match rendering logic)
+fn create_visual_piece_shape(piece_shape: &[(i32, i32)]) -> Vec<String> {
+    if piece_shape.is_empty() {
+        return vec!["".to_string()];
+    }
+    
+    // Find bounds
+    let min_row = piece_shape.iter().map(|(r, _)| *r).min().unwrap_or(0);
+    let max_row = piece_shape.iter().map(|(r, _)| *r).max().unwrap_or(0);
+    let min_col = piece_shape.iter().map(|(_, c)| *c).min().unwrap_or(0);
+    let max_col = piece_shape.iter().map(|(_, c)| *c).max().unwrap_or(0);
+    
+    let height = (max_row - min_row + 1) as usize;
+    let width = (max_col - min_col + 1) as usize;
+    
+    let mut lines = Vec::new();
+    for row in 0..height {
+        let mut line = String::new();
+        for col in 0..width {
+            let absolute_row = row as i32 + min_row;
+            let absolute_col = col as i32 + min_col;
+            if piece_shape.contains(&(absolute_row, absolute_col)) {
+                line.push('█');
+            } else {
+                line.push(' ');
+            }
+        }
+        lines.push(line);
+    }
+    
+    lines
 }
 
 /// Check if current player is human
