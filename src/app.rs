@@ -1088,6 +1088,12 @@ impl App {
                 None => GameStatus::Draw,
             };
             self.mode = AppMode::GameOver;
+            
+            // Clear AI state when game ends
+            self.ai_thinking_start = None;
+            self.pending_ai_response = None;
+            // Stop any ongoing AI search
+            self.ai_worker.stop();
         }
     }
 

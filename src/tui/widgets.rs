@@ -418,88 +418,90 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
         Line::from(format!("Game: {}  |  Status: {:?}", app.get_selected_game_name(), app.game_status)),
     ];
 
-    // Show current player
-    let game_player_id = app.game_wrapper.get_current_player();
-    let ui_player_id = match &app.game_wrapper {
-        GameWrapper::Blokus(_) => game_player_id, // Blokus already uses 1,2,3,4
-        _ => {
-            // For 2-player games, map 1->1 and -1->2
-            if game_player_id == 1 {
-                1
-            } else if game_player_id == -1 {
-                2
-            } else {
-                game_player_id // fallback
+    // Only show current player info when game is in progress
+    if app.game_status == GameStatus::InProgress {
+        // Show current player
+        let game_player_id = app.game_wrapper.get_current_player();
+        let ui_player_id = match &app.game_wrapper {
+            GameWrapper::Blokus(_) => game_player_id, // Blokus already uses 1,2,3,4
+            _ => {
+                // For 2-player games, map 1->1 and -1->2
+                if game_player_id == 1 {
+                    1
+                } else if game_player_id == -1 {
+                    2
+                } else {
+                    game_player_id // fallback
+                }
             }
-        }
-    };
-    let player_type = app.player_options
-        .iter()
-        .find(|(id, _)| *id == ui_player_id)
-        .map(|(_, p_type)| p_type)
-        .unwrap_or(&Player::Human);
+        };
+        let player_type = app.player_options
+            .iter()
+            .find(|(id, _)| *id == ui_player_id)
+            .map(|(_, p_type)| p_type)
+            .unwrap_or(&Player::Human);
 
-    let current_player_text = match app.game_wrapper {
-        GameWrapper::Blokus(_) => format!("Player {} ({:?})", ui_player_id, player_type),
-        _ => {
-            let symbol = if ui_player_id == 1 { "X" } else { "O" };
-            format!("{} ({:?})", symbol, player_type)
-        }
-    };
-
-    // Get player color to match board display
-    let player_color = match &app.game_wrapper {
-        GameWrapper::Connect4(_) => {
-            if ui_player_id == 1 { Color::Red } else { Color::Yellow }
-        }
-        GameWrapper::Othello(_) => {
-            if ui_player_id == 1 { Color::White } else { Color::White } // Both use white for contrast
-        }
-        GameWrapper::Blokus(_) => {
-            match ui_player_id {
-                1 => Color::Red,
-                2 => Color::Blue, 
-                3 => Color::Green,
-                4 => Color::Yellow,
-                _ => Color::White,
+        let current_player_text = match app.game_wrapper {
+            GameWrapper::Blokus(_) => format!("Player {} ({:?})", ui_player_id, player_type),
+            _ => {
+                let symbol = if ui_player_id == 1 { "X" } else { "O" };
+                format!("{} ({:?})", symbol, player_type)
             }
-        }
-        _ => { // Gomoku and others
-            if ui_player_id == 1 { Color::Red } else { Color::Blue }
-        }
-    };
+        };
 
-    // Add current player indicator with color-coded marker
-    let player_marker = match &app.game_wrapper {
-        GameWrapper::Connect4(_) => {
-            if ui_player_id == 1 { "🔴" } else { "🟡" }
-        }
-        GameWrapper::Othello(_) => {
-            if ui_player_id == 1 { "⚫" } else { "⚪" }
-        }
-        GameWrapper::Blokus(_) => {
-            match ui_player_id {
-                1 => "🟥", // Red square
-                2 => "🟦", // Blue square
-                3 => "🟩", // Green square  
-                4 => "🟨", // Yellow square
-                _ => "⬜",
+        // Get player color to match board display
+        let player_color = match &app.game_wrapper {
+            GameWrapper::Connect4(_) => {
+                if ui_player_id == 1 { Color::Red } else { Color::Yellow }
             }
-        }
-        _ => { // Gomoku and others
-            if ui_player_id == 1 { "❌" } else { "⭕" }
-        }
-    };
+            GameWrapper::Othello(_) => {
+                if ui_player_id == 1 { Color::White } else { Color::White } // Both use white for contrast
+            }
+            GameWrapper::Blokus(_) => {
+                match ui_player_id {
+                    1 => Color::Red,
+                    2 => Color::Blue, 
+                    3 => Color::Green,
+                    4 => Color::Yellow,
+                    _ => Color::White,
+                }
+            }
+            _ => { // Gomoku and others
+                if ui_player_id == 1 { Color::Red } else { Color::Blue }
+            }
+        };
 
-    text.push(Line::from(vec![
-        Span::styled("Current: ", Style::default().fg(Color::White)),
-        Span::styled(player_marker, Style::default()),
-        Span::styled(" ", Style::default()),
-        Span::styled(current_player_text, Style::default().fg(player_color).add_modifier(Modifier::BOLD)),
-    ]));
+        // Add current player indicator with color-coded marker
+        let player_marker = match &app.game_wrapper {
+            GameWrapper::Connect4(_) => {
+                if ui_player_id == 1 { "🔴" } else { "🟡" }
+            }
+            GameWrapper::Othello(_) => {
+                if ui_player_id == 1 { "⚫" } else { "⚪" }
+            }
+            GameWrapper::Blokus(_) => {
+                match ui_player_id {
+                    1 => "🟥", // Red square
+                    2 => "🟦", // Blue square
+                    3 => "🟩", // Green square  
+                    4 => "🟨", // Yellow square
+                    _ => "⬜",
+                }
+            }
+            _ => { // Gomoku and others
+                if ui_player_id == 1 { "❌" } else { "⭕" }
+            }
+        };
 
-    // Show AI status - display horizontally to save vertical space
-    if app.is_current_player_ai() {
+        text.push(Line::from(vec![
+            Span::styled("Current: ", Style::default().fg(Color::White)),
+            Span::styled(player_marker, Style::default()),
+            Span::styled(" ", Style::default()),
+            Span::styled(current_player_text, Style::default().fg(player_color).add_modifier(Modifier::BOLD)),
+        ]));
+
+        // Show AI status - display horizontally to save vertical space
+        if app.is_current_player_ai() {
         if let Some(start_time) = app.ai_thinking_start {
             let elapsed = start_time.elapsed();
             let elapsed_secs = elapsed.as_secs();
@@ -549,6 +551,7 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("🤖🤔 AI Starting search...", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
             ]));
         }
+        }
     }
 
     // Show basic statistics if available - compact format
@@ -560,9 +563,10 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
     let instructions = match app.mode {
         AppMode::InGame => {
             if app.game_status == GameStatus::InProgress {
-                match player_type {
-                    Player::Human => "Arrows: move cursor | Enter/Space: make move | PgUp/PgDn: scroll",
-                    Player::AI => "AI is thinking...",
+                if app.is_current_player_ai() {
+                    "AI is thinking..."
+                } else {
+                    "Arrows: move cursor | Enter/Space: make move | PgUp/PgDn: scroll"
                 }
             } else {
                 "Press 'r' to restart | Esc for menu"
