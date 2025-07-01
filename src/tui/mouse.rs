@@ -601,10 +601,8 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
                     // Simulate the exact same logic as rendering for other players
                     let mut other_player_content_rows = 0u16;
                     
-                    // Top border (only if total_pieces_to_show > 0)
-                    if total_pieces_to_show > 0 {
-                        other_player_content_rows += 1; // top border line
-                    }
+                    // NOTE: Other players do NOT have top/bottom borders in rendering
+                    // Only the current player gets borders
                     
                     // Process each chunk of pieces (same as rendering)
                     for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
@@ -631,10 +629,6 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
                             other_player_content_rows += 1;
                         }
                     }
-                    
-                    // Bottom border (only for current player in rendering, but let's be safe)
-                    // Actually, looking at the rendering code, bottom border is only for current player
-                    // So we don't add it here
                     
                     #[cfg(debug_assertions)]
                     eprintln!("DEBUG: Other player {} simulated content rows: {}", player, other_player_content_rows);
