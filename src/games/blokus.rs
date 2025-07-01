@@ -392,7 +392,7 @@ impl GameState for BlokusState {
         }
 
         let min_score = *scores.iter().min().unwrap();
-        let winners: Vec<_> = scores.iter().enumerate().filter(|(_, &s)| s == min_score).collect();
+        let winners: Vec<_> = scores.iter().enumerate().filter(|&(_, &s)| s == min_score).collect();
 
         if winners.len() == 1 {
             Some((winners[0].0 + 1) as i32)

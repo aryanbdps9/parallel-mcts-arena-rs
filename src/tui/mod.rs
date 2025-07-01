@@ -28,6 +28,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
+    layout::Rect,
     Terminal,
 };
 use std::{io, time::Duration};
@@ -74,7 +75,9 @@ pub fn run(app: &mut App) -> io::Result<()> {
                     }
                 }
                 Event::Mouse(mouse) => {
-                    input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal.size()?);
+                    let terminal_size = terminal.size()?;
+                    let terminal_rect = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+                    input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal_rect);
                 }
                 _ => {}
             }

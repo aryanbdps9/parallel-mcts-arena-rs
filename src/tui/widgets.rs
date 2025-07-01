@@ -36,7 +36,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(100)])
-        .split(frame.size());
+        .split(frame.area());
 
     match app.mode {
         AppMode::GameSelection => draw_game_selection_menu(frame, app, main_layout[0]),

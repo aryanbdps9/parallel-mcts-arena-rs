@@ -781,7 +781,7 @@ impl<S: GameState> MCTS<S> {
             if possible_moves.is_empty() {
                 panic!("No possible moves available - game should be terminal");
             }
-            possible_moves[rand::thread_rng().gen_range(0..possible_moves.len())].clone()
+            possible_moves[rand::rng().random_range(0..possible_moves.len())].clone()
         } else {
             children
                 .iter()
@@ -881,7 +881,7 @@ impl<S: GameState> MCTS<S> {
             if possible_moves.is_empty() {
                 panic!("No possible moves available - game should be terminal");
             }
-            possible_moves[rand::thread_rng().gen_range(0..possible_moves.len())].clone()
+            possible_moves[rand::rng().random_range(0..possible_moves.len())].clone()
         } else {
             children
                 .iter()
@@ -956,7 +956,7 @@ impl<S: GameState> MCTS<S> {
             if possible_moves.is_empty() {
                 panic!("No possible moves available - game should be terminal");
             }
-            possible_moves[rand::thread_rng().gen_range(0..possible_moves.len())].clone()
+            possible_moves[rand::rng().random_range(0..possible_moves.len())].clone()
         } else {
             children
                 .iter()
@@ -1095,7 +1095,7 @@ impl<S: GameState> MCTS<S> {
                 let selected_idx = if best_indices.len() == 1 {
                     best_indices[0]
                 } else {
-                    best_indices[rand::thread_rng().gen_range(0..best_indices.len())]
+                    best_indices[rand::rng().random_range(0..best_indices.len())]
                 };
                 let selected = &candidates[selected_idx];
                 (selected.0.clone(), selected.1.clone())
@@ -1154,7 +1154,7 @@ impl<S: GameState> MCTS<S> {
                             let visit_factor = (visits as f64).sqrt() / 10.0; // Encourage expansion for well-visited nodes
                             let expansion_probability = (depth_factor + visit_factor).min(1.0);
                             
-                            rand::thread_rng().gen::<f64>() < expansion_probability
+                            rand::rng().random::<f64>() < expansion_probability
                         }
                     }
                 }
@@ -1228,7 +1228,7 @@ impl<S: GameState> MCTS<S> {
                 break;
             }
             
-            let move_index = rand::thread_rng().gen_range(0..moves_len);
+            let move_index = rand::rng().random_range(0..moves_len);
             let mv = &moves_cache[move_index];
             sim_state.make_move(mv);
             simulation_moves += 1;
