@@ -8,7 +8,7 @@ use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::games::{gomoku::GomokuMove, connect4::Connect4Move, othello::OthelloMove, blokus::BlokusMove};
 use crate::tui::layout::DragBoundary;
 use crossterm::event::{MouseButton, MouseEventKind};
-use ratatui::layout::Rect;
+use ratatui::layout::{Rect, Layout, Direction, Constraint};
 use mcts::GameState;
 
 /// State for tracking mouse drag operations
@@ -170,18 +170,26 @@ fn handle_mouse_scroll(app: &mut App, col: u16, row: u16, terminal_size: Rect, s
         AppMode::InGame | AppMode::GameOver => {
             // Special handling for Blokus
             if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                let (board_area, piece_selection_area, _) = app.layout_config.get_blokus_layout(terminal_size);
+                // For Blokus, we need to manually calculate the stats area since get_blokus_layout doesn't return it
+                // The Blokus layout splits vertically: 65% for main game area, 35% for bottom info
+                let vertical_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+                    .split(terminal_size);
                 
-                // Check if mouse is in piece selection area
-                if col >= piece_selection_area.x && col < piece_selection_area.x + piece_selection_area.width &&
-                   row >= piece_selection_area.y && row < piece_selection_area.y + piece_selection_area.height {
-                    if scroll_up {
-                        app.blokus_scroll_panel_up();
-                    } else {
-                        app.blokus_scroll_panel_down();
-                    }
-                    return;
-                }
+                let main_game_area = vertical_chunks[0];
+                let bottom_info_area = vertical_chunks[1];
+                
+                // Bottom info area is split: 40% instructions, 60% stats
+                let bottom_vertical = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(bottom_info_area);
+                
+                let stats_area = bottom_vertical[1];
+                
+                // Get the three main areas from the top section
+                let (board_area, piece_selection_area, _player_area) = app.layout_config.get_blokus_layout(main_game_area);
                 
                 // Check if mouse is over board area and a piece is selected - rotate piece
                 if col >= board_area.x && col < board_area.x + board_area.width &&
@@ -203,9 +211,50 @@ fn handle_mouse_scroll(app: &mut App, col: u16, row: u16, terminal_size: Rect, s
                     }
                     return;
                 }
+                
+                // Check if mouse is in stats area (debug/history panels)
+                if col >= stats_area.x && col < stats_area.x + stats_area.width &&
+                   row >= stats_area.y && row < stats_area.y + stats_area.height {
+                    // Split stats area horizontally for debug stats and move history
+                    let stats_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .split(stats_area);
+                    
+                    let debug_area = stats_chunks[0];
+                    
+                    if col < debug_area.x + debug_area.width {
+                        // Mouse is in debug stats area
+                        if scroll_up {
+                            app.scroll_debug_up();
+                        } else {
+                            app.scroll_debug_down();
+                        }
+                    } else {
+                        // Mouse is in move history area
+                        if scroll_up {
+                            app.scroll_move_history_up();
+                        } else {
+                            app.scroll_move_history_down();
+                        }
+                    }
+                    return;
+                }
+                
+                // Only scroll piece selection panel if mouse is directly in that area
+                // and not in any other specific scrollable area
+                if col >= piece_selection_area.x && col < piece_selection_area.x + piece_selection_area.width &&
+                   row >= piece_selection_area.y && row < piece_selection_area.y + piece_selection_area.height {
+                    if scroll_up {
+                        app.blokus_scroll_panel_up();
+                    } else {
+                        app.blokus_scroll_panel_down();
+                    }
+                    return;
+                }
             }
 
-            // Default scrolling for stats area
+            // Default scrolling for stats area (for non-Blokus games or as fallback)
             let (_, _, stats_area) = app.layout_config.get_main_layout(terminal_size);
             if row >= stats_area.y {
                 let (debug_area, _history_area) = app.layout_config.get_stats_layout(stats_area);
