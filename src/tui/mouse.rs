@@ -429,7 +429,7 @@ fn handle_blokus_board_click(app: &mut App, col: u16, row: u16, _board_area: Rec
     let board_start_row = 1; // Border
     
     if col >= board_start_col && row >= board_start_row {
-        // Each board cell is rendered as 2 characters wide (██, ▓▓, ┼┼)
+        // Each board cell is rendered as 2 characters wide (██, ▓▓, ░░/▒▒)
         let cell_width = 2;
         let cell_height = 1;
         

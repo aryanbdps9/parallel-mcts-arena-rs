@@ -1025,7 +1025,15 @@ fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect) {
                     let color = if is_last_move { Color::LightYellow } else { Color::Yellow };
                     ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
                 }
-                _ => ("░░", Style::default().fg(Color::DarkGray)), // Empty space
+                _ => {
+                    // Chess-like pattern for empty squares - alternating light and dark
+                    let is_light_square = (r + c) % 2 == 0;
+                    if is_light_square {
+                        ("░░", Style::default().fg(Color::Rgb(100, 100, 100))) // Light gray
+                    } else {
+                        ("▒▒", Style::default().fg(Color::Rgb(60, 60, 60))) // Dark gray
+                    }
+                }
             };
 
             line_spans.push(Span::styled(symbol, style));
