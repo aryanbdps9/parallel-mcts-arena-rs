@@ -288,7 +288,8 @@ fn handle_menu_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
     
     // Check if click is within the menu area
     if row < board_area.height {
-        let menu_start_row = 2; // Account for border and title
+        let menu_start_row = 1; // Ratatui List with borders: row 0=border, row 1=first item
+        
         if row >= menu_start_row {
             let clicked_item = (row - menu_start_row) as usize;
             let total_items = app.games.len() + 2; // games + settings + quit
