@@ -292,25 +292,36 @@ fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     if row >= board_area.y && row < board_area.y + board_area.height &&
        col >= board_area.x && col < board_area.x + board_area.width {
         
+        // Convert to relative coordinates within the board area
+        let relative_col = col - board_area.x;
+        let relative_row = row - board_area.y;
+        
         let (board_height, board_width) = {
             let board = app.game_wrapper.get_board();
             (board.len(), if board.len() > 0 { board[0].len() } else { 0 })
         };
         
         // Calculate board cell from click position
-        // Account for borders and labels
-        let board_start_col = board_area.x + 1; // Border
-        let board_start_row = board_area.y + 1; // Border
+        // Account for borders
+        let board_start_col = 1; // Border
+        let board_start_row = 1; // Border
         
-        if col >= board_start_col && row >= board_start_row {
-            let available_width = board_area.width.saturating_sub(2);
-            let available_height = board_area.height.saturating_sub(2);
+        if relative_col >= board_start_col && relative_row >= board_start_row {
+            // Use the same layout logic as the board rendering to get accurate coordinates
+            // Calculate column width based on game type (matching draw_standard_board logic)
+            let col_width = match &app.game_wrapper {
+                GameWrapper::Connect4(_) => 2,
+                GameWrapper::Othello(_) => 2,  
+                _ => 2, // Standard width for X/O
+            };
             
-            let cell_width = (available_width as f32 / board_width as f32) as u16;
-            let cell_height = (available_height as f32 / board_height as f32) as u16;
-            
-            let board_col = ((col - board_start_col) / cell_width.max(1)) as usize;
-            let board_row = ((row - board_start_row) / cell_height.max(1)) as usize;
+            // Calculate actual board position using the same logic as rendering
+            let board_col = if col_width > 0 {
+                ((relative_col - board_start_col) / col_width) as usize
+            } else {
+                0
+            };
+            let board_row = (relative_row - board_start_row) as usize;
             
             if board_row < board_height && board_col < board_width {
                 // Update cursor position
@@ -536,24 +547,5 @@ fn make_move_with_move(app: &mut App, player_move: MoveWrapper) {
             None => GameStatus::Draw,
         };
         app.mode = AppMode::GameOver;
-    }
-}
-
-/// Make a move at the current cursor position
-fn make_move(app: &mut App) {
-    let (row, col) = (app.board_cursor.0 as usize, app.board_cursor.1 as usize);
-    
-    let player_move = match &app.game_wrapper {
-        GameWrapper::Gomoku(_) => MoveWrapper::Gomoku(GomokuMove(row, col)),
-        GameWrapper::Connect4(_) => MoveWrapper::Connect4(Connect4Move(col)),
-        GameWrapper::Othello(_) => MoveWrapper::Othello(OthelloMove(row, col)),
-        GameWrapper::Blokus(_) => {
-            // For Blokus, use a simple pass move for now - this would need more complex handling
-            MoveWrapper::Blokus(BlokusMove(usize::MAX, 0, 0, 0))
-        }
-    };
-
-    if app.game_wrapper.is_legal(&player_move) {
-        make_move_with_move(app, player_move);
     }
 }
