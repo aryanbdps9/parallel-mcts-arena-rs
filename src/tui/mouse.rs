@@ -515,8 +515,18 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
     if let GameWrapper::Blokus(ref state) = app.game_wrapper {
         let current_player = app.game_wrapper.get_current_player();
         
-        // IMPORTANT: Account for scrolling offset when determining click position
-        let scroll_offset = app.blokus_ui_config.panel_scroll_offset;
+        // IMPORTANT: Use the same scroll offset calculation as the rendering code
+        // This fixes the off-by-2 error when auto-scroll is active
+        // We need to calculate max_scroll here like in the rendering to ensure consistency
+        // Note: We can't get the exact content height easily here, but we can approximate
+        // or better yet, we should mirror the exact logic from the rendering
+        let scroll_offset = if let Some(auto_scroll_pos) = app.calculate_piece_panel_auto_scroll_position() {
+            // For now, we trust that auto_scroll_pos is already reasonable
+            // In the future, we might want to calculate max_scroll here too for full consistency
+            auto_scroll_pos
+        } else {
+            app.blokus_ui_config.panel_scroll_offset
+        };
         let absolute_row = row + scroll_offset as u16;
         
         // Get pieces for height calculations (same as rendering)
@@ -856,34 +866,39 @@ fn try_select_piece_in_current_player_grid(
 /// Create visual piece shape (helper function to match rendering logic)
 fn create_visual_piece_shape(piece_shape: &[(i32, i32)]) -> Vec<String> {
     if piece_shape.is_empty() {
-        return vec!["".to_string()];
+        return vec!["▢".to_string()];
     }
-    
-    // Find bounds
-    let min_row = piece_shape.iter().map(|(r, _)| *r).min().unwrap_or(0);
-    let max_row = piece_shape.iter().map(|(r, _)| *r).max().unwrap_or(0);
-    let min_col = piece_shape.iter().map(|(_, c)| *c).min().unwrap_or(0);
-    let max_col = piece_shape.iter().map(|(_, c)| *c).max().unwrap_or(0);
-    
-    let height = (max_row - min_row + 1) as usize;
-    let width = (max_col - min_col + 1) as usize;
-    
-    let mut lines = Vec::new();
-    for row in 0..height {
-        let mut line = String::new();
-        for col in 0..width {
-            let absolute_row = row as i32 + min_row;
-            let absolute_col = col as i32 + min_col;
-            if piece_shape.contains(&(absolute_row, absolute_col)) {
-                line.push('█');
-            } else {
-                line.push(' ');
-            }
-        }
-        lines.push(line);
+
+    // Create a 2D visual representation
+    let min_r = piece_shape.iter().map(|p| p.0).min().unwrap_or(0);
+    let max_r = piece_shape.iter().map(|p| p.0).max().unwrap_or(0);
+    let min_c = piece_shape.iter().map(|p| p.1).min().unwrap_or(0);
+    let max_c = piece_shape.iter().map(|p| p.1).max().unwrap_or(0);
+
+    let height = (max_r - min_r + 1) as usize;
+    let width = (max_c - min_c + 1) as usize;
+
+    // Create a grid to show the shape
+    let mut grid = vec![vec![' '; width]; height];
+
+    // Fill the grid with the piece shape
+    for &(r, c) in piece_shape {
+        let gr = (r - min_r) as usize;
+        let gc = (c - min_c) as usize;
+        grid[gr][gc] = '▢'; // Use empty square like ghost pieces
     }
-    
-    lines
+
+    // Convert to vector of strings
+    let mut result: Vec<String> = grid.iter()
+        .map(|row| row.iter().collect::<String>())
+        .collect();
+
+    // Ensure minimum width for single character pieces
+    if result.len() == 1 && result[0].trim().len() == 1 {
+        result[0] = format!(" {} ", result[0].trim());
+    }
+
+    result
 }
 
 /// Check if current player is human

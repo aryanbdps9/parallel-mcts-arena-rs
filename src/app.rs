@@ -1372,7 +1372,7 @@ impl App {
                             if let Some(piece) = pieces.get(piece_idx) {
                                 if !piece.transformations.is_empty() {
                                     let piece_shape = &piece.transformations[0];
-                                    let piece_height = Self::calculate_piece_shape_height(piece_shape);
+                                    let piece_height = Self::calculate_visual_piece_height(piece_shape);
                                     max_height = max_height.max(piece_height);
                                 }
                             }
@@ -1414,14 +1414,40 @@ impl App {
 
     /// Calculate the visual height of a piece shape
     /// This mirrors the logic in create_visual_piece_shape from blokus_ui.rs
-    fn calculate_piece_shape_height(piece_shape: &[(i32, i32)]) -> usize {
+    /// Calculate visual piece height using the same logic as create_visual_piece_shape
+    /// This ensures consistency between auto-scroll calculation and rendering
+    fn calculate_visual_piece_height(piece_shape: &[(i32, i32)]) -> usize {
         if piece_shape.is_empty() {
-            return 1;
+            return 1; // "▢" takes 1 line
         }
 
+        // Calculate grid dimensions (same as create_visual_piece_shape)
         let min_r = piece_shape.iter().map(|p| p.0).min().unwrap_or(0);
         let max_r = piece_shape.iter().map(|p| p.0).max().unwrap_or(0);
-        
-        (max_r - min_r + 1) as usize
+        let min_c = piece_shape.iter().map(|p| p.1).min().unwrap_or(0);
+        let max_c = piece_shape.iter().map(|p| p.1).max().unwrap_or(0);
+
+        let height = (max_r - min_r + 1) as usize;
+        let width = (max_c - min_c + 1) as usize;
+
+        // Create the visual grid (same algorithm as create_visual_piece_shape)
+        let mut grid = vec![vec![' '; width]; height];
+        for &(r, c) in piece_shape {
+            let gr = (r - min_r) as usize;
+            let gc = (c - min_c) as usize;
+            grid[gr][gc] = '▢';
+        }
+
+        // Convert to lines (same as create_visual_piece_shape)
+        let mut result: Vec<String> = grid.iter()
+            .map(|row| row.iter().collect::<String>())
+            .collect();
+
+        // Apply special handling for single character pieces (same as create_visual_piece_shape)
+        if result.len() == 1 && result[0].trim().len() == 1 {
+            result[0] = format!(" {} ", result[0].trim());
+        }
+
+        result.len()
     }
 }
