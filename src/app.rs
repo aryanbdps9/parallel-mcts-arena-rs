@@ -104,7 +104,7 @@ impl AIWorker {
                         }
                         let mcts_ref = mcts.as_mut().unwrap();
                         
-                        // Use the configurable search_iterations and timeout_secs, pass stop flag for external interruption
+                        // Use the exact timeout - MCTS now properly respects timeouts
                         let (best_move, stats) =
                             mcts_ref.search_with_stop(&state, search_iterations as i32, 1, timeout_secs, Some(stop_flag_clone.clone()));
                         
@@ -253,6 +253,11 @@ pub struct App {
     pub history_auto_scroll: bool,
     pub history_user_scroll_time: Option<std::time::Instant>,
     pub history_auto_scroll_reset_duration: std::time::Duration,
+    // Auto-scroll for Blokus piece panel
+    pub piece_panel_auto_scroll: bool,
+    pub piece_panel_user_scroll_time: Option<std::time::Instant>,
+    pub piece_panel_auto_scroll_reset_duration: std::time::Duration,
+    pub last_current_player: i32, // Track when current player changes
     // AI timing and status
     pub ai_thinking_start: Option<std::time::Instant>,
     pub ai_minimum_display_duration: std::time::Duration,
@@ -372,6 +377,7 @@ impl App {
         };
 
         let game_wrapper = games[initial_game_index].1();
+        let initial_current_player = game_wrapper.get_current_player();
         let mut player_options: Vec<(i32, Player)> = (1..=game_wrapper.get_num_players())
             .map(|i| (i, Player::Human))
             .collect();
@@ -432,9 +438,14 @@ impl App {
             history_auto_scroll: true,
             history_user_scroll_time: None,
             history_auto_scroll_reset_duration: std::time::Duration::from_secs(20), // 20 seconds as requested
+            // Auto-scroll for Blokus piece panel
+            piece_panel_auto_scroll: true,
+            piece_panel_user_scroll_time: None,
+            piece_panel_auto_scroll_reset_duration: std::time::Duration::from_secs(15), // 15 seconds as requested
+            last_current_player: initial_current_player,
             // AI timing and status
             ai_thinking_start: None,
-            ai_minimum_display_duration: std::time::Duration::from_millis(500), // Minimum 0.5 seconds display
+            ai_minimum_display_duration: std::time::Duration::from_millis(100), // Minimum 0.1 seconds display
             pending_ai_response: None,
             // Initialize settings with current values
             settings_board_size: if board_size == 15 { 15 } else { board_size }, // Keep 15 as standard Gomoku default
@@ -524,6 +535,8 @@ impl App {
         
         // Handle auto-scroll reset timer for move history
         self.update_history_auto_scroll();
+        // Update auto-scroll for Blokus piece panel based on current player
+        self.update_piece_panel_auto_scroll();
     }
 
     /// Gets the name of the currently selected game
@@ -1072,10 +1085,16 @@ impl App {
 
     pub fn blokus_scroll_panel_up(&mut self) {
         self.blokus_ui_config.scroll_panel_up();
+        // Track user scroll interaction
+        self.piece_panel_auto_scroll = false;
+        self.piece_panel_user_scroll_time = Some(std::time::Instant::now());
     }
 
     pub fn blokus_scroll_panel_down(&mut self) {
         self.blokus_ui_config.scroll_panel_down();
+        // Track user scroll interaction
+        self.piece_panel_auto_scroll = false;
+        self.piece_panel_user_scroll_time = Some(std::time::Instant::now());
     }
 
     /// Update auto-scroll behavior for move history
@@ -1085,6 +1104,34 @@ impl App {
             if user_scroll_time.elapsed() >= self.history_auto_scroll_reset_duration {
                 self.history_auto_scroll = true;
                 self.history_user_scroll_time = None;
+            }
+        }
+    }
+
+    /// Update auto-scroll behavior for Blokus piece panel
+    fn update_piece_panel_auto_scroll(&mut self) {
+        // Check if current player has changed
+        let current_player = self.game_wrapper.get_current_player();
+        if current_player != self.last_current_player {
+            self.last_current_player = current_player;
+            // Force auto-scroll to the new current player (unless user has scrolled very recently)
+            if let Some(user_scroll_time) = self.piece_panel_user_scroll_time {
+                // If user scrolled less than 15 seconds ago, don't override their scroll
+                if user_scroll_time.elapsed() >= self.piece_panel_auto_scroll_reset_duration {
+                    self.piece_panel_auto_scroll = true;
+                    self.piece_panel_user_scroll_time = None;
+                }
+            } else {
+                // No recent user scroll, enable auto-scroll
+                self.piece_panel_auto_scroll = true;
+            }
+        }
+        
+        // Check if we should reset auto-scroll after user interaction
+        if let Some(user_scroll_time) = self.piece_panel_user_scroll_time {
+            if user_scroll_time.elapsed() >= self.piece_panel_auto_scroll_reset_duration {
+                self.piece_panel_auto_scroll = true;
+                self.piece_panel_user_scroll_time = None;
             }
         }
     }
@@ -1271,5 +1318,110 @@ impl App {
                 if player_id == 1 { "❌" } else { "⭕" }
             }
         }
+    }
+
+    /// Calculate the optimal scroll position to show the current player at the top
+    /// of the piece panel (for Blokus auto-scroll feature)
+    pub fn calculate_piece_panel_auto_scroll_position(&self) -> Option<usize> {
+        if !self.piece_panel_auto_scroll {
+            return None;
+        }
+        
+        if let GameWrapper::Blokus(_blokus_state) = &self.game_wrapper {
+            let current_player = self.game_wrapper.get_current_player();
+            if current_player < 1 || current_player > 4 {
+                return None;
+            }
+            
+            // Calculate actual line position by simulating the content generation
+            // This mirrors the logic in draw_blokus_piece_selection
+            let pieces = crate::games::blokus::get_blokus_pieces();
+            let mut line_count = 0usize;
+            
+            for player in 1..=4 {
+                // This is where the current player's header will appear
+                if player == current_player {
+                    return Some(line_count);
+                }
+                
+                // Player header line
+                line_count += 1;
+                
+                // Check if this player is expanded
+                let is_expanded = self.blokus_ui_config.players_expanded.get((player - 1) as usize).unwrap_or(&true);
+                
+                if *is_expanded {
+                    let is_current = player == current_player;
+                    let visible_pieces = if is_current { 21 } else { 10 };
+                    let total_pieces_to_show = if is_current { 21 } else { visible_pieces.min(21) };
+                    let pieces_per_row = 5;
+                    
+                    // Add top border for current player's grid
+                    if is_current && total_pieces_to_show > 0 {
+                        line_count += 1;
+                    }
+                    
+                    // Calculate piece rows with exact heights
+                    for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
+                        let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
+                        
+                        // Get max height for this row by examining all pieces in the row
+                        let mut max_height = 1;
+                        for display_idx in chunk_start..chunk_end {
+                            let piece_idx = display_idx;
+                            if let Some(piece) = pieces.get(piece_idx) {
+                                if !piece.transformations.is_empty() {
+                                    let piece_shape = &piece.transformations[0];
+                                    let piece_height = Self::calculate_piece_shape_height(piece_shape);
+                                    max_height = max_height.max(piece_height);
+                                }
+                            }
+                        }
+                        
+                        // Key line: 1 line
+                        line_count += 1;
+                        
+                        // Shape lines: max_height lines
+                        line_count += max_height;
+                        
+                        // Row separator (except for last row): 1 line
+                        if chunk_start + pieces_per_row < total_pieces_to_show {
+                            line_count += 1;
+                        }
+                    }
+                    
+                    // Add bottom border for current player's grid
+                    if is_current && total_pieces_to_show > 0 {
+                        line_count += 1;
+                    }
+                } else {
+                    // Just the summary line when collapsed
+                    line_count += 1;
+                }
+                
+                // Add separator between players (except after the last one)
+                if player < 4 {
+                    line_count += 1;
+                }
+            }
+            
+            // If we get here, current_player was not found (shouldn't happen)
+            None
+        } else {
+            None
+        }
+    }
+
+    /// Calculate the visual height of a piece shape
+    /// This mirrors the logic in create_visual_piece_shape from blokus_ui.rs
+    fn calculate_piece_shape_height(piece_shape: &[(i32, i32)]) -> usize {
+        if piece_shape.is_empty() {
+            return 1;
+        }
+
+        let min_r = piece_shape.iter().map(|p| p.0).min().unwrap_or(0);
+        let max_r = piece_shape.iter().map(|p| p.0).max().unwrap_or(0);
+        
+        (max_r - min_r + 1) as usize
     }
 }

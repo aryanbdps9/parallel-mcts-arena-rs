@@ -518,7 +518,13 @@ pub fn draw_blokus_piece_selection(f: &mut Frame, app: &App, area: Rect) {
         let content_height = all_lines.len();
         let visible_height = inner_area.height as usize;
         let max_scroll = content_height.saturating_sub(visible_height);
-        let scroll_offset = app.blokus_ui_config.panel_scroll_offset.min(max_scroll);
+        
+        // Use auto-scroll position if enabled, otherwise use manual scroll position
+        let scroll_offset = if let Some(auto_scroll_pos) = app.calculate_piece_panel_auto_scroll_position() {
+            auto_scroll_pos.min(max_scroll)
+        } else {
+            app.blokus_ui_config.panel_scroll_offset.min(max_scroll)
+        };
 
         let visible_lines: Vec<Line> = if content_height > visible_height && scroll_offset < content_height {
             all_lines.into_iter()

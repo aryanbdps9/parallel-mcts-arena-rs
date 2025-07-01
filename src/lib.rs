@@ -341,7 +341,12 @@ pub struct MCTS<S: GameState> {
     max_nodes: usize,
     /// Current number of nodes in the tree (approximate)
     node_count: Arc<AtomicI32>,
-
+    /// Running average of thread coordination overhead in milliseconds
+    timeout_overhead_ms: Arc<Mutex<f64>>,
+    /// Number of timeout measurements taken
+    timeout_measurements: Arc<AtomicI32>,
+    /// Counter for searches since last overhead measurement
+    searches_since_measurement: Arc<AtomicI32>,
 }
 
 impl<S: GameState> MCTS<S> {
@@ -365,6 +370,9 @@ impl<S: GameState> MCTS<S> {
             node_pool: NodePool::new(),
             max_nodes,
             node_count: Arc::new(AtomicI32::new(1)), // Start with 1 for root node
+            timeout_overhead_ms: Arc::new(Mutex::new(50.0)), // Start with conservative 50ms estimate
+            timeout_measurements: Arc::new(AtomicI32::new(0)),
+            searches_since_measurement: Arc::new(AtomicI32::new(0)),
         }
     }
 
@@ -606,7 +614,26 @@ impl<S: GameState> MCTS<S> {
     /// * `external_stop` - Optional external stop flag that can interrupt the search.
     pub fn search_with_stop(&mut self, state: &S, iterations: i32, stats_interval_secs: u64, timeout_secs: u64, external_stop: Option<Arc<AtomicBool>>) -> (S::Move, SearchStatistics) {
         let start_time = Instant::now();
-        let timeout = if timeout_secs > 0 { Some(Duration::from_secs(timeout_secs)) } else { None };
+        
+        // Get current overhead estimate
+        let estimated_overhead_ms = {
+            let overhead = self.timeout_overhead_ms.lock();
+            *overhead
+        };
+        
+        // Use dynamic overhead estimation with a minimum of 20ms and maximum of 500ms
+        let overhead_buffer_ms = estimated_overhead_ms.max(20.0).min(500.0);
+        
+        let effective_timeout_ms = if timeout_secs > 0 { 
+            ((timeout_secs * 1000) as f64 - overhead_buffer_ms).max(100.0) as u64 // Ensure at least 100ms for actual search
+        } else { 
+            0 
+        };
+        let timeout = if effective_timeout_ms > 0 { 
+            Some(Duration::from_millis(effective_timeout_ms)) 
+        } else { 
+            None 
+        };
 
         self.ensure_root_expanded(state);
 
@@ -634,16 +661,44 @@ impl<S: GameState> MCTS<S> {
         let completed_iterations = Arc::new(AtomicUsize::new(0));
         let stop_searching = Arc::new(AtomicBool::new(false));
 
+        // Pre-calculate absolute timeout deadline
+        let timeout_deadline = timeout.map(|t| start_time + t);
+
         let stats_interval = if stats_interval_secs > 0 { Some(Duration::from_secs(stats_interval_secs)) } else { None };
         let last_stats_time = Arc::new(Mutex::new(Instant::now()));
 
+        // Start a dedicated timeout monitoring thread if we have a timeout
+        let timeout_monitor_handle = if let Some(deadline) = timeout_deadline {
+            let stop_flag = stop_searching.clone();
+            let ext_stop = external_stop.clone();
+            Some(std::thread::spawn(move || {
+                let check_interval = Duration::from_millis(5); // Check every 5ms for maximum responsiveness
+                while !stop_flag.load(Ordering::Relaxed) {
+                    if Instant::now() >= deadline {
+                        stop_flag.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    if let Some(ref ext_stop) = ext_stop {
+                        if ext_stop.load(Ordering::Relaxed) {
+                            stop_flag.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    std::thread::sleep(check_interval);
+                }
+            }))
+        } else {
+            None
+        };
+
         self.pool.install(|| {
             let _ = (0..iterations).into_par_iter().try_for_each(|_| -> Result<(), ()> {
+                // Double-check stop flag at the very start of each iteration
                 if stop_searching.load(Ordering::Relaxed) {
-                    return Err(()); // Stop this thread
+                    return Err(()); // Stop this thread immediately
                 }
 
-                // Check external stop flag
+                // Check external stop flag at the start of each iteration
                 if let Some(ref ext_stop) = external_stop {
                     if ext_stop.load(Ordering::Relaxed) {
                         stop_searching.store(true, Ordering::Relaxed);
@@ -651,14 +706,12 @@ impl<S: GameState> MCTS<S> {
                     }
                 }
 
-                self.run_simulation(state);
+                self.run_simulation(state, &stop_searching);
                 completed_iterations.fetch_add(1, Ordering::Relaxed);
 
-                if let Some(t) = timeout {
-                    if start_time.elapsed() >= t {
-                        stop_searching.store(true, Ordering::Relaxed);
-                        return Err(()); // Stop this thread and signal others
-                    }
+                // Check stop flag again after simulation (set by timeout monitor)
+                if stop_searching.load(Ordering::Relaxed) {
+                    return Err(());
                 }
 
                 if let Some(interval) = stats_interval {
@@ -672,6 +725,52 @@ impl<S: GameState> MCTS<S> {
                 Ok(())
             });
         });
+
+        // Clean up timeout monitor thread and measure actual overhead (optimized frequency)
+        if let Some(handle) = timeout_monitor_handle {
+            stop_searching.store(true, Ordering::Relaxed);
+            let cleanup_start = Instant::now();
+            let _ = handle.join(); // Wait for timeout monitor to finish
+            let cleanup_duration = cleanup_start.elapsed();
+            
+            // Only measure overhead every 8 searches to reduce performance impact
+            let searches_count = self.searches_since_measurement.fetch_add(1, Ordering::Relaxed);
+            let should_measure = searches_count % 8 == 0;
+            
+            if should_measure {
+                // Update overhead estimation with actual measured overhead
+                if let Some(timeout) = timeout {
+                    let total_elapsed = start_time.elapsed();
+                    let expected_duration = timeout;
+                    if total_elapsed > expected_duration {
+                        let actual_overhead_ms = (total_elapsed - expected_duration).as_millis() as f64;
+                        
+                        // Only update if the deviation is significant (>10ms difference from estimate)
+                        let current_estimate = {
+                            let overhead = self.timeout_overhead_ms.lock();
+                            *overhead
+                        };
+                        
+                        if (actual_overhead_ms - current_estimate).abs() > 10.0 {
+                            self.update_overhead_estimate(actual_overhead_ms);
+                        }
+                    } else {
+                        // Even if we finished early, record the cleanup time as minimum overhead
+                        let cleanup_overhead_ms = cleanup_duration.as_millis() as f64;
+                        
+                        // Only update if cleanup time suggests we need a higher minimum
+                        let current_estimate = {
+                            let overhead = self.timeout_overhead_ms.lock();
+                            *overhead
+                        };
+                        
+                        if cleanup_overhead_ms > current_estimate {
+                            self.update_overhead_estimate(cleanup_overhead_ms);
+                        }
+                    }
+                }
+            }
+        }
 
         // After all simulations, the best move is the one most visited.
         let children = self.root.children.read();
@@ -751,7 +850,7 @@ impl<S: GameState> MCTS<S> {
                     return Err(()); // Stop this thread
                 }
 
-                self.run_simulation(state);
+                self.run_simulation(state, &stop_searching);
                 completed_iterations.fetch_add(1, Ordering::Relaxed);
 
                 if let Some(t) = timeout {
@@ -815,10 +914,13 @@ impl<S: GameState> MCTS<S> {
         // Ensure root node is fully expanded before starting parallel search
         self.ensure_root_expanded(state);
 
-        let run_iterations = |this: &MCTS<S>, iters: i32| {
+        let stop_searching = Arc::new(AtomicBool::new(false));
+        let run_iterations = |this: &MCTS<S>, iters: i32, stop_flag: &Arc<AtomicBool>| {
             this.pool.install(|| {
                 (0..iters).into_par_iter().for_each(|_| {
-                    this.run_simulation(state);
+                    if !stop_flag.load(Ordering::Relaxed) {
+                        this.run_simulation(state, stop_flag);
+                    }
                 });
             });
         };
@@ -829,18 +931,18 @@ impl<S: GameState> MCTS<S> {
             let remainder = iterations % prune_interval;
             
             for _ in 0..chunks {
-                run_iterations(self, prune_interval);
+                run_iterations(self, prune_interval, &stop_searching);
                 // Prune after each chunk
                 self.auto_prune();
             }
             
             // Run remaining iterations
             if remainder > 0 {
-                run_iterations(self, remainder);
+                run_iterations(self, remainder, &stop_searching);
             }
         } else {
             // Run all iterations at once
-            run_iterations(self, iterations);
+            run_iterations(self, iterations, &stop_searching);
         }
 
         // Don't do final pruning here - let it be done explicitly after statistics are displayed
@@ -876,6 +978,25 @@ impl<S: GameState> MCTS<S> {
         (best_move, stats)
     }
 
+    /// Gets the current estimated timeout overhead in milliseconds
+    /// 
+    /// This is useful for debugging and monitoring the adaptive overhead estimation.
+    /// 
+    /// # Returns
+    /// The current estimated overhead in milliseconds
+    pub fn get_timeout_overhead_estimate(&self) -> f64 {
+        let overhead = self.timeout_overhead_ms.lock();
+        *overhead
+    }
+
+    /// Gets the number of overhead measurements taken so far
+    /// 
+    /// # Returns
+    /// The number of measurements used to calculate the current estimate
+    pub fn get_overhead_measurement_count(&self) -> i32 {
+        self.timeout_measurements.load(Ordering::Relaxed)
+    }
+
     /// Runs a single MCTS simulation with virtual loss support.
     /// 
     /// This is the core of the MCTS algorithm. It performs:
@@ -889,7 +1010,13 @@ impl<S: GameState> MCTS<S> {
     /// 
     /// # Arguments
     /// * `state` - The current game state to simulate from
-    fn run_simulation(&self, state: &S) {
+    /// * `stop_flag` - Flag to check for early termination
+    fn run_simulation(&self, state: &S, stop_flag: &AtomicBool) {
+        // Early exit if stop flag is already set
+        if stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
+        
         let mut current_state = state.clone();
         let mut path: Vec<Arc<Node<S::Move>>> = Vec::with_capacity(64); // Pre-allocate reasonable capacity
         let mut path_players: Vec<i32> = Vec::with_capacity(64); // Track which player made each move
@@ -905,6 +1032,11 @@ impl<S: GameState> MCTS<S> {
         // --- Selection Phase with Virtual Loss ---
         // Traverse the tree until a leaf node is reached.
         loop {
+            // Check stop flag during selection phase
+            if stop_flag.load(Ordering::Relaxed) {
+                return;
+            }
+            
             let children_guard = current_node.children.read();
             if children_guard.is_empty() || current_state.is_terminal() {
                 drop(children_guard);
@@ -989,6 +1121,11 @@ impl<S: GameState> MCTS<S> {
         // 3. Visit count (more visited nodes are more likely to expand)
         // Special case: Always expand the root node to ensure the search can find moves
         if !current_state.is_terminal() {
+            // Check stop flag before expansion
+            if stop_flag.load(Ordering::Relaxed) {
+                return;
+            }
+            
             let should_expand = {
                 let current_nodes = self.node_count.load(Ordering::Relaxed) as usize;
                 let tree_capacity_available = current_nodes < self.max_nodes;
@@ -1061,7 +1198,21 @@ impl<S: GameState> MCTS<S> {
         let mut simulation_moves = 0;
         const MAX_SIMULATION_MOVES: usize = 1000; // Safeguard against infinite loops
         
+        // Track timing for intelligent stop flag checking
+        let sim_phase_start = std::time::Instant::now();
+        let mut last_stop_check = sim_phase_start;
+        const STOP_CHECK_INTERVAL_MS: u64 = 5; // Check every 5ms
+        
         while !sim_state.is_terminal() && simulation_moves < MAX_SIMULATION_MOVES {
+            // Intelligent stop flag checking: only check periodically based on time, not move count
+            let now = std::time::Instant::now();
+            if now.duration_since(last_stop_check).as_millis() >= STOP_CHECK_INTERVAL_MS as u128 {
+                if stop_flag.load(Ordering::Relaxed) {
+                    break; // Exit simulation early if stop flag is set
+                }
+                last_stop_check = now;
+            }
+            
             moves_cache.clear();
             moves_cache.extend(sim_state.get_possible_moves());
             if moves_cache.is_empty() {
@@ -1094,6 +1245,19 @@ impl<S: GameState> MCTS<S> {
         // Update the visit counts and win statistics for all nodes in the path.
         // Also remove virtual losses that were applied during selection.
         // For multi-player games, reward each node based on whether the player who made that move won
+        
+        // Check stop flag before backpropagation
+        if stop_flag.load(Ordering::Relaxed) {
+            // Even if we're stopping, we need to remove virtual losses to keep the tree consistent
+            // But we can skip the actual visit/win updates
+            for (i, (node, _)) in path.iter().zip(path_players.iter()).rev().enumerate() {
+                if i < path.len() - 1 {
+                    node.remove_virtual_loss();
+                }
+            }
+            return;
+        }
+        
         for (i, (node, &player_who_moved)) in path.iter().zip(path_players.iter()).rev().enumerate() {
             // Remove virtual loss from all nodes except the last one (the leaf/terminal node)
             // which didn't have virtual loss applied during selection
@@ -1108,6 +1272,31 @@ impl<S: GameState> MCTS<S> {
                 None => 1,                             // Draw
             };
             node.wins.fetch_add(reward, Ordering::Relaxed);
+        }
+    }
+
+    /// Updates the running average of timeout overhead based on actual measurements
+    /// 
+    /// Uses an exponential moving average to adapt to changing system conditions
+    /// while giving more weight to recent measurements. This method is now called
+    /// less frequently (every ~8 searches) to reduce performance overhead.
+    /// 
+    /// # Arguments
+    /// * `measured_overhead_ms` - The measured overhead in milliseconds
+    fn update_overhead_estimate(&self, measured_overhead_ms: f64) {
+        // Clamp the measured overhead to reasonable bounds to avoid outliers
+        let clamped_overhead = measured_overhead_ms.max(5.0).min(1000.0);
+        
+        let mut current_avg = self.timeout_overhead_ms.lock();
+        let measurements = self.timeout_measurements.fetch_add(1, Ordering::Relaxed);
+        
+        if measurements == 0 {
+            // First measurement, just use it directly
+            *current_avg = clamped_overhead;
+        } else {
+            // Use exponential moving average with alpha = 0.15 (15% weight to new measurement)
+            // Slightly higher alpha since we measure less frequently now
+            *current_avg = 0.85 * (*current_avg) + 0.15 * clamped_overhead;
         }
     }
 
@@ -1243,5 +1432,149 @@ impl<S: GameState> MCTS<S> {
             }
         }
         None
+    }
+}
+
+/// ## Optimized Overhead Estimation
+/// 
+/// The MCTS engine uses a dynamic, runtime-estimated buffer to account for thread
+/// coordination overhead when setting timeouts. This optimization reduces the 
+/// performance impact of overhead measurements while maintaining accuracy:
+/// 
+/// - **Reduced Frequency**: Measurements are taken every 8 searches instead of every search
+/// - **Significance Threshold**: Only updates the estimate if the deviation is >10ms
+/// - **Outlier Protection**: Clamps measured values between 5ms and 1000ms
+/// - **Adaptive Alpha**: Uses 15% weight for new measurements (vs 10% before) since we measure less often
+/// - **Selective Updates**: Only updates minimum overhead estimate if cleanup time exceeds current estimate
+/// 
+/// This approach reduces overhead measurement costs by ~87% while maintaining reasonable
+/// accuracy for timeout estimation under varying system loads.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Simple test game state for testing
+    #[derive(Clone, Debug, PartialEq)]
+    struct TestGame {
+        board: Vec<Vec<i32>>,
+        current_player: i32,
+        moves_made: usize,
+        last_move: Option<Vec<(usize, usize)>>,
+    }
+
+    impl TestGame {
+        fn new() -> Self {
+            TestGame {
+                board: vec![vec![0; 3]; 3], // 3x3 board
+                current_player: 1,
+                moves_made: 0,
+                last_move: None,
+            }
+        }
+    }
+
+    impl GameState for TestGame {
+        type Move = (usize, usize);
+
+        fn get_board(&self) -> &Vec<Vec<i32>> {
+            &self.board
+        }
+
+        fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
+            self.last_move.clone()
+        }
+
+        fn get_num_players(&self) -> i32 {
+            2
+        }
+
+        fn get_possible_moves(&self) -> Vec<Self::Move> {
+            if self.is_terminal() {
+                return vec![];
+            }
+            
+            let mut moves = Vec::new();
+            for i in 0..3 {
+                for j in 0..3 {
+                    if self.board[i][j] == 0 {
+                        moves.push((i, j));
+                    }
+                }
+            }
+            moves
+        }
+
+        fn make_move(&mut self, mv: &Self::Move) {
+            let (row, col) = *mv;
+            self.board[row][col] = self.current_player;
+            self.last_move = Some(vec![*mv]);
+            self.current_player = if self.current_player == 1 { 2 } else { 1 };
+            self.moves_made += 1;
+        }
+
+        fn is_terminal(&self) -> bool {
+            self.get_winner().is_some() || self.moves_made >= 9
+        }
+
+        fn get_winner(&self) -> Option<i32> {
+            // Check rows, columns, and diagonals for winner
+            for i in 0..3 {
+                if self.board[i][0] != 0 && self.board[i][0] == self.board[i][1] && self.board[i][1] == self.board[i][2] {
+                    return Some(self.board[i][0]);
+                }
+                if self.board[0][i] != 0 && self.board[0][i] == self.board[1][i] && self.board[1][i] == self.board[2][i] {
+                    return Some(self.board[0][i]);
+                }
+            }
+            // Diagonals
+            if self.board[0][0] != 0 && self.board[0][0] == self.board[1][1] && self.board[1][1] == self.board[2][2] {
+                return Some(self.board[0][0]);
+            }
+            if self.board[0][2] != 0 && self.board[0][2] == self.board[1][1] && self.board[1][1] == self.board[2][0] {
+                return Some(self.board[0][2]);
+            }
+            None
+        }
+
+        fn get_current_player(&self) -> i32 {
+            self.current_player
+        }
+    }
+
+    #[test]
+    fn test_overhead_estimation_optimization() {
+        let mut mcts = MCTS::<TestGame>::new(1.4, 1, 1000);
+        let game = TestGame::new();
+        
+        // Verify initial overhead estimate
+        let initial_estimate = mcts.get_timeout_overhead_estimate();
+        assert_eq!(initial_estimate, 50.0); // Should start with 50ms
+        
+        // Verify initial measurement count
+        let initial_count = mcts.get_overhead_measurement_count();
+        assert_eq!(initial_count, 0);
+        
+        // Run multiple searches with timeout to potentially trigger overhead measurement
+        // The timeout and measurement triggering depends on actual timing
+        for _i in 0..16 {
+            // Use a short timeout and many iterations to likely trigger the timeout
+            let _ = mcts.search(&game, 100000, 1, 1); // 1 second timeout with many iterations
+        }
+        
+        // Check the results - the optimization should limit measurements
+        let final_count = mcts.get_overhead_measurement_count();
+        let final_estimate = mcts.get_timeout_overhead_estimate();
+        
+        // Verify that the estimate is within reasonable bounds
+        assert!(final_estimate >= 5.0 && final_estimate <= 1000.0, 
+               "Estimate should be within reasonable bounds, got {}", final_estimate);
+        
+        // The measurement frequency should be limited by our optimization
+        // We did 16 searches, so at most we should see 2-3 measurements (every 8th search)
+        println!("Final measurement count: {}, Final estimate: {}ms", final_count, final_estimate);
+        
+        // Test the frequency optimization - measurements should be less frequent than searches
+        assert!(final_count <= 4, "Should not measure overhead too frequently, got {} measurements for 16 searches", final_count);
     }
 }
