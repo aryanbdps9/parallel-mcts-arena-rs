@@ -234,26 +234,42 @@ fn draw_game_view(f: &mut Frame, app: &App, area: Rect) {
 /// * `app` - Application state containing layout and game data
 /// * `area` - Screen area to render within
 fn draw_standard_game_view(f: &mut Frame, app: &App, area: Rect) {
-    // Use the layout config to get the main areas
-    let (board_area, bottom_area) = app.layout_config.get_main_layout(area);
-
-    // Split the bottom area into instructions and stats/history
+    // Get board dimensions for dynamic layout
+    let board = app.game_wrapper.get_board();
+    let board_height = board.len();
+    let board_width = if board_height > 0 { board[0].len() } else { 0 };
+    
+    // Determine game type string for layout calculations
+    let game_type = match &app.game_wrapper {
+        GameWrapper::Connect4(_) => "connect4",
+        GameWrapper::Othello(_) => "othello", 
+        GameWrapper::Gomoku(_) => "gomoku",
+        GameWrapper::Blokus(_) => "blokus", // shouldn't happen in this function
+    };
+    
+    // Use the dynamic layout that responds to actual board size
+    let (board_area, bottom_area) = app.layout_config.get_main_layout_dynamic(area, board_height, board_width, game_type);
+    
+    // Split the bottom area to have game info directly under board and maximize debug space
     let bottom_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([
+            Constraint::Length(8),  // Game info area (minimum height for all elements: ~6 lines + 2 for borders)
+            Constraint::Min(10),    // Debug/History area (maximize remaining space)
+        ])
         .split(bottom_area);
 
-    let instructions_area = bottom_chunks[0];
-    let stats_area = bottom_chunks[1];
+    let game_info_area = bottom_chunks[0];
+    let debug_area = bottom_chunks[1];
 
     // Draw the game board
     draw_board(f, app, board_area);
     
-    // Draw game info/instructions
-    draw_game_info(f, app, instructions_area);
+    // Draw game info/instructions 
+    draw_game_info(f, app, game_info_area);
     
     // Draw the combined stats and history pane with tabs
-    draw_stats_history_tabs(f, app, stats_area);
+    draw_stats_history_tabs(f, app, debug_area);
 }
 
 /// Renders the specialized Blokus game view
@@ -956,7 +972,7 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
     // Draw column labels with cursor for Connect4
     let col_start_idx = if needs_row_labels { 1 } else { 0 };
     for c in 0..board_width {
-        let col_letter = char::from(b'A' + (c as u8));
+        let col_number = (c + 1).to_string(); // Column numbers start from 1
         let is_cursor_col = matches!(app.game_wrapper, GameWrapper::Connect4(_)) && 
                            (c as u16) == app.board_cursor.1 && 
                            !app.is_current_player_ai();
@@ -967,7 +983,7 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
         };
         
-        let paragraph = Paragraph::new(col_letter.to_string())
+        let paragraph = Paragraph::new(col_number)
             .style(style)
             .alignment(Alignment::Center);
         f.render_widget(paragraph, col_label_area[col_start_idx + c]);

@@ -143,7 +143,8 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
             handle_tab_click(app, col, row, terminal_size);
         }
         AppMode::PlayerConfig => {
-            // Player configuration clicks handled in the event loop
+            // Handle clicks on player configuration menu items
+            handle_player_config_click(app, col, row, terminal_size);
         }
     }
 }
@@ -546,13 +547,6 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
         let pieces = crate::games::blokus::get_blokus_pieces(); // TODO: Cache this as get_blokus_pieces() is expensive
 
         // For debugging: log the click information
-        #[cfg(debug_assertions)]
-        eprintln!("=== CLICK DEBUG: visual_row={}, scroll_offset={}, absolute_row={}, col={} ===", 
-                  row, scroll_offset, absolute_row, col);
-        
-        #[cfg(debug_assertions)]
-        eprintln!("CLICK TYPE TEST: Testing what type of area this click is in...");
-        
         // SIMPLIFIED APPROACH: Only handle clicks for the current player accurately
         // For other players, just handle expand/collapse clicks
         let mut content_row = 0u16;
@@ -563,15 +557,8 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
             let is_current = player == current_player;
             let is_expanded = app.blokus_ui_config.players_expanded.get((player - 1) as usize).unwrap_or(&true);
             
-            #[cfg(debug_assertions)]
-            eprintln!("DEBUG Player {}: content_row={}, is_current={}, is_expanded={}", 
-                      player, content_row, is_current, is_expanded);
-            
             // Player header line
             if absolute_row == content_row {
-                #[cfg(debug_assertions)]
-                eprintln!("DEBUG: Click on player {} header", player);
-                
                 // Check if clicking on expand/collapse area (first few columns)
                 if col <= 2 {
                     app.blokus_ui_config.toggle_player_expand((player - 1) as usize);
@@ -589,9 +576,6 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
                     
                     // Process the current player's piece grid with exact rendering logic
                     // This function handles separators and invalid clicks correctly
-                    #[cfg(debug_assertions)]
-                    eprintln!("DEBUG: Calling try_select_piece_in_current_player_grid with area_width={}", area_width);
-                    
                     match try_select_piece_in_current_player_grid(
                         absolute_row, col, &mut content_row, pieces_per_row,
                         total_pieces_to_show, &pieces, &available_set, area_width
@@ -643,13 +627,8 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
                         }
                     }
                     
-                    #[cfg(debug_assertions)]
-                    eprintln!("DEBUG: Other player {} simulated content rows: {}", player, other_player_content_rows);
-                    
                     // Check if click is within this player's content area
                     if absolute_row >= content_row && absolute_row < content_row + other_player_content_rows {
-                        #[cfg(debug_assertions)]
-                        eprintln!("DEBUG: Click consumed by other player {} content", player);
                         return;
                     }
                     
@@ -658,8 +637,6 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
             } else {
                 // Collapsed player - just the summary line
                 if absolute_row == content_row {
-                    #[cfg(debug_assertions)]
-                    eprintln!("DEBUG: Click on collapsed player {} summary", player);
                     return;
                 }
                 content_row += 1;
@@ -670,9 +647,6 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
                 content_row += 1;
             }
         }
-        
-        #[cfg(debug_assertions)]
-        eprintln!("DEBUG: Click not handled - absolute_row={}", absolute_row);
     }
 }
 
@@ -694,10 +668,6 @@ fn try_select_piece_in_current_player_grid(
     available_set: &std::collections::HashSet<usize>,
     area_width: u16,
 ) -> Option<usize> {
-    #[cfg(debug_assertions)]
-    eprintln!("DEBUG: try_select_piece_in_current_player_grid called with absolute_row={}, col={}, pieces_per_row={}, total_pieces_to_show={}, area_width={}", 
-              absolute_row, col, pieces_per_row, total_pieces_to_show, area_width);
-              
     // Top border line
     if total_pieces_to_show > 0 {
         if absolute_row == *content_row {
@@ -722,24 +692,9 @@ fn try_select_piece_in_current_player_grid(
     
     // The grid content starts after padding + left border
     let grid_content_start_col = padding + 1;
-    
-    #[cfg(debug_assertions)]
-    eprintln!("DEBUG: Grid params - piece_width={}, content_width={}, padding={}, grid_start={}", 
-              piece_width, content_width, padding, grid_content_start_col);
-    
-    #[cfg(debug_assertions)]
-    eprintln!("DEBUG: Click at absolute_row={}, col={}", absolute_row, col);
-    
-    #[cfg(debug_assertions)]
-    eprintln!("DEBUG: Starting chunk processing for {} pieces", total_pieces_to_show);
-    
     // Process each row of pieces using direct coordinate mapping
     for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
         let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
-        
-        #[cfg(debug_assertions)]
-        eprintln!("DEBUG: Processing chunk {}-{}, current content_row={}", 
-                  chunk_start, chunk_end-1, *content_row);
         
         // Calculate max height for this chunk - MUST match the rendering logic exactly
         let mut pieces_in_row_visual_lines = Vec::new();
@@ -757,15 +712,6 @@ fn try_select_piece_in_current_player_grid(
             .max()
             .unwrap_or(1);
         
-        #[cfg(debug_assertions)]
-        eprintln!("DEBUG: Calculated max_height={} for chunk {}-{}, visual_lines_count={}", 
-                  max_height, chunk_start, chunk_end-1, pieces_in_row_visual_lines.len());
-        
-        #[cfg(debug_assertions)]
-        for (i, lines) in pieces_in_row_visual_lines.iter().enumerate() {
-            eprintln!("DEBUG: Piece {} has {} visual lines", chunk_start + i, lines.len());
-        }
-        
         // Calculate the row ranges for this chunk
         let chunk_start_row = *content_row;
         // Each chunk has: 1 name line + max_height shape lines + 1 separator line (if not last chunk)
@@ -778,28 +724,14 @@ fn try_select_piece_in_current_player_grid(
         let clickable_start_row = chunk_start_row;
         let clickable_end_row = chunk_start_row + (1 + max_height + 1) as u16; // name + shape + 1 extra
         
-        #[cfg(debug_assertions)]
-        eprintln!("DEBUG: Chunk rows {}-{} (total: {}), clickable: {}-{}, has_separator={}", 
-                  chunk_start_row, chunk_end_row-1, chunk_total_rows, 
-                  clickable_start_row, clickable_end_row-1, has_separator);
-        
         // Check if click is within this chunk's expanded clickable area
         if absolute_row >= clickable_start_row && absolute_row < clickable_end_row {
-            #[cfg(debug_assertions)]
-            eprintln!("DEBUG: Click is within chunk row range - processing column detection");
-            
             // Click is within this chunk - check column position
             if col >= grid_content_start_col as u16 && col < (grid_content_start_col + content_width) as u16 {
                 let grid_col = col - grid_content_start_col as u16;
                 
-                #[cfg(debug_assertions)]
-                eprintln!("DEBUG: Click is within grid column range - grid_col={}, content_width={}", grid_col, content_width);
-                
                 // Calculate which piece column this click corresponds to
                 let pieces_in_chunk = chunk_end - chunk_start;
-                
-                #[cfg(debug_assertions)]
-                eprintln!("DEBUG: Processing {} pieces in chunk", pieces_in_chunk);
                 
                 // Use the exact same layout as the rendering:
                 // Each piece takes piece_width characters, followed by separator_width
@@ -811,52 +743,28 @@ fn try_select_piece_in_current_player_grid(
                     let piece_start_col = piece_col * (piece_width + separator_width);
                     let piece_end_col = piece_start_col + piece_width;
                     
-                    #[cfg(debug_assertions)]
-                    eprintln!("DEBUG: Piece {} range: {}-{}, grid_col={}", 
-                              piece_col, piece_start_col, piece_end_col-1, grid_col);
-                    
                     // Check if click is within this piece's column range
                     if grid_col >= piece_start_col as u16 && grid_col < piece_end_col as u16 {
                         let piece_idx = chunk_start + piece_col;
                         
-                        #[cfg(debug_assertions)]
-                        eprintln!("DEBUG: Hit piece {} (available: {})", 
-                                  piece_idx, available_set.contains(&piece_idx));
-                        
                         if available_set.contains(&piece_idx) {
-                            #[cfg(debug_assertions)]
-                            eprintln!("DEBUG: Returning Some({})", piece_idx);
                             return Some(piece_idx);
                         } else {
                             // Piece exists but not available
-                            #[cfg(debug_assertions)]
-                            eprintln!("DEBUG: Piece {} not available, returning None", piece_idx);
                             return None;
                         }
                     }
                 }
                 
-                #[cfg(debug_assertions)]
-                eprintln!("DEBUG: Click on vertical separator within chunk - not selecting anything");
                 // Click was within the grid but on a vertical separator - return None
                 return None;
             }
             // Click was in chunk row range but outside the grid - return None
-            #[cfg(debug_assertions)]
-            eprintln!("DEBUG: Click outside grid area within chunk - col={}, valid range {}-{}", 
-                      col, grid_content_start_col, grid_content_start_col + content_width);
             return None;
-        } else {
-            #[cfg(debug_assertions)]
-            eprintln!("DEBUG: Click NOT within expanded clickable area - absolute_row={}, clickable range {}-{}", 
-                      absolute_row, clickable_start_row, clickable_end_row-1);
         }
         
         // Update content_row to after this chunk (including separator if present)
         *content_row = chunk_end_row;
-        
-        #[cfg(debug_assertions)]
-        eprintln!("DEBUG: Updated content_row to {} after chunk", *content_row);
     }
     
     // Bottom border
@@ -1032,4 +940,30 @@ fn handle_tab_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) -> b
     }
     
     false
+}
+
+/// Handle player configuration menu clicks
+fn handle_player_config_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
+    let (board_area, _) = app.layout_config.get_main_layout(terminal_size);
+    
+    // Check if click is within the player config area
+    if row < board_area.height {
+        let player_config_area_start = 1; // Top border
+        if row >= player_config_area_start {
+            let clicked_index = (row - player_config_area_start) as usize;
+            let total_options = app.player_options.len() + 1; // +1 for "Start Game"
+            
+            if clicked_index < total_options {
+                app.selected_player_config_index = clicked_index;
+                
+                // If clicked on a player option, cycle the player type
+                if clicked_index < app.player_options.len() {
+                    app.cycle_player_type();
+                } else {
+                    // Clicked on "Start Game"
+                    app.confirm_player_config();
+                }
+            }
+        }
+    }
 }

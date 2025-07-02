@@ -58,9 +58,9 @@ fn handle_game_selection_input(key_code: KeyCode, app: &mut App) {
         KeyCode::Enter => {
             if let Some(selected) = app.game_selection_state.selected() {
                 if selected < app.games.len() {
-                    // Selected a game - initialize it and go to player config
-                    let factory = &app.games[selected].1;
-                    app.game_wrapper = factory();
+                    // Selected a game - initialize it with current settings and go to player config
+                    let game_name = app.games[selected].0;
+                    app.game_wrapper = app.create_game_with_current_settings(game_name);
                     app.game_status = crate::app::GameStatus::InProgress;
                     app.last_search_stats = None;
                     app.move_history.clear();
@@ -115,9 +115,15 @@ fn handle_settings_input(key_code: KeyCode, app: &mut App) {
         KeyCode::Enter => {
             if app.selected_settings_index == 11 { // "Back" option (10 settings + separator + back = index 11)
                 app.mode = AppMode::GameSelection;
+                // Auto-recreate game with new settings if we're currently in a game
+                app.apply_settings_to_current_game();
             }
         }
-        KeyCode::Esc => app.mode = AppMode::GameSelection,
+        KeyCode::Esc => {
+            app.mode = AppMode::GameSelection;
+            // Auto-recreate game with new settings if we're currently in a game
+            app.apply_settings_to_current_game();
+        }
         _ => {}
     }
 }

@@ -498,6 +498,57 @@ impl App {
         }
     }
 
+    /// Creates a game instance using current settings values
+    /// 
+    /// This ensures that when games are started from the menu, they use the
+    /// updated settings rather than the original command-line parameters.
+    /// 
+    /// # Arguments
+    /// * `game_name` - Name of the game to create
+    /// 
+    /// # Returns
+    /// GameWrapper instance configured with current settings
+    pub fn create_game_with_current_settings(&self, game_name: &str) -> GameWrapper {
+        match game_name {
+            "gomoku" => {
+                GameWrapper::Gomoku(crate::games::gomoku::GomokuState::new(
+                    self.settings_board_size, 
+                    self.settings_line_size,
+                ))
+            }
+            "connect4" => {
+                // For Connect4, board_size becomes width, and height is derived
+                let width = self.settings_board_size;
+                let height = (self.settings_board_size.saturating_sub(1)).max(4); // Height is usually width - 1, min 4
+                GameWrapper::Connect4(crate::games::connect4::Connect4State::new(
+                    width,
+                    height,
+                    self.settings_line_size,
+                ))
+            }
+            "othello" => {
+                // Ensure even number for Othello
+                let board_size = if self.settings_board_size % 2 == 0 { 
+                    self.settings_board_size 
+                } else { 
+                    self.settings_board_size + 1 
+                };
+                GameWrapper::Othello(crate::games::othello::OthelloState::new(board_size))
+            }
+            "blokus" => {
+                // Blokus doesn't use settings for board size (it's always 20x20)
+                GameWrapper::Blokus(crate::games::blokus::BlokusState::new())
+            }
+            _ => {
+                // Default to Gomoku
+                GameWrapper::Gomoku(crate::games::gomoku::GomokuState::new(
+                    self.settings_board_size, 
+                    self.settings_line_size,
+                ))
+            }
+        }
+    }
+
     /// Updates the application state for one frame
     /// 
     /// This is the main update loop that handles:
@@ -610,8 +661,9 @@ impl App {
     pub fn start_game(&mut self) {
         if let Some(selected) = self.game_selection_state.selected() {
             if selected < self.games.len() {
-                let factory = &self.games[selected].1;
-                self.game_wrapper = factory();
+                // Create game using current settings instead of old factory
+                let game_name = self.games[selected].0;
+                self.game_wrapper = self.create_game_with_current_settings(game_name);
                 self.game_status = GameStatus::InProgress;
                 self.last_search_stats = None;
                 self.move_history.clear();
@@ -724,8 +776,9 @@ impl App {
         // Get the currently selected game and reset its state without changing player config
         if let Some(selected) = self.game_selection_state.selected() {
             if selected < self.games.len() {
-                let factory = &self.games[selected].1;
-                self.game_wrapper = factory();
+                // Create game using current settings instead of old factory
+                let game_name = self.games[selected].0;
+                self.game_wrapper = self.create_game_with_current_settings(game_name);
                 self.game_status = GameStatus::InProgress;
                 self.last_search_stats = None;
                 self.move_history.clear();
@@ -890,8 +943,68 @@ impl App {
         );
     }
 
-    // Debug and history scrolling methods
-    
+    /// Apply current settings to the active game
+    /// 
+    /// Recreates the current game using updated settings if we're currently in a game.
+    /// This ensures that settings changes take effect immediately without requiring manual reset.
+    pub fn apply_settings_to_current_game(&mut self) {
+        // Only recreate game if we're currently in game mode (not in menus)
+        if matches!(self.mode, AppMode::InGame | AppMode::GameOver) {
+            if let Some(selected) = self.game_selection_state.selected() {
+                if selected < self.games.len() {
+                    let game_name = self.games[selected].0;
+                    
+                    // Store the current game state
+                    let was_in_progress = self.game_status == GameStatus::InProgress;
+                    
+                    // Recreate the game with current settings
+                    self.game_wrapper = self.create_game_with_current_settings(game_name);
+                    
+                    // Reset game state
+                    self.game_status = GameStatus::InProgress;
+                    self.last_search_stats = None;
+                    self.move_history.clear();
+                    
+                    // Reset cursor position based on new game type
+                    let (initial_row, initial_col) = match &self.game_wrapper {
+                        GameWrapper::Gomoku(_) => {
+                            let board = self.game_wrapper.get_board();
+                            let size = board.len();
+                            (size / 2, size / 2)
+                        }
+                        GameWrapper::Connect4(_) => {
+                            let board = self.game_wrapper.get_board();
+                            let width = if !board.is_empty() { board[0].len() } else { 7 };
+                            (0, width / 2)
+                        }
+                        GameWrapper::Othello(_) => {
+                            let board = self.game_wrapper.get_board();
+                            let size = board.len();
+                            (size / 2 - 1, size / 2 - 1)
+                        }
+                        GameWrapper::Blokus(_) => (10, 10), // Center of Blokus board
+                    };
+                    
+                    self.board_cursor = (initial_row as u16, initial_col as u16);
+                    
+                    // Clear any game-specific selections
+                    if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
+                        self.blokus_ui_config.selected_piece_idx = None;
+                        self.blokus_ui_config.selected_transformation_idx = 0;
+                    }
+                    
+                    // Recreate AI worker to ensure fresh state
+                    self.recreate_ai_worker();
+                    
+                    // If we were in game mode, stay in game mode; if game over, go back to game
+                    if was_in_progress || self.mode == AppMode::GameOver {
+                        self.mode = AppMode::InGame;
+                    }
+                }
+            }
+        }
+    }
+
     /// Scrolls the debug panel up by one line
     pub fn scroll_debug_up(&mut self) {
         self.debug_scroll = self.debug_scroll.saturating_sub(1);
