@@ -4,25 +4,53 @@ use ratatui::{
     layout::Rect,
     Frame,
 };
-use ratatui::text::{Line, Span};
 
 use crate::app::{App, AppMode, GameStatus, Player};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::games::{gomoku::GomokuMove, connect4::Connect4Move, othello::OthelloMove, blokus::BlokusMove};
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::{ComponentEvent, InputEvent};
+use crate::components::blokus::{
+    BlokusBoardComponent, BlokusPieceSelectorComponent, BlokusGameStatsComponent, 
+    BlokusInstructionPanelComponent
+};
 use crossterm::event::KeyCode;
 use mcts::GameState;
 
 /// Component for in-game view
 pub struct InGameComponent {
     id: ComponentId,
+    // Modular Blokus components
+    blokus_board: Option<BlokusBoardComponent>,
+    blokus_piece_selector: Option<BlokusPieceSelectorComponent>,
+    blokus_game_stats: Option<BlokusGameStatsComponent>,
+    blokus_instruction_panel: Option<BlokusInstructionPanelComponent>,
 }
 
 impl InGameComponent {
     pub fn new() -> Self {
         Self {
             id: ComponentId::new(),
+            blokus_board: None,
+            blokus_piece_selector: None,
+            blokus_game_stats: None,
+            blokus_instruction_panel: None,
+        }
+    }
+
+    /// Initialize Blokus components when needed
+    fn ensure_blokus_components(&mut self) {
+        if self.blokus_board.is_none() {
+            self.blokus_board = Some(BlokusBoardComponent::new());
+        }
+        if self.blokus_piece_selector.is_none() {
+            self.blokus_piece_selector = Some(BlokusPieceSelectorComponent::new());
+        }
+        if self.blokus_game_stats.is_none() {
+            self.blokus_game_stats = Some(BlokusGameStatsComponent::new());
+        }
+        if self.blokus_instruction_panel.is_none() {
+            self.blokus_instruction_panel = Some(BlokusInstructionPanelComponent::new());
         }
     }
 
@@ -154,25 +182,6 @@ impl InGameComponent {
                     self.update_connect4_cursor_row(app);
                 }
             }
-        }
-    }
-
-    /// Updates the Connect4 cursor to the lowest available position in the current column
-    fn update_connect4_cursor_row(&self, app: &mut App) {
-        let board = app.game_wrapper.get_board();
-        let board_height = board.len();
-        let col = app.board_cursor.1 as usize;
-        
-        if col < board[0].len() {
-            // Find the lowest empty row in this column
-            for r in (0..board_height).rev() {
-                if board[r][col] == 0 {
-                    app.board_cursor.0 = r as u16;
-                    return;
-                }
-            }
-            // If column is full, stay at the top
-            app.board_cursor.0 = 0;
         }
     }
 
@@ -391,54 +400,6 @@ impl InGameComponent {
             }
         }
         
-        Ok(())
-    }
-    
-    /// Render Blokus board (simplified version)
-    fn render_blokus_board(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
-        use ratatui::{
-            widgets::Paragraph,
-            style::{Style, Color},
-        };
-        
-        let board = app.game_wrapper.get_board();
-        let (cursor_row, cursor_col) = (app.board_cursor.0 as usize, app.board_cursor.1 as usize);
-        
-        // Create board representation
-        let mut lines = Vec::new();
-        
-        for (row_idx, row) in board.iter().enumerate() {
-            let mut spans = Vec::new();
-            for (col_idx, &cell) in row.iter().enumerate() {
-                let symbol = match cell {
-                    1 => "■",   // Player 1
-                    2 => "■",   // Player 2
-                    3 => "■",   // Player 3
-                    4 => "■",   // Player 4
-                    _ => "·",   // Empty
-                };
-                
-                let style = if row_idx == cursor_row && col_idx == cursor_col {
-                    Style::default().bg(Color::Yellow).fg(Color::Black)
-                } else {
-                    match cell {
-                        1 => Style::default().fg(Color::Red),
-                        2 => Style::default().fg(Color::Blue),
-                        3 => Style::default().fg(Color::Green),
-                        4 => Style::default().fg(Color::Cyan),
-                        _ => Style::default().fg(Color::DarkGray),
-                    }
-                };
-                
-                spans.push(Span::styled(format!("{}", symbol), style));
-            }
-            lines.push(Line::from(spans));
-        }
-        
-        let board_widget = Paragraph::new(lines)
-            .style(Style::default().fg(Color::White));
-            
-        frame.render_widget(board_widget, area);
         Ok(())
     }
     
@@ -802,10 +763,13 @@ impl InGameComponent {
     }
 
     /// Render the specialized Blokus game view with proper layout and panels
-    fn render_blokus_game_view(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
+    fn render_blokus_game_view(&mut self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
         use ratatui::{
             layout::{Constraint, Direction, Layout},
         };
+        
+        // Ensure Blokus components are initialized
+        self.ensure_blokus_components();
         
         // First split vertically to have the main game area and bottom info area  
         let vertical_chunks = Layout::default()
@@ -817,26 +781,17 @@ impl InGameComponent {
         let bottom_info_area = vertical_chunks[1];
 
         // Use Blokus-specific layout for the main game area
-        let (board_area, piece_area, player_area) = app.layout_config.get_blokus_layout(main_game_area);
+        let (board_area, piece_area, _player_area) = app.layout_config.get_blokus_layout(main_game_area);
 
-        // Draw the Blokus board with ghost pieces
-        if let GameWrapper::Blokus(state) = &app.game_wrapper {
-            // Get selected piece info from app state
-            let selected_piece = if let Some((piece_idx, transformation_idx)) = app.blokus_ui_config.get_selected_piece_info() {
-                Some((piece_idx, transformation_idx, app.board_cursor.0 as usize, app.board_cursor.1 as usize))
-            } else {
-                None
-            };
-            // Only show cursor for human turns
-            let show_cursor = self.is_current_player_human(app);
-            self.render_blokus_board_with_ghost(frame, board_area, app, state, selected_piece, show_cursor)?;
+        // Render the Blokus board using the modular component
+        if let Some(ref mut board_component) = self.blokus_board {
+            board_component.render(frame, board_area, app)?;
         }
 
-        // Draw piece selection panel
-        self.render_blokus_piece_selection(frame, piece_area, app)?;
-
-        // Draw player status panel
-        self.render_blokus_player_status(frame, player_area, app)?;
+        // Render piece selection panel using the modular component
+        if let Some(ref mut piece_selector) = self.blokus_piece_selector {
+            piece_selector.render(frame, piece_area, app)?;
+        }
 
         // Split the bottom area into instructions and stats/history
         let bottom_chunks = Layout::default()
@@ -847,11 +802,15 @@ impl InGameComponent {
         let instructions_area = bottom_chunks[0];
         let stats_area = bottom_chunks[1];
 
-        // Draw game info/instructions
-        self.render_game_info(frame, instructions_area, app)?;
+        // Render game instructions using the modular component
+        if let Some(ref mut instruction_panel) = self.blokus_instruction_panel {
+            instruction_panel.render(frame, instructions_area, app)?;
+        }
 
-        // Draw the combined stats and history pane with tabs
-        self.render_stats_history_tabs(frame, stats_area, app)?;
+        // Render the combined stats and history using the modular component
+        if let Some(ref mut game_stats) = self.blokus_game_stats {
+            game_stats.render(frame, stats_area, app)?;
+        }
 
         Ok(())
     }
@@ -922,23 +881,22 @@ impl InGameComponent {
                         ("▓▓", Style::default().fg(Color::Red).add_modifier(Modifier::DIM))
                     }
                 } else {
-                    match cell {
-                        1 => {
-                            let color = if is_last_move { Color::LightRed } else { Color::Red };
-                            ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
-                        }
-                        2 => {
-                            let color = if is_last_move { Color::LightBlue } else { Color::Blue };
-                            ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
-                        }
-                        3 => {
-                            let color = if is_last_move { Color::LightGreen } else { Color::Green };
-                            ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
-                        }
-                        4 => {
-                            let color = if is_last_move { Color::LightYellow } else { Color::Yellow };
-                            ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
-                        }
+                    match cell {                    1 => {
+                        let color = if is_last_move { Color::LightRed } else { Color::Red };
+                        ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                    }
+                    2 => {
+                        let color = if is_last_move { Color::LightBlue } else { Color::Blue };
+                        ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                    }
+                    3 => {
+                        let color = if is_last_move { Color::LightGreen } else { Color::Green };
+                        ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                    }
+                    4 => {
+                        let color = if is_last_move { Color::LightYellow } else { Color::Yellow };
+                        ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                    }
                         _ => {
                             // Chess-like pattern for empty squares - alternating light and dark
                             let is_light_square = (r + c) % 2 == 0;
@@ -995,27 +953,45 @@ impl InGameComponent {
 
     /// Render Blokus piece selection panel
     fn render_blokus_piece_selection(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
-        // For now, use a simplified version of the piece selection
-        // TODO: Implement full piece selection with visual pieces
         use ratatui::{
             widgets::{Block, Borders, Paragraph},
             style::{Style, Color, Modifier},
             text::{Line, Span},
+            layout::{Layout, Direction, Constraint},
         };
-        
-        let block = Block::default()
-            .title("Available Pieces (All Players)")
-            .borders(Borders::ALL);
-        let inner_area = block.inner(area);
-        frame.render_widget(block, area);
+        use std::collections::HashSet;
         
         if let GameWrapper::Blokus(blokus_state) = &app.game_wrapper {
+            // Calculate area for content and scrollbar
+            let chunks = if area.width > 5 {
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Min(0), Constraint::Length(1)])
+                    .split(area)
+            } else {
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(100)])
+                    .split(area)
+            };
+
+            let block = Block::default()
+                .title("Available Pieces (All Players)")
+                .borders(Borders::ALL);
+            frame.render_widget(block, area);
+
+            let inner_area = Layout::default()
+                .margin(1)
+                .constraints([Constraint::Min(0)])
+                .split(chunks[0])[0];
+
             let current_player = app.game_wrapper.get_current_player();
+            let pieces = crate::games::blokus::get_blokus_pieces();
             let player_colors = [Color::Red, Color::Blue, Color::Green, Color::Yellow];
             let player_names = ["P1", "P2", "P3", "P4"];
-            
+
             let mut all_lines = Vec::new();
-            
+
             // Generate content for all players
             for player in 1..=4 {
                 let available_pieces = blokus_state.get_available_pieces(player);
@@ -1023,7 +999,10 @@ impl InGameComponent {
                 let color = player_colors[(player - 1) as usize];
                 let is_current = player == current_player;
                 let is_expanded = app.blokus_ui_config.players_expanded.get((player - 1) as usize).unwrap_or(&true);
-                
+
+                // Convert available pieces to a set for quick lookup
+                let available_set: HashSet<usize> = available_pieces.iter().cloned().collect();
+
                 // Player header with expand/collapse indicator
                 let expand_indicator = if *is_expanded { "▼" } else { "▶" };
                 let header_style = if is_current {
@@ -1039,32 +1018,197 @@ impl InGameComponent {
                 };
                 
                 all_lines.push(Line::from(Span::styled(header_text, header_style)));
-                
-                // Show simplified piece list if expanded
-                if *is_expanded && is_current {
-                    let selected_piece = app.blokus_ui_config.selected_piece_idx;
-                    let pieces_info = available_pieces.iter().take(10).enumerate().map(|(i, &piece_idx)| {
-                        let key_label = if i < 9 { (i + 1).to_string() } else { "0".to_string() };
-                        let is_selected = selected_piece == Some(piece_idx);
-                        let piece_text = if is_selected {
-                            format!("[{}] Piece {}", key_label, piece_idx)
-                        } else {
-                            format!(" {}  Piece {}", key_label, piece_idx)
-                        };
-                        
-                        let style = if is_selected {
-                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
-                        } else {
-                            Style::default().fg(Color::White)
-                        };
-                        
-                        Line::from(Span::styled(piece_text, style))
-                    }).collect::<Vec<_>>();
+
+                // Show pieces for this player only if expanded
+                if *is_expanded {
+                    let pieces_per_row = 5;
+                    let visible_pieces = if is_current { 21 } else { 10 };
                     
-                    all_lines.extend(pieces_info);
+                    // Show all pieces (0-20), graying out unavailable ones
+                    let total_pieces_to_show = if is_current { 21 } else { visible_pieces.min(21) };
+                    
+                    // Add top border for the entire grid
+                    if is_current && total_pieces_to_show > 0 {
+                        let separator_width = 1; // Each separator is 1 character: │
+                        let content_width = pieces_per_row * 7 + (pieces_per_row - 1) * separator_width; // 7*5 + 4*1 = 39
+                        let total_grid_width = content_width + 2; // +2 for left and right borders
+                        let available_width = inner_area.width as usize;
+                        let padding = if available_width > total_grid_width { (available_width - total_grid_width) / 2 } else { 0 };
+                        
+                        let top_border = "┌".to_string() + &"─".repeat(content_width) + "┐";
+                        let padded_border = " ".repeat(padding) + &top_border;
+                        all_lines.push(Line::from(Span::styled(padded_border, Style::default().fg(Color::DarkGray))));
+                    }
+                    
+                    // Show pieces in rows
+                    for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
+                        let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
+                        
+                        let mut pieces_in_row = Vec::new();
+                        for display_idx in chunk_start..chunk_end {
+                            let piece_idx = display_idx; // Show pieces 0-20 in order
+                            let piece = &pieces[piece_idx];
+                            let is_available = available_set.contains(&piece_idx);
+                            let is_selected = is_current && app.blokus_ui_config.selected_piece_idx == Some(piece_idx);
+                            
+                            // Create piece shape representation
+                            let piece_shape = if !piece.transformations.is_empty() {
+                                &piece.transformations[0]
+                            } else {
+                                continue;
+                            };
+                            
+                            let key_label = if display_idx < 9 {
+                                (display_idx + 1).to_string()
+                            } else if display_idx == 9 {
+                                "0".to_string()
+                            } else {
+                                ((b'a' + (display_idx - 10) as u8) as char).to_string()
+                            };
+                            
+                            // Create visual shape for this piece
+                            let piece_visual_lines = self.create_visual_piece_shape(piece_shape);
+                            
+                            let piece_name_text = if is_selected {
+                                format!("[{}]", key_label)
+                            } else {
+                                format!(" {} ", key_label)
+                            };
+                            
+                            // Determine style based on availability and selection
+                            let style = if !is_available {
+                                // Grayed out for used pieces
+                                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                            } else if is_selected {
+                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
+                            } else if is_current {
+                                Style::default().fg(Color::White)
+                            } else {
+                                Style::default().fg(color)
+                            };
+                            
+                            pieces_in_row.push((piece_name_text, piece_visual_lines, style));
+                        }
+                        
+                        if !pieces_in_row.is_empty() {
+                            // Find max height and width for alignment
+                            let max_height = pieces_in_row.iter()
+                                .map(|(_, lines, _)| lines.len())
+                                .max()
+                                .unwrap_or(1);
+                            let piece_width = 7; // Increased from 6 to 7 for better centering of 3-char strings
+                            
+                            // First line: piece keys/names with subtle column highlighting
+                            let mut key_line_spans = Vec::new();
+                            
+                            // Calculate padding for centering - use FULL grid width for consistency
+                            let separator_width = 1; // Each separator is 1 character: │
+                            let content_width = pieces_per_row * piece_width + (pieces_per_row - 1) * separator_width; // total content width
+                            let total_grid_width = content_width + 2; // +2 for left and right borders
+                            let available_width = inner_area.width as usize;
+                            let padding = if available_width > total_grid_width { (available_width - total_grid_width) / 2 } else { 0 };
+                            
+                            // Add left padding and border
+                            let left_padding = " ".repeat(padding);
+                            key_line_spans.push(Span::styled(left_padding + "│", Style::default().fg(Color::DarkGray)));
+                            
+                            for (i, (piece_name, _, style)) in pieces_in_row.iter().enumerate() {
+                                let padded_name = format!("{:^width$}", piece_name, width = piece_width);
+                                key_line_spans.push(Span::styled(padded_name, *style));
+                                if i < pieces_per_row - 1 {
+                                    // Add visible column separator
+                                    key_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                                }
+                            }
+                            
+                            // Fill remaining columns with empty cells if row is incomplete
+                            for i in pieces_in_row.len()..pieces_per_row {
+                                let empty_cell = " ".repeat(piece_width);
+                                key_line_spans.push(Span::styled(empty_cell, Style::default()));
+                                if i < pieces_per_row - 1 {
+                                    key_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                                }
+                            }
+                            
+                            // Add right border
+                            key_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                            
+                            all_lines.push(Line::from(key_line_spans));
+                            
+                            // Show each line of the pieces with column separators
+                            for line_idx in 0..max_height {
+                                let mut shape_line_spans = Vec::new();
+                                
+                                // Add left padding and border
+                                let left_padding = " ".repeat(padding);
+                                shape_line_spans.push(Span::styled(left_padding + "│", Style::default().fg(Color::DarkGray)));
+                                
+                                for (i, (_, piece_visual_lines, style)) in pieces_in_row.iter().enumerate() {
+                                    let piece_line = if line_idx < piece_visual_lines.len() {
+                                        format!("{:^width$}", piece_visual_lines[line_idx], width = piece_width)
+                                    } else {
+                                        " ".repeat(piece_width)
+                                    };
+                                    shape_line_spans.push(Span::styled(piece_line, *style));
+                                    if i < pieces_per_row - 1 {
+                                        // Add visible column separator
+                                        shape_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                                    }
+                                }
+                                
+                                // Fill remaining columns with empty cells if row is incomplete
+                                for i in pieces_in_row.len()..pieces_per_row {
+                                    let empty_cell = " ".repeat(piece_width);
+                                    shape_line_spans.push(Span::styled(empty_cell, Style::default()));
+                                    if i < pieces_per_row - 1 {
+                                        shape_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                                    }
+                                }
+                                
+                                // Add right border
+                                shape_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                                
+                                all_lines.push(Line::from(shape_line_spans));
+                            }
+                            
+                            // Add a proper row separator that spans the full width
+                            if chunk_start + pieces_per_row < total_pieces_to_show {
+                                let left_padding = " ".repeat(padding);
+                                let row_separator = "├".to_string() + &"─".repeat(content_width) + "┤";
+                                all_lines.push(Line::from(Span::styled(left_padding + &row_separator, Style::default().fg(Color::DarkGray))));
+                            }
+                        }
+                    }
+                    
+                    // Add bottom border for the entire grid
+                    if is_current && total_pieces_to_show > 0 {
+                        let separator_width = 1; // Each separator is 1 character: │
+                        let content_width = pieces_per_row * 7 + (pieces_per_row - 1) * separator_width; // 7*5 + 4*1 = 39
+                        let total_grid_width = content_width + 2; // +2 for left and right borders
+                        let available_width = inner_area.width as usize;
+                        let padding = if available_width > total_grid_width { (available_width - total_grid_width) / 2 } else { 0 };
+                        
+                        let bottom_border = "└".to_string() + &"─".repeat(content_width) + "┘";
+                        let padded_border = " ".repeat(padding) + &bottom_border;
+                        all_lines.push(Line::from(Span::styled(padded_border, Style::default().fg(Color::DarkGray))));
+                    }
+                } else {
+                    // Show compact summary when collapsed
+                    let used_count = 21 - available_count;
+                    let status_text = if available_count > 0 {
+                        if used_count > 0 {
+                            format!("  {} available, {} used", available_count, used_count)
+                        } else {
+                            format!("  All {} pieces available", available_count)
+                        }
+                    } else {
+                        "  All pieces used".to_string()
+                    };
+                    
+                    all_lines.push(Line::from(Span::styled(status_text, Style::default().fg(color))));
                 }
             }
-            
+
             let paragraph = Paragraph::new(all_lines);
             frame.render_widget(paragraph, inner_area);
         }
@@ -1170,170 +1314,742 @@ impl Component for InGameComponent {
             return Ok(false);
         }
 
-        // Only allow human player input
-        if !self.is_current_player_human(app) {
-            match event {
-                ComponentEvent::Input(InputEvent::KeyPress(key)) => {
-                    match key {
-                        KeyCode::Char('q') => {
-                            app.should_quit = true;
+        // For Blokus game, route events to modular components
+        if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+            self.ensure_blokus_components();
+            
+            // Try to handle the event with Blokus components first
+            if let Some(ref mut piece_selector) = self.blokus_piece_selector {
+                if let Ok(true) = piece_selector.handle_event(event, app) {
+                    return Ok(true);
+                }
+            }
+            
+            if let Some(ref mut board_component) = self.blokus_board {
+                if let Ok(true) = board_component.handle_event(event, app) {
+                    return Ok(true);
+                }
+            }
+            
+            if let Some(ref mut game_stats) = self.blokus_game_stats {
+                if let Ok(true) = game_stats.handle_event(event, app) {
+                    return Ok(true);
+                }
+            }
+            
+            if let Some(ref mut instruction_panel) = self.blokus_instruction_panel {
+                if let Ok(true) = instruction_panel.handle_event(event, app) {
+                    return Ok(true);
+                }
+            }
+        }
+
+        // Handle general events
+        match event {
+            ComponentEvent::Input(InputEvent::KeyPress(key)) => {
+                match key {
+                    KeyCode::Char('q') => {
+                        app.should_quit = true;
+                        Ok(true)
+                    }
+                    KeyCode::Char('r') => {
+                        app.reset_game();
+                        Ok(true)
+                    }
+                    KeyCode::Esc => {
+                        app.mode = AppMode::GameSelection;
+                        Ok(true)
+                    }
+                    _ => {
+                        // Handle game-specific input if components didn't handle it
+                        if self.is_current_player_human(app) {
+                            self.handle_keyboard_input(app, key)
+                        } else {
+                            Ok(false)
+                        }
+                    }
+                }
+            }
+            ComponentEvent::Input(InputEvent::MouseClick { x, y, button }) => {
+                // If components didn't handle mouse click, handle it with legacy logic
+                if self.is_current_player_human(app) || matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    match button {
+                        1 => { // Left click
+                            self.handle_mouse_click(app, *x, *y);
                             Ok(true)
                         }
-                        KeyCode::Char('r') => {
-                            app.reset_game();
-                            Ok(true)
-                        }
-                        KeyCode::Esc => {
-                            app.mode = AppMode::GameSelection;
+                        3 => { // Right click
+                            self.handle_mouse_right_click(app, *x, *y);
                             Ok(true)
                         }
                         _ => Ok(false)
                     }
+                } else {
+                    Ok(false)
                 }
-                _ => Ok(false),
             }
-        } else {
-            match event {
-                ComponentEvent::Input(InputEvent::KeyPress(key)) => {
-                    match key {
-                        KeyCode::Char('q') => {
-                            app.should_quit = true;
-                            Ok(true)
-                        }
-                        KeyCode::Char('r') => {
-                            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) && self.is_current_player_human(app) {
-                                app.blokus_rotate_piece();
-                            } else {
-                                app.reset_game();
-                            }
-                            Ok(true)
-                        }
-                        KeyCode::Esc => {
-                            app.mode = AppMode::GameSelection;
-                            Ok(true)
-                        }
-                        KeyCode::Up => {
-                            self.move_cursor_up(app);
-                            Ok(true)
-                        }
-                        KeyCode::Down => {
-                            self.move_cursor_down(app);
-                            Ok(true)
-                        }
-                        KeyCode::Left => {
-                            self.move_cursor_left(app);
-                            Ok(true)
-                        }
-                        KeyCode::Right => {
-                            self.move_cursor_right(app);
-                            Ok(true)
-                        }
-                        KeyCode::Enter | KeyCode::Char(' ') => {
-                            self.make_move(app);
-                            Ok(true)
-                        }
-                        KeyCode::PageUp => {
-                            match app.active_tab {
-                                crate::app::ActiveTab::Debug => app.scroll_debug_up(),
-                                crate::app::ActiveTab::History => app.scroll_move_history_up(),
-                            }
-                            Ok(true)
-                        }
-                        KeyCode::PageDown => {
-                            match app.active_tab {
-                                crate::app::ActiveTab::Debug => app.scroll_debug_down(),
-                                crate::app::ActiveTab::History => app.scroll_move_history_down(),
-                            }
-                            Ok(true)
-                        }
-                        KeyCode::Tab => {
-                            app.active_tab = app.active_tab.next();
-                            Ok(true)
-                        }
-                        KeyCode::Home => {
-                            app.reset_debug_scroll();
-                            Ok(true)
-                        }
-                        KeyCode::End => {
-                            app.enable_history_auto_scroll();
-                            Ok(true)
-                        }
-                        // Blokus-specific keys
-                        KeyCode::Char('f') => {
-                            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                                app.blokus_select_piece(15);
-                            }
-                            Ok(true)
-                        }
-                        KeyCode::Char('p') => {
-                            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                                app.blokus_pass_move();
-                            }
-                            Ok(true)
-                        }
-                        KeyCode::Char('e') => {
-                            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                                app.blokus_select_piece(14);
-                            }
-                            Ok(true)
-                        }
-                        KeyCode::Char('+') | KeyCode::Char('=') => {
-                            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                                app.blokus_expand_all();
-                            }
-                            Ok(true)
-                        }
-                        KeyCode::Char('-') => {
-                            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                                app.blokus_collapse_all();
-                            }
-                            Ok(true)
-                        }
-                        KeyCode::Char('x') => {
-                            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                                app.blokus_flip_piece();
-                            }
-                            Ok(true)
-                        }
-                        KeyCode::Char('z') => {
-                            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                                let current_player = app.game_wrapper.get_current_player();
-                                app.blokus_toggle_player_expand((current_player - 1) as usize);
-                            }
-                            Ok(true)
-                        }
-                        // Piece selection keys
-                        KeyCode::Char(c) => {
-                            if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                                // Map characters to piece indices
-                                let piece_index = match *c {
-                                    '1'..='9' => Some((*c as u8 - b'1') as usize),
-                                    '0' => Some(9),
-                                    'a' => Some(10),
-                                    'b' => Some(11),
-                                    'c' => Some(12),
-                                    'd' => Some(13),
-                                    'g' => Some(16),
-                                    'h' => Some(17),
-                                    'i' => Some(18),
-                                    'j' => Some(19),
-                                    'k' => Some(20),
-                                    _ => None,
-                                };
-                                
-                                if let Some(index) = piece_index {
-                                    app.blokus_select_piece(index);
-                                }
-                            }
-                            Ok(true)
-                        }
-                        _ => Ok(false)
+            ComponentEvent::Input(InputEvent::MouseScroll { x: _, y: _, up: _ }) => {
+                // Route mouse scroll to piece selector for Blokus
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    if let Some(ref mut piece_selector) = self.blokus_piece_selector {
+                        piece_selector.handle_event(event, app)
+                    } else {
+                        Ok(false)
                     }
+                } else {
+                    Ok(false)
                 }
-                _ => Ok(false),
             }
+            _ => Ok(false),
         }
     }
 
     crate::impl_component_base!(InGameComponent);
+}
+
+impl InGameComponent {
+    /// Handle left mouse click
+    fn handle_mouse_click(&self, app: &mut App, col: u16, row: u16) {
+        if app.game_status != GameStatus::InProgress {
+            return;
+        }
+        
+        match &app.game_wrapper {
+            GameWrapper::Blokus(_) => {
+                self.handle_blokus_click(app, col, row);
+            }
+            _ => {
+                self.handle_standard_game_click(app, col, row);
+            }
+        }
+    }
+
+    /// Handle right mouse click  
+    fn handle_mouse_right_click(&self, app: &mut App, _col: u16, _row: u16) {
+        // Right-click in Blokus to rotate selected piece
+        if matches!(app.game_wrapper, GameWrapper::Blokus(_)) && self.is_current_player_human(app) {
+            app.blokus_rotate_piece();
+        }
+    }
+
+    /// Handle keyboard input for games that weren't handled by components
+    fn handle_keyboard_input(&self, app: &mut App, key: &KeyCode) -> EventResult {
+        match key {
+            KeyCode::Char('q') => {
+                app.should_quit = true;
+                Ok(true)
+            }
+            KeyCode::Char('r') => {
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) && self.is_current_player_human(app) {
+                    app.blokus_rotate_piece();
+                } else {
+                    app.reset_game();
+                }
+                Ok(true)
+            }
+            KeyCode::Esc => {
+                app.mode = AppMode::GameSelection;
+                Ok(true)
+            }
+            KeyCode::Up => {
+                self.move_cursor_up(app);
+                Ok(true)
+            }
+            KeyCode::Down => {
+                self.move_cursor_down(app);
+                Ok(true)
+            }
+            KeyCode::Left => {
+                self.move_cursor_left(app);
+                Ok(true)
+            }
+            KeyCode::Right => {
+                self.move_cursor_right(app);
+                Ok(true)
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.make_move(app);
+                Ok(true)
+            }
+            KeyCode::PageUp => {
+                match app.active_tab {
+                    crate::app::ActiveTab::Debug => app.scroll_debug_up(),
+                    crate::app::ActiveTab::History => app.scroll_move_history_up(),
+                }
+                Ok(true)
+            }
+            KeyCode::PageDown => {
+                match app.active_tab {
+                    crate::app::ActiveTab::Debug => app.scroll_debug_down(),
+                    crate::app::ActiveTab::History => app.scroll_move_history_down(),
+                }
+                Ok(true)
+            }
+            KeyCode::Tab => {
+                app.active_tab = app.active_tab.next();
+                Ok(true)
+            }
+            KeyCode::Home => {
+                app.reset_debug_scroll();
+                Ok(true)
+            }
+            KeyCode::End => {
+                app.enable_history_auto_scroll();
+                Ok(true)
+            }
+            // Blokus-specific keys
+            KeyCode::Char('f') => {
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    app.blokus_select_piece(15);
+                }
+                Ok(true)
+            }
+            KeyCode::Char('p') => {
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    app.blokus_pass_move();
+                }
+                Ok(true)
+            }
+            KeyCode::Char('e') => {
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    app.blokus_select_piece(14);
+                }
+                Ok(true)
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    app.blokus_expand_all();
+                }
+                Ok(true)
+            }
+            KeyCode::Char('-') => {
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    app.blokus_collapse_all();
+                }
+                Ok(true)
+            }
+            KeyCode::Char('x') => {
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    app.blokus_flip_piece();
+                }
+                Ok(true)
+            }
+            KeyCode::Char('z') => {
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    let current_player = app.game_wrapper.get_current_player();
+                    app.blokus_toggle_player_expand((current_player - 1) as usize);
+                }
+                Ok(true)
+            }
+            // Piece selection keys
+            KeyCode::Char(c) => {
+                if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+                    // Map characters to piece indices
+                    let piece_index = match *c {
+                        '1'..='9' => Some((*c as u8 - b'1') as usize),
+                        '0' => Some(9),
+                        'a' => Some(10),
+                        'b' => Some(11),
+                        'c' => Some(12),
+                        'd' => Some(13),
+                        'g' => Some(16),
+                        'h' => Some(17),
+                        'i' => Some(18),
+                        'j' => Some(19),
+                        'k' => Some(20),
+                        _ => None,
+                    };
+                    
+                    if let Some(index) = piece_index {
+                        app.blokus_select_piece(index);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(false)
+        }
+    }
+
+    /// Handle Blokus-specific clicks during AI turn (only expand/collapse allowed)
+    fn handle_blokus_mouse_click_ai_turn(&self, app: &mut App, col: u16, row: u16) {
+        // Get layout areas - need to calculate from the render method's logic
+        let terminal_size = Rect::new(0, 0, 120, 40); // Use a reasonable default size
+        let (_, piece_area, _) = self.get_blokus_layout_areas(terminal_size);
+        
+        if col >= piece_area.x && col < piece_area.x + piece_area.width &&
+           row >= piece_area.y && row < piece_area.y + piece_area.height {
+            // Only handle expand/collapse clicks, not piece selection
+            self.handle_blokus_piece_expand_collapse_only(app, col - piece_area.x, row - piece_area.y);
+        }
+    }
+
+    /// Handle clicks on standard games (Gomoku, Connect4, Othello)
+    fn handle_standard_game_click(&self, app: &mut App, col: u16, row: u16) {
+        // Calculate board area - we need to estimate this based on terminal size
+        // For now, use a simple calculation - in practice we'd get this from the layout
+        let board_start_col = 1;
+        let board_start_row = 1;
+        
+        if col >= board_start_col && row >= board_start_row {
+            let board = app.game_wrapper.get_board();
+            let board_height = board.len();
+            let board_width = if board_height > 0 { board[0].len() } else { 0 };
+            
+            // Calculate which cell was clicked based on game type
+            match &app.game_wrapper {
+                GameWrapper::Connect4(_) => {
+                    // Connect4: Each column is 4 characters wide
+                    let cell_width = 4;
+                    let board_col = ((col - board_start_col) / cell_width) as usize;
+                    
+                    if board_col < board_width {
+                        // Update cursor position to this column
+                        app.board_cursor.1 = board_col as u16;
+                        // Update row to lowest available position
+                        self.update_connect4_cursor_row(app);
+                        self.make_move(app);
+                    }
+                }
+                GameWrapper::Gomoku(_) | GameWrapper::Othello(_) => {
+                    // Gomoku/Othello: Each cell is 2 characters wide
+                    let cell_width = 2;
+                    let cell_height = 1;
+                    
+                    let board_col = ((col - board_start_col) / cell_width) as usize;
+                    let board_row = ((row - board_start_row) / cell_height) as usize;
+                    
+                    if board_row < board_height && board_col < board_width {
+                        app.board_cursor = (board_row as u16, board_col as u16);
+                        self.make_move(app);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Update Connect4 cursor to lowest available position in column  
+    fn update_connect4_cursor_row(&self, app: &mut App) {
+        let board = app.game_wrapper.get_board();
+        let board_height = board.len();
+        let col = app.board_cursor.1 as usize;
+        
+        if col < board[0].len() {
+            // Find the lowest available row in this column
+            for row in (0..board_height).rev() {
+                if board[row][col] == 0 {
+                    app.board_cursor.0 = row as u16;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Handle Blokus clicks
+    fn handle_blokus_click(&self, app: &mut App, col: u16, row: u16) {
+        // Get layout areas - we need terminal size for accurate calculations
+        // For now, estimate based on common terminal sizes
+        let terminal_size = Rect::new(0, 0, 120, 40); // This should come from the actual terminal size
+        let (board_area, piece_area, _) = self.get_blokus_layout_areas(terminal_size);
+        
+        if col >= board_area.x && col < board_area.x + board_area.width &&
+           row >= board_area.y && row < board_area.y + board_area.height {
+            // Click on board area
+            self.handle_blokus_board_click(app, col - board_area.x, row - board_area.y);
+        } else if col >= piece_area.x && col < piece_area.x + piece_area.width &&
+                  row >= piece_area.y && row < piece_area.y + piece_area.height {
+            // Click on piece selection area
+            self.handle_blokus_piece_selection_click(app, col - piece_area.x, row - piece_area.y, piece_area.width);
+        }
+    }
+
+    /// Get Blokus layout areas (approximation - ideally would be calculated from actual render)
+    fn get_blokus_layout_areas(&self, terminal_size: Rect) -> (Rect, Rect, Rect) {
+        // This is a simplified version of the layout calculation
+        // In practice, this should match exactly what the render method uses
+        
+        // Main game area (65% of height)
+        let main_height = (terminal_size.height * 65) / 100;
+        let main_area = Rect::new(terminal_size.x, terminal_size.y, terminal_size.width, main_height);
+        
+        // Split main area: 50% board, 35% pieces, 15% player info
+        let board_width = (main_area.width * 50) / 100;
+        let piece_width = (main_area.width * 35) / 100;
+        let player_width = main_area.width - board_width - piece_width;
+        
+        let board_area = Rect::new(main_area.x, main_area.y, board_width, main_area.height);
+        let piece_area = Rect::new(main_area.x + board_width, main_area.y, piece_width, main_area.height);
+        let player_area = Rect::new(main_area.x + board_width + piece_width, main_area.y, player_width, main_area.height);
+        
+        (board_area, piece_area, player_area)
+    }
+
+    /// Handle clicks on Blokus board
+    fn handle_blokus_board_click(&self, app: &mut App, col: u16, row: u16) {
+        let board = app.game_wrapper.get_board();
+        let board_height = board.len();
+        let board_width = if board_height > 0 { board[0].len() } else { 0 };
+        
+        // Calculate board cell from click position
+        let board_start_col = 1; // Border
+        let board_start_row = 1; // Border
+        
+        if col >= board_start_col && row >= board_start_row {
+            // Each board cell is rendered as 2 characters wide (██, ▓▓, ░░/▒▒)
+            let cell_width = 2;
+            let cell_height = 1;
+            
+            // Calculate which board cell was clicked
+            let board_col = ((col - board_start_col) / cell_width) as usize;
+            let board_row = ((row - board_start_row) / cell_height) as usize;
+            
+            if board_row < board_height && board_col < board_width {
+                // Update cursor position
+                app.board_cursor = (board_row as u16, board_col as u16);
+                
+                // If a piece is selected, try to place it
+                if let Some((piece_idx, transformation_idx)) = app.blokus_ui_config.get_selected_piece_info() {
+                    let player_move = MoveWrapper::Blokus(BlokusMove(
+                        piece_idx, 
+                        transformation_idx, 
+                        board_row, 
+                        board_col
+                    ));
+                    
+                    if app.game_wrapper.is_legal(&player_move) {
+                        self.make_move_with_move(app, player_move);
+                        // Deselect piece after successful placement
+                        app.blokus_ui_config.selected_piece_idx = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Make a move with a specific move wrapper
+    fn make_move_with_move(&self, app: &mut App, player_move: MoveWrapper) {
+        let current_player = app.game_wrapper.get_current_player();
+        app.move_history.push(crate::app::MoveHistoryEntry::new(current_player, player_move.clone()));
+        app.on_move_added(); // Auto-scroll to bottom
+        app.game_wrapper.make_move(&player_move);
+        
+        // Advance the AI worker's MCTS tree root to reflect the move that was just made
+        app.ai_worker.advance_root(&player_move);
+        
+        // Check for game over
+        if app.game_wrapper.is_terminal() {
+            app.game_status = match app.game_wrapper.get_winner() {
+                Some(winner) => GameStatus::Win(winner),
+                None => GameStatus::Draw,
+            };
+            app.mode = AppMode::GameOver;
+        }
+    }
+
+    /// Handle clicks in Blokus piece selection area (with full piece selection logic)
+    fn handle_blokus_piece_selection_click(&self, app: &mut App, col: u16, row: u16, area_width: u16) {
+        if let GameWrapper::Blokus(ref state) = app.game_wrapper {
+            let current_player = app.game_wrapper.get_current_player();
+            
+            // Calculate scroll offset (same logic as main branch)
+            let scroll_offset = if let Some(auto_scroll_pos) = app.calculate_piece_panel_auto_scroll_position() {
+                auto_scroll_pos
+            } else {
+                app.blokus_ui_config.panel_scroll_offset
+            };
+            let absolute_row = row + scroll_offset as u16;
+            
+            // Get pieces for height calculations
+            let pieces = crate::games::blokus::get_blokus_pieces();
+            
+            let mut content_row = 0u16;
+            let pieces_per_row = 5;
+            
+            // Process each player section
+            for player in 1..=4 {
+                let is_current = player == current_player;
+                let is_expanded = app.blokus_ui_config.players_expanded.get((player - 1) as usize).unwrap_or(&true);
+
+                // Player header line
+                if absolute_row == content_row {
+                    // Check if clicking on expand/collapse area (first few columns)
+                    if col <= 2 {
+                        app.blokus_ui_config.toggle_player_expand((player - 1) as usize);
+                    }
+                    return;
+                }
+                content_row += 1;
+                
+                if *is_expanded {
+                    if is_current {
+                        // CURRENT PLAYER: Handle piece selection accurately
+                        let total_pieces_to_show = 21;
+                        let available_pieces = state.get_available_pieces(current_player);
+                        let available_set: std::collections::HashSet<usize> = available_pieces.iter().cloned().collect();
+                        
+                        match self.try_select_piece_in_current_player_grid(
+                            absolute_row, col, &mut content_row, pieces_per_row,
+                            total_pieces_to_show, &pieces, &available_set, area_width
+                        ) {
+                            Some(selected_piece) => {
+                                app.blokus_ui_config.select_piece(selected_piece);
+                                return;
+                            }
+                            None => {
+                                // Click was within current player area but not on a valid piece
+                                return;
+                            }
+                        }
+                    } else {
+                        // OTHER PLAYERS: Simulate their content (same logic as main branch)
+                        let visible_pieces = 10;
+                        let total_pieces_to_show = visible_pieces.min(21);
+                        
+                        let mut other_player_content_rows = 0u16;
+                        
+                        // Process each chunk of pieces
+                        for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
+                            let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
+                            
+                            // Calculate max height for this chunk
+                            let mut max_height = 1;
+                            for display_idx in chunk_start..chunk_end {
+                                if display_idx < pieces.len() && !pieces[display_idx].transformations.is_empty() {
+                                    let piece_shape = &pieces[display_idx].transformations[0];
+                                    let piece_visual_lines = self.create_visual_piece_shape(piece_shape);
+                                    max_height = max_height.max(piece_visual_lines.len());
+                                }
+                            }
+                            
+                            // Key/name line + shape lines + separator (if not last chunk)
+                            other_player_content_rows += 1 + max_height as u16;
+                            if chunk_start + pieces_per_row < total_pieces_to_show {
+                                other_player_content_rows += 1;
+                            }
+                        }
+                        
+                        // Check if click is within this player's content area
+                        if absolute_row >= content_row && absolute_row < content_row + other_player_content_rows {
+                            return; // Click consumed by other player content
+                        }
+                        
+                        content_row += other_player_content_rows;
+                    }
+                } else {
+                    // Collapsed player - just the summary line
+                    if absolute_row == content_row {
+                        return; // Click on collapsed player summary
+                    }
+                    content_row += 1;
+                }
+                
+                // Separator between players (empty line)
+                if player < 4 {
+                    content_row += 1;
+                }
+            }
+        }
+    }
+
+    /// Try to select a piece in the current player's grid (from main branch logic)
+    fn try_select_piece_in_current_player_grid(
+        &self,
+        absolute_row: u16,
+        col: u16,
+        content_row: &mut u16,
+        pieces_per_row: usize,
+        total_pieces_to_show: usize,
+        pieces: &[crate::games::blokus::Piece],
+        available_set: &std::collections::HashSet<usize>,
+        area_width: u16,
+    ) -> Option<usize> {
+        // Top border line
+        if total_pieces_to_show > 0 {
+            if absolute_row == *content_row {
+                return None; // Click on border
+            }
+            *content_row += 1;
+        }
+        
+        // Calculate grid dimensions - use the actual area width from rendering
+        let piece_width = 7;
+        let separator_width = 1;
+        let content_width = pieces_per_row * piece_width + (pieces_per_row - 1) * separator_width;
+        let total_grid_width = content_width + 2; // +2 for left and right borders
+        
+        // Use the actual area_width from the rendering to calculate padding exactly
+        let available_width = area_width as usize;
+        let padding = if available_width > total_grid_width { 
+            (available_width - total_grid_width) / 2 
+        } else { 
+            0 
+        };
+        
+        // The grid content starts after padding + left border
+        let grid_content_start_col = padding + 1;
+        
+        // Process each row of pieces using direct coordinate mapping
+        for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
+            let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
+            
+            // Calculate max height for this chunk - MUST match the rendering logic exactly
+            let mut pieces_in_row_visual_lines = Vec::new();
+            for display_idx in chunk_start..chunk_end {
+                if display_idx < pieces.len() && !pieces[display_idx].transformations.is_empty() {
+                    let piece_shape = &pieces[display_idx].transformations[0];
+                    let piece_visual_lines = self.create_visual_piece_shape(piece_shape);
+                    pieces_in_row_visual_lines.push(piece_visual_lines);
+                }
+            }
+            
+            // Calculate max_height exactly like the rendering code
+            let max_height = pieces_in_row_visual_lines.iter()
+                .map(|lines| lines.len())
+                .max()
+                .unwrap_or(1);
+            
+            // Calculate the row ranges for this chunk
+            let chunk_start_row = *content_row;
+            // Each chunk has: 1 name line + max_height shape lines + 1 separator line (if not last chunk)
+            let has_separator = chunk_start + pieces_per_row < total_pieces_to_show;
+            let chunk_total_rows = 1 + max_height + if has_separator { 1 } else { 0 };
+            
+            // Define the clickable area - be more generous to improve user experience
+            // Include name line + ALL shape lines + one extra row for visual tolerance
+            let clickable_start_row = chunk_start_row;
+            let clickable_end_row = chunk_start_row + (1 + max_height + 1) as u16; // name + shape + 1 extra
+            
+            // Check if click is within this chunk's expanded clickable area
+            if absolute_row >= clickable_start_row && absolute_row < clickable_end_row {
+                // Click is within this chunk - check column position
+                if col >= grid_content_start_col as u16 && col < (grid_content_start_col + content_width) as u16 {
+                    let grid_col = col - grid_content_start_col as u16;
+                    
+                    // Calculate which piece column this click corresponds to
+                    let pieces_in_chunk = chunk_end - chunk_start;
+                    
+                    // Use the exact same layout as the rendering:
+                    // Each piece takes piece_width characters, followed by separator_width
+                    // Grid structure: [piece0][sep][piece1][sep][piece2][sep][piece3][sep][piece4]
+                    //                  0-6    7   8-14   15  16-22  23  24-30  31  32-38
+                    
+                    for piece_col in 0..pieces_in_chunk {
+                        // Calculate the exact column range for this piece
+                        let piece_start_col = piece_col * (piece_width + separator_width);
+                        let piece_end_col = piece_start_col + piece_width;
+                        
+                        // Check if click is within this piece's column range
+                        if grid_col >= piece_start_col as u16 && grid_col < piece_end_col as u16 {
+                            let piece_idx = chunk_start + piece_col;
+                            
+                            if available_set.contains(&piece_idx) {
+                                return Some(piece_idx);
+                            } else {
+                                // Piece exists but not available
+                                return None;
+                            }
+                        }
+                    }
+                    
+                    // Click was within the grid but on a vertical separator - return None
+                    return None;
+                }
+                // Click was in chunk row range but outside the grid - return None
+                return None;
+            }
+            
+            // Update content_row to after this chunk (including separator if present)
+            *content_row = chunk_start_row + chunk_total_rows as u16;
+        }
+        
+        // Bottom border
+        if total_pieces_to_show > 0 {
+            if absolute_row == *content_row {
+                return None; // Click on border
+            }
+            *content_row += 1;
+        }
+        
+        None
+    }
+
+    /// Create visual piece shape (helper function to match rendering logic)
+    fn create_visual_piece_shape(&self, piece_shape: &[(i32, i32)]) -> Vec<String> {
+        if piece_shape.is_empty() {
+            return vec!["▢".to_string()];
+        }
+
+        // Create a 2D visual representation
+        let min_r = piece_shape.iter().map(|p| p.0).min().unwrap_or(0);
+        let max_r = piece_shape.iter().map(|p| p.0).max().unwrap_or(0);
+        let min_c = piece_shape.iter().map(|p| p.1).min().unwrap_or(0);
+        let max_c = piece_shape.iter().map(|p| p.1).max().unwrap_or(0);
+
+        let height = (max_r - min_r + 1) as usize;
+        let width = (max_c - min_c + 1) as usize;
+
+        // Create a grid to show the shape
+        let mut grid = vec![vec![' '; width]; height];
+
+        // Fill the grid with the piece shape
+        for &(r, c) in piece_shape {
+            let gr = (r - min_r) as usize;
+            let gc = (c - min_c) as usize;
+            grid[gr][gc] = '▢'; // Use empty square like ghost pieces
+        }
+
+        // Convert to vector of strings
+        let mut result: Vec<String> = grid.iter()
+            .map(|row| row.iter().collect::<String>())
+            .collect();
+
+        // Ensure minimum width for single character pieces
+        if result.len() == 1 && result[0].trim().len() == 1 {
+            result[0] = format!(" {} ", result[0].trim());
+        }
+
+        result
+    }
+
+    /// Handle expand/collapse clicks only (for AI turns)
+    fn handle_blokus_piece_expand_collapse_only(&self, app: &mut App, col: u16, row: u16) {
+        // Simplified version that only handles expand/collapse, not piece selection
+        if let GameWrapper::Blokus(_) = app.game_wrapper {
+            let scroll_offset = if let Some(auto_scroll_pos) = app.calculate_piece_panel_auto_scroll_position() {
+                auto_scroll_pos
+            } else {
+                app.blokus_ui_config.panel_scroll_offset
+            };
+            let absolute_row = row + scroll_offset as u16;
+            
+            let mut content_row = 0u16;
+            
+            // Process each player section
+            for player in 1..=4 {
+                // Player header line
+                if absolute_row == content_row {
+                    // Check if clicking on expand/collapse area (first few columns)
+                    if col <= 2 {
+                        app.blokus_ui_config.toggle_player_expand((player - 1) as usize);
+                    }
+                    return;
+                }
+                content_row += 1;
+                
+                // Skip the rest of the player's content for simplicity
+                let is_expanded = app.blokus_ui_config.players_expanded.get((player - 1) as usize).unwrap_or(&true);
+                if *is_expanded {
+                    // Estimate content height - this doesn't need to be perfect for expand/collapse
+                    content_row += 10; // Rough estimate
+                } else {
+                    content_row += 1; // Summary line
+                }
+                
+                // Separator between players
+                if player < 4 {
+                    content_row += 1;
+                }
+            }
+        }
+    }
 }

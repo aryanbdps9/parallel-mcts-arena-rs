@@ -10,6 +10,7 @@ pub enum InputEvent {
     KeyPress(KeyCode),
     MouseClick { x: u16, y: u16, button: u8 },
     MouseMove { x: u16, y: u16 },
+    MouseScroll { x: u16, y: u16, up: bool },
     Resize { width: u16, height: u16 },
 }
 

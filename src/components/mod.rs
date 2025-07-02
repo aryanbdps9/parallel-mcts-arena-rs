@@ -8,3 +8,4 @@ pub mod core;
 pub mod events;
 pub mod manager;
 pub mod ui;
+pub mod blokus;
