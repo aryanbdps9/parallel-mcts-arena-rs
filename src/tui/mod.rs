@@ -64,20 +64,77 @@ pub fn run(app: &mut App) -> io::Result<()> {
         }
 
         app.update();
+        
+        // Update the component system
+        app.component_manager.update();
 
-        terminal.draw(|f| widgets::render(app, f))?;
+        terminal.draw(|f| {
+            // For now, use only the legacy widget system while we gradually migrate
+            // TODO: Gradually replace parts with the component system
+            widgets::render(app, f);
+            
+            // Component system rendering disabled for now to avoid overlap
+            // let area = f.area();
+            // app.component_manager.render(f, area);
+        })?;
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind == KeyEventKind::Press {
-                        input::handle_key_press(app, key.code);
+                        // Create component event from keyboard input
+                        let component_event = crate::components::events::ComponentEvent::Input(
+                            crate::components::events::InputEvent::KeyPress(key.code)
+                        );
+                        
+                        // Try component system first
+                        if app.component_manager.handle_event(&component_event) {
+                            // Event was consumed by component system
+                        } else {
+                            // Fallback to legacy input handling if needed
+                            // (This can be removed once all input is handled by components)
+                            input::handle_key_press(app, key.code);
+                        }
                     }
                 }
                 Event::Mouse(mouse) => {
-                    let terminal_size = terminal.size()?;
-                    let terminal_rect = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-                    input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal_rect);
+                    // Create component event from mouse input
+                    let component_event = match mouse.kind {
+                        crossterm::event::MouseEventKind::Down(_) => {
+                            crate::components::events::ComponentEvent::Input(
+                                crate::components::events::InputEvent::MouseClick {
+                                    x: mouse.column,
+                                    y: mouse.row,
+                                    button: 1, // Left button by default
+                                }
+                            )
+                        }
+                        crossterm::event::MouseEventKind::Drag(_) => {
+                            crate::components::events::ComponentEvent::Input(
+                                crate::components::events::InputEvent::MouseMove {
+                                    x: mouse.column,
+                                    y: mouse.row,
+                                }
+                            )
+                        }
+                        _ => {
+                            // For other mouse events, use legacy handling
+                            let terminal_size = terminal.size()?;
+                            let terminal_rect = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+                            input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal_rect);
+                            continue;
+                        }
+                    };
+                    
+                    // Try component system first
+                    if app.component_manager.handle_event(&component_event) {
+                        // Event was consumed by component system
+                    } else {
+                        // Legacy mouse handling as fallback
+                        let terminal_size = terminal.size()?;
+                        let terminal_rect = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+                        input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal_rect);
+                    }
                 }
                 _ => {}
             }

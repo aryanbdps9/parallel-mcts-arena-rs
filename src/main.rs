@@ -21,6 +21,7 @@ pub mod app;
 pub mod games;
 pub mod game_wrapper;
 pub mod tui;
+pub mod components;
 
 use crate::app::App;
 use clap::Parser;

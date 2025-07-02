@@ -300,6 +300,8 @@ pub struct App {
     pub layout_config: LayoutConfig,
     pub drag_state: DragState,
     pub blokus_ui_config: BlokusUIConfig,
+    // Component-based UI system
+    pub component_manager: crate::components::manager::ComponentManager,
 }
 
 impl App {
@@ -486,6 +488,13 @@ impl App {
             layout_config: LayoutConfig::default(),
             drag_state: DragState::default(),
             blokus_ui_config: BlokusUIConfig::default(),
+            // Component-based UI system
+            component_manager: {
+                let mut manager = crate::components::manager::ComponentManager::new();
+                let root = Box::new(crate::components::ui::root::RootComponent::new());
+                manager.set_root_component(root);
+                manager
+            },
         }
     }
 
