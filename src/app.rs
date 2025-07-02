@@ -142,7 +142,11 @@ impl AIWorker {
     /// * `state` - Current game state to search from
     /// * `timeout_secs` - Maximum time to spend searching (in seconds)
     pub fn start_search(&self, state: GameWrapper, timeout_secs: u64) {
-        self.tx_req.send(AIRequest::Search(state, timeout_secs)).unwrap();
+        if let Err(_) = self.tx_req.send(AIRequest::Search(state, timeout_secs)) {
+            // AI worker channel is closed - this can happen if the worker thread has exited
+            // This is not fatal - the AI just won't respond, which will be handled gracefully
+            eprintln!("Warning: AI worker is not available for search");
+        }
     }
 
     /// Attempts to receive a response from the AI worker
@@ -745,6 +749,10 @@ impl App {
                     self.blokus_ui_config.selected_piece_idx = None;
                     self.blokus_ui_config.selected_transformation_idx = 0;
                 }
+                
+                // Recreate AI worker to ensure fresh state for new game
+                // This prevents crashes when restarting after a game where AI was the last player
+                self.recreate_ai_worker();
             }
         }
     }
