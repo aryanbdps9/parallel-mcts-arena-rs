@@ -1,15 +1,16 @@
 //! Piece selector component for Blokus UI.
 
 use ratatui::{
-    layout::Rect,
+    layout::{Rect, Direction},
     Frame,
-    widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders},
 };
 use std::any::Any;
 
 use crate::app::App;
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::{ComponentEvent, InputEvent};
+use crate::components::ui::{ResponsiveLayoutComponent, ResponsiveLayoutType, ScrollableComponent};
 use crate::components::blokus::player_panel::BlokusPlayerPanelComponent;
 
 /// Component managing the piece selector for all players in Blokus
@@ -18,6 +19,8 @@ pub struct BlokusPieceSelectorComponent {
     player_panels: Vec<BlokusPlayerPanelComponent>,
     scroll_offset: u16,
     area: Option<Rect>,
+    responsive_layout: ResponsiveLayoutComponent,
+    scrollable_content: ScrollableComponent,
 }
 
 impl BlokusPieceSelectorComponent {
@@ -27,11 +30,25 @@ impl BlokusPieceSelectorComponent {
             player_panels.push(BlokusPlayerPanelComponent::new(player, true));
         }
 
+        let mut responsive_layout = ResponsiveLayoutComponent::new(
+            ResponsiveLayoutType::ContentDriven, 
+            Direction::Vertical
+        );
+        
+        // Configure responsive layout for 4 player panels
+        for _ in 0..4 {
+            responsive_layout.add_panel(5, 15, 25); // min: 5, preferred: 15, max: 25 lines per player
+        }
+
         Self {
             id: ComponentId::new(),
             player_panels,
             scroll_offset: 0,
             area: None,
+            responsive_layout,
+            scrollable_content: ScrollableComponent::new()
+                .with_title("Available Pieces (All Players)".to_string())
+                .with_auto_scroll(false),
         }
     }
 
@@ -212,6 +229,14 @@ impl Component for BlokusPieceSelectorComponent {
     }
 
     fn handle_event(&mut self, event: &ComponentEvent, app: &mut App) -> EventResult {
+        // First, try to delegate to child components (player panels)
+        for panel in &mut self.player_panels {
+            if panel.handle_event(event, app)? {
+                return Ok(true); // Event was handled by a child
+            }
+        }
+
+        // If no child handled it, handle it ourselves
         match event {
             ComponentEvent::Input(InputEvent::MouseClick { x, y, .. }) => {
                 if self.handle_click(app, *x, *y) {
@@ -250,73 +275,24 @@ impl Component for BlokusPieceSelectorComponent {
             return Ok(());
         }
 
-        // Calculate total height and whether we need scrolling
-        let total_height = self.calculate_total_height(app);
-        let needs_scrollbar = total_height > content_area.height;
-
-        // Adjust content area if scrollbar is needed
-        let (panel_area, scrollbar_area) = if needs_scrollbar && content_area.width > 1 {
-            let panel_width = content_area.width.saturating_sub(1);
-            (
-                Rect::new(content_area.x, content_area.y, panel_width, content_area.height),
-                Rect::new(content_area.x + panel_width, content_area.y, 1, content_area.height),
-            )
-        } else {
-            (content_area, Rect::new(0, 0, 0, 0))
-        };
-
-        // Render player panels with clipping
-        let mut current_y = 0;
-        for panel in &mut self.player_panels {
-            let panel_height = panel.calculate_height(app);
-            
-            // Check if this panel is visible in the current scroll view
-            let panel_start = current_y;
-            let panel_end = current_y + panel_height;
-            let view_start = self.scroll_offset;
-            let view_end = self.scroll_offset + panel_area.height;
-
-            if panel_end > view_start && panel_start < view_end {
-                // Calculate visible portion of the panel
-                let visible_start = std::cmp::max(panel_start, view_start);
-                let visible_end = std::cmp::min(panel_end, view_end);
-                let visible_height = visible_end - visible_start;
-
-                if visible_height > 0 {
-                    let render_y = panel_area.y + visible_start.saturating_sub(view_start);
-                    
-                    let render_area = Rect::new(
-                        panel_area.x,
-                        render_y,
-                        panel_area.width,
-                        visible_height,
-                    );
-
-                    // Create a clipped area for the panel
-                    if render_area.height > 0 {
-                        panel.render(frame, render_area, app)?;
-                    }
-                }
+        // Use responsive layout to calculate optimal panel heights
+        let panel_areas = self.responsive_layout.calculate_layout(content_area);
+        
+        // Render each player panel in its allocated area
+        for (i, panel) in self.player_panels.iter_mut().enumerate() {
+            if i < panel_areas.len() {
+                panel.render(frame, panel_areas[i], app)?;
             }
-
-            current_y += panel_height;
-        }
-
-        // Render scrollbar if needed
-        if needs_scrollbar && scrollbar_area.width > 0 {
-            let mut scrollbar_state = ScrollbarState::default()
-                .content_length(total_height as usize)
-                .viewport_content_length(content_area.height as usize)
-                .position(self.scroll_offset as usize);
-
-            let scrollbar = Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"));
-
-            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
         }
 
         Ok(())
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut dyn Component> {
+        self.player_panels.iter_mut().map(|p| p as &mut dyn Component).collect()
+    }
+
+    fn children(&self) -> Vec<&dyn Component> {
+        self.player_panels.iter().map(|p| p as &dyn Component).collect()
     }
 }

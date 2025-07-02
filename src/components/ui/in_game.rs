@@ -10,6 +10,7 @@ use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::games::{gomoku::GomokuMove, connect4::Connect4Move, othello::OthelloMove, blokus::BlokusMove};
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::{ComponentEvent, InputEvent};
+use crate::components::ui::{ResponsiveLayoutComponent, ResponsiveLayoutType, MoveHistoryComponent};
 use crate::components::blokus::{
     BlokusBoardComponent, BlokusPieceSelectorComponent, BlokusGameStatsComponent, 
     BlokusInstructionPanelComponent
@@ -25,16 +26,32 @@ pub struct InGameComponent {
     blokus_piece_selector: Option<BlokusPieceSelectorComponent>,
     blokus_game_stats: Option<BlokusGameStatsComponent>,
     blokus_instruction_panel: Option<BlokusInstructionPanelComponent>,
+    // Move history component
+    move_history: MoveHistoryComponent,
+    // Responsive layout for dynamic screen adaptation
+    layout_manager: ResponsiveLayoutComponent,
 }
 
 impl InGameComponent {
     pub fn new() -> Self {
+        let mut layout_manager = ResponsiveLayoutComponent::new(
+            ResponsiveLayoutType::Adaptive, 
+            ratatui::layout::Direction::Horizontal
+        );
+        
+        // Configure responsive layout for Blokus: board (50%), pieces (35%), stats (15%)
+        layout_manager.add_panel(40, 50, 60); // Board area
+        layout_manager.add_panel(30, 35, 45); // Piece selector area
+        layout_manager.add_panel(15, 15, 25); // Stats area
+        
         Self {
             id: ComponentId::new(),
             blokus_board: None,
             blokus_piece_selector: None,
             blokus_game_stats: None,
             blokus_instruction_panel: None,
+            move_history: MoveHistoryComponent::new(),
+            layout_manager,
         }
     }
 
