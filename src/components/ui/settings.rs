@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     Frame,
     widgets::{Block, Borders, List, ListItem},
-    style::{Style, Color, Modifier},
+    style::{Style, Modifier},
 };
 
 use crate::app::{App, AppMode};
@@ -48,24 +48,32 @@ impl Component for SettingsComponent {
 
         let items: Vec<ListItem> = settings_items
             .iter()
-            .map(|item| ListItem::new(item.as_str()))
+            .enumerate()
+            .map(|(i, item)| {
+                let style = if i == app.selected_settings_index {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(item.as_str()).style(style)
+            })
             .collect();
 
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title("Settings"))
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .fg(Color::Yellow),
-            )
             .highlight_symbol("> ");
 
-        frame.render_stateful_widget(list, area, &mut app.settings_state.clone());
+        frame.render_widget(list, area);
         Ok(())
     }
     
     fn handle_event(&mut self, event: &ComponentEvent, app: &mut App) -> EventResult {
         match event {
+            ComponentEvent::Input(InputEvent::MouseClick { x: _, y: _, button: _ }) => {
+                // Calculate which setting was clicked based on mouse position
+                // For now, just handle it as basic click without precise position mapping
+                Ok(false) // TODO: Add precise mouse click handling for settings
+            }
             ComponentEvent::Input(InputEvent::KeyPress(key)) => {
                 match key {
                     KeyCode::Char('q') => {
