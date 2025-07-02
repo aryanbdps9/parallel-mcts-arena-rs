@@ -352,10 +352,14 @@ fn draw_stats_history_tabs(f: &mut Frame, app: &App, area: Rect) {
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::NONE))
         .select(app.active_tab as usize)
-        .style(Style::default().fg(Color::Gray))
+        .style(Style::default()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD))
         .highlight_style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Black)
+                .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         );
 
