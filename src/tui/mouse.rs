@@ -127,6 +127,11 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
             handle_settings_click(app, col, row, terminal_size);
         }
         AppMode::InGame => {
+            // First check for tab clicks (for both Blokus and standard games)
+            if handle_tab_click(app, col, row, terminal_size) {
+                return; // Tab was clicked, no need to process other clicks
+            }
+            
             if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
                 handle_blokus_click(app, col, row, terminal_size);
             } else {
@@ -134,7 +139,8 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
             }
         }
         AppMode::GameOver => {
-            // Could add click handling for game over state if needed
+            // Check for tab clicks in game over mode too
+            handle_tab_click(app, col, row, terminal_size);
         }
         AppMode::PlayerConfig => {
             // Player configuration clicks handled in the event loop
@@ -147,7 +153,6 @@ fn handle_mouse_drag(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     if let Some((delta_col, delta_row)) = app.drag_state.update_drag(col, row) {
         if let Some(boundary) = app.drag_state.drag_boundary {
             let delta = match boundary {
-                DragBoundary::StatsHistory |
                 DragBoundary::BlokusPieceSelectionLeft |
                 DragBoundary::BlokusPieceSelectionRight => delta_col,
                 _ => delta_row,
@@ -255,23 +260,31 @@ fn handle_mouse_scroll(app: &mut App, col: u16, row: u16, terminal_size: Rect, s
             }
 
             // Default scrolling for stats area (for non-Blokus games or as fallback)
-            let (_, _, stats_area) = app.layout_config.get_main_layout(terminal_size);
+            let (_, bottom_area) = app.layout_config.get_main_layout(terminal_size);
+            
+            // Split bottom area to get stats area (same as in widgets.rs)
+            let bottom_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .split(bottom_area);
+            let stats_area = bottom_chunks[1];
+            
             if row >= stats_area.y {
-                let (debug_area, _history_area) = app.layout_config.get_stats_layout(stats_area);
-                
-                if col < debug_area.x + debug_area.width {
-                    // Mouse is in debug stats area
-                    if scroll_up {
-                        app.scroll_debug_up();
-                    } else {
-                        app.scroll_debug_down();
+                // In the combined stats/history area, scroll the active tab
+                match app.active_tab {
+                    crate::app::ActiveTab::Debug => {
+                        if scroll_up {
+                            app.scroll_debug_up();
+                        } else {
+                            app.scroll_debug_down();
+                        }
                     }
-                } else {
-                    // Mouse is in move history area
-                    if scroll_up {
-                        app.scroll_move_history_up();
-                    } else {
-                        app.scroll_move_history_down();
+                    crate::app::ActiveTab::History => {
+                        if scroll_up {
+                            app.scroll_move_history_up();
+                        } else {
+                            app.scroll_move_history_down();
+                        }
                     }
                 }
             }
@@ -284,7 +297,7 @@ fn handle_mouse_scroll(app: &mut App, col: u16, row: u16, terminal_size: Rect, s
 
 /// Handle menu clicks
 fn handle_menu_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
-    let (board_area, _, _) = app.layout_config.get_main_layout(terminal_size);
+    let (board_area, _) = app.layout_config.get_main_layout(terminal_size);
     
     // Check if click is within the menu area
     if row < board_area.height {
@@ -313,7 +326,7 @@ fn handle_menu_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
 
 /// Handle settings menu clicks
 fn handle_settings_click(app: &mut App, _col: u16, row: u16, terminal_size: Rect) {
-    let (board_area, _, _) = app.layout_config.get_main_layout(terminal_size);
+    let (board_area, _) = app.layout_config.get_main_layout(terminal_size);
     
     // Check if click is within the settings area
     if row < board_area.height {
@@ -336,7 +349,7 @@ fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
         return;
     }
 
-    let (board_area, _, _) = app.layout_config.get_main_layout(terminal_size);
+    let (board_area, _) = app.layout_config.get_main_layout(terminal_size);
     
     // Check if click is within the board area
     if row >= board_area.y && row < board_area.y + board_area.height &&
@@ -473,7 +486,7 @@ fn handle_blokus_board_click(app: &mut App, col: u16, row: u16, _board_area: Rec
     let board = app.game_wrapper.get_board();
     let board_height = board.len();
     let board_width = if board_height > 0 { board[0].len() } else { 0 };
-    
+
     // Calculate board cell from click position
     let board_start_col = 1; // Border
     let board_start_row = 1; // Border
@@ -522,7 +535,7 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
         // or better yet, we should mirror the exact logic from the rendering
         let scroll_offset = if let Some(auto_scroll_pos) = app.calculate_piece_panel_auto_scroll_position() {
             // For now, we trust that auto_scroll_pos is already reasonable
-            // In the future, we might want to calculate max_scroll here too for full consistency
+            // TODO: In the future, we might want to calculate max_scroll here too for full consistency
             auto_scroll_pos
         } else {
             app.blokus_ui_config.panel_scroll_offset
@@ -530,8 +543,8 @@ fn handle_blokus_piece_selection_click(app: &mut App, col: u16, row: u16, area_w
         let absolute_row = row + scroll_offset as u16;
         
         // Get pieces for height calculations (same as rendering)
-        let pieces = crate::games::blokus::get_blokus_pieces();
-        
+        let pieces = crate::games::blokus::get_blokus_pieces(); // TODO: Cache this as get_blokus_pieces() is expensive
+
         // For debugging: log the click information
         #[cfg(debug_assertions)]
         eprintln!("=== CLICK DEBUG: visual_row={}, scroll_offset={}, absolute_row={}, col={} ===", 
@@ -802,7 +815,7 @@ fn try_select_piece_in_current_player_grid(
                     eprintln!("DEBUG: Piece {} range: {}-{}, grid_col={}", 
                               piece_col, piece_start_col, piece_end_col-1, grid_col);
                     
-                    // Check if click is within this piece's column range (excluding separator)
+                    // Check if click is within this piece's column range
                     if grid_col >= piece_start_col as u16 && grid_col < piece_end_col as u16 {
                         let piece_idx = chunk_start + piece_col;
                         
@@ -951,4 +964,72 @@ fn make_move_with_move(app: &mut App, player_move: MoveWrapper) {
         };
         app.mode = AppMode::GameOver;
     }
+}
+
+/// Handle tab click events
+/// Returns true if a tab was clicked, false otherwise
+fn handle_tab_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) -> bool {
+    // Calculate the stats area for both standard and Blokus games
+    let stats_area = if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+        // For Blokus, manually calculate the stats area
+        let vertical_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(terminal_size);
+        
+        let bottom_info_area = vertical_chunks[1];
+        
+        // Bottom info area is split: 40% instructions, 60% stats
+        let bottom_vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(bottom_info_area);
+        
+        bottom_vertical[1]
+    } else {
+        // For standard games, use the layout config
+        let (_, bottom_area) = app.layout_config.get_main_layout(terminal_size);
+        
+        // Split bottom area to get stats area (same as in widgets.rs)
+        let bottom_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(bottom_area);
+        bottom_chunks[1]
+    };
+    
+    // Check if click is within the stats area
+    if row >= stats_area.y && row < stats_area.y + stats_area.height &&
+       col >= stats_area.x && col < stats_area.x + stats_area.width {
+        
+        // The tabs are now positioned on the bottom border line of the stats area
+        let tab_row = stats_area.y + stats_area.height.saturating_sub(1);
+        
+        // Check if click is on the tab row
+        if row == tab_row {
+            // Calculate tab positions on the bottom border
+            let tab_start_x = stats_area.x + 1; // After left border
+            let available_width = stats_area.width.saturating_sub(2); // Account for borders
+            
+            // Calculate which tab was clicked
+            // Tab layout: "Debug Stats" (11 chars) + some spacing + "Move History" (12 chars)
+            let tab1_start = tab_start_x;
+            let tab1_end = tab1_start + 11; // "Debug Stats" length
+            
+            let tab2_start = tab1_end + 2; // Some spacing
+            let tab2_end = tab2_start + 12; // "Move History" length
+            
+            if col >= tab1_start && col < tab1_end {
+                // Debug Stats tab clicked
+                app.active_tab = crate::app::ActiveTab::Debug;
+                return true;
+            } else if col >= tab2_start && col < tab2_end && tab2_end <= tab_start_x + available_width {
+                // Move History tab clicked (and it fits within available width)
+                app.active_tab = crate::app::ActiveTab::History;
+                return true;
+            }
+        }
+    }
+    
+    false
 }

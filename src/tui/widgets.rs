@@ -16,12 +16,12 @@
 //! - **Standard View**: Layout for 2-player games (Othello, Connect4, Gomoku)
 //! - **Blokus View**: Specialized 4-player layout with piece selection panels
 
-use crate::app::{App, AppMode, GameStatus, Player};
+use crate::app::{App, AppMode, GameStatus, Player, ActiveTab};
 use crate::game_wrapper::GameWrapper;
 use crate::games::blokus::BlokusState;
 use crate::tui::blokus_ui;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs};
 use mcts::GameState;
 
 /// Main rendering function that dispatches to appropriate view based on application mode
@@ -235,7 +235,16 @@ fn draw_game_view(f: &mut Frame, app: &App, area: Rect) {
 /// * `area` - Screen area to render within
 fn draw_standard_game_view(f: &mut Frame, app: &App, area: Rect) {
     // Use the layout config to get the main areas
-    let (board_area, instructions_area, stats_area) = app.layout_config.get_main_layout(area);
+    let (board_area, bottom_area) = app.layout_config.get_main_layout(area);
+
+    // Split the bottom area into instructions and stats/history
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(bottom_area);
+
+    let instructions_area = bottom_chunks[0];
+    let stats_area = bottom_chunks[1];
 
     // Draw the game board
     draw_board(f, app, board_area);
@@ -243,12 +252,8 @@ fn draw_standard_game_view(f: &mut Frame, app: &App, area: Rect) {
     // Draw game info/instructions
     draw_game_info(f, app, instructions_area);
     
-    // Split the stats area for debug stats and move history
-    let (debug_area, history_area) = app.layout_config.get_stats_layout(stats_area);
-
-    // Draw debug statistics and move history
-    draw_debug_stats(f, app, debug_area);
-    draw_move_history(f, app, history_area);
+    // Draw the combined stats and history pane with tabs
+    draw_stats_history_tabs(f, app, stats_area);
 }
 
 /// Renders the specialized Blokus game view
@@ -305,28 +310,69 @@ fn draw_blokus_game_view(f: &mut Frame, app: &App, area: Rect) {
     // Draw game info/instructions
     draw_game_info(f, app, instructions_area);
 
-    // Split stats area horizontally for debug stats and move history
-    let stats_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(stats_area);
-
-    // Draw debug stats and move history
-    draw_debug_stats(f, app, stats_chunks[0]);
-    draw_move_history(f, app, stats_chunks[1]);
+    // Draw the combined stats and history pane with tabs
+    draw_stats_history_tabs(f, app, stats_area);
 }
 
-/// Draws the debug statistics panel
+/// Draws a combined pane for Debug Stats and Move History with tabs
+///
+/// Renders a bordered pane with tabs positioned on the bottom border line.
+/// The active view (Debug Stats or Move History) is rendered in the full inner area.
+/// Tabs are clickable to switch between views.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing data for both views and the active tab state
+/// * `area` - Screen area to render within
+fn draw_stats_history_tabs(f: &mut Frame, app: &App, area: Rect) {
+    // Create the main bordered block for the entire pane
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Debug Stats / Move History");
+    
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    // Render the content of the active tab in the full inner area
+    match app.active_tab {
+        ActiveTab::Debug => draw_debug_stats_content(f, app, inner_area),
+        ActiveTab::History => draw_move_history_content(f, app, inner_area),
+    }
+
+    // Position tabs on the bottom border line
+    let tabs_area = Rect {
+        x: area.x + 1, // Start after left border
+        y: area.y + area.height.saturating_sub(1), // Bottom border line
+        width: area.width.saturating_sub(2), // Account for left and right borders
+        height: 1,
+    };
+
+    // Create tab titles
+    let titles = vec!["Debug Stats", "Move History"];
+    let tabs = Tabs::new(titles)
+        .block(Block::default().borders(Borders::NONE))
+        .select(app.active_tab as usize)
+        .style(Style::default().fg(Color::Gray))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    f.render_widget(tabs, tabs_area);
+}
+
+/// Draws the debug statistics panel content (without borders)
 ///
 /// Displays real-time AI search statistics including node counts, evaluations,
-/// and top move candidates. Shows scrollable content with draggable panel borders.
+/// and top move candidates. Shows scrollable content with optional scrollbar.
 /// Updates automatically during AI thinking phases.
 ///
 /// # Arguments
 /// * `f` - Ratatui frame for rendering
 /// * `app` - Application state containing MCTS statistics
 /// * `area` - Screen area to render within
-fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
+fn draw_debug_stats_content(f: &mut Frame, app: &App, area: Rect) {
     // Split area for content and scrollbar
     let chunks = if area.width > 5 {
         Layout::default()
@@ -368,7 +414,7 @@ fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
 
     // Apply scrolling
     let content_height = text.len();
-    let visible_height = chunks[0].height.saturating_sub(2) as usize; // Account for borders
+    let visible_height = chunks[0].height as usize; // No border adjustment needed
     let max_scroll = content_height.saturating_sub(visible_height);
     let scroll_offset = (app.debug_scroll as usize).min(max_scroll);
 
@@ -378,18 +424,11 @@ fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
         .take(visible_height)
         .collect();
 
-    let drag_indicator = if app.drag_state.is_dragging { "🔀" } else { "↔" };
-    let title = format!("{} Debug Stats - {}%", 
-        drag_indicator, 
-        app.layout_config.stats_width_percent
-    );
-
-    let paragraph = Paragraph::new(visible_lines)
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let paragraph = Paragraph::new(visible_lines);
     f.render_widget(paragraph, chunks[0]);
 
     // Render scrollbar if content is scrollable and we have space for it
-    if max_scroll > 0 && chunks.len() > 1 && chunks[1].height > 2 {
+    if max_scroll > 0 && chunks.len() > 1 && chunks[1].height > 0 {
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(content_height)
             .viewport_content_length(visible_height)
@@ -402,6 +441,93 @@ fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
             
         f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
     }
+}
+
+/// Draws the move history panel content (without borders)
+///
+/// Displays a scrollable, color-coded history of all moves made in the current game.
+/// Uses different formatting for 2-player games (side-by-side pairs) vs 4-player
+/// Blokus (4 moves per line). Supports auto-scroll to follow recent moves and
+/// manual scrolling with preserved position.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing move history and scroll settings
+/// * `area` - Screen area to render within
+fn draw_move_history_content(f: &mut Frame, app: &App, area: Rect) {
+    // Split area for content and scrollbar
+    let chunks = if area.width > 5 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100)])
+            .split(area)
+    };
+    
+    // Group moves side-by-side based on game type
+    let formatted_lines = match &app.game_wrapper {
+        GameWrapper::Blokus(_) => {
+            // For Blokus (4 players), group moves in sets of 4 per line
+            format_blokus_moves_sidebyside_colored(&app.move_history, chunks[0].width as usize, app)
+        },
+        _ => {
+            // For 2-player games, group moves in pairs per line
+            format_two_player_moves_sidebyside_colored(&app.move_history, chunks[0].width as usize, app)
+        }
+    };
+    
+    // Calculate scrolling for text content using auto-scroll logic
+    let content_height = formatted_lines.len();
+    let visible_height = chunks[0].height as usize; // No border adjustment needed
+    let scroll_offset = app.get_history_scroll_offset(content_height, visible_height);
+    
+    // Take visible lines for display
+    let visible_lines = formatted_lines
+        .into_iter()
+        .skip(scroll_offset)
+        .take(visible_height)
+        .collect::<Vec<Line>>();
+
+    let paragraph = Paragraph::new(visible_lines)
+        .wrap(ratatui::widgets::Wrap { trim: true }); // Enable word wrap
+    f.render_widget(paragraph, chunks[0]);
+
+    // Render scrollbar if content is scrollable and we have space for it
+    let max_scroll = content_height.saturating_sub(visible_height);
+    if max_scroll > 0 && chunks.len() > 1 && chunks[1].height > 0 {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(content_height)
+            .viewport_content_length(visible_height)
+            .position(scroll_offset);
+            
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+            
+        f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
+    }
+}
+
+/// Draws the debug statistics panel (legacy function with borders)
+///
+/// Displays real-time AI search statistics including node counts, evaluations,
+/// and top move candidates. Shows scrollable content with draggable panel borders.
+/// Updates automatically during AI thinking phases.
+///
+/// # Arguments
+/// * `f` - Ratatui frame for rendering
+/// * `app` - Application state containing MCTS statistics
+/// * `area` - Screen area to render within
+fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default().borders(Borders::ALL).title("Debug Stats");
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+    draw_debug_stats_content(f, app, inner_area);
 }
 
 /// Draws the game information panel
@@ -598,70 +724,16 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
 /// * `app` - Application state containing move history and scroll settings
 /// * `area` - Screen area to render within
 fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
-    // Split area for content and scrollbar
-    let chunks = if area.width > 5 {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(100)])
-            .split(area)
-    };    // Group moves side-by-side based on game type
-    let formatted_lines = match &app.game_wrapper {
-        GameWrapper::Blokus(_) => {
-            // For Blokus (4 players), group moves in sets of 4 per line
-            format_blokus_moves_sidebyside_colored(&app.move_history, chunks[0].width.saturating_sub(2) as usize, app)
-        },
-        _ => {
-            // For 2-player games, group moves in pairs per line
-            format_two_player_moves_sidebyside_colored(&app.move_history, chunks[0].width.saturating_sub(2) as usize, app)
-        }
-    };
-    
-    // Calculate scrolling for text content using auto-scroll logic
-    let content_height = formatted_lines.len();
-    let visible_height = chunks[0].height.saturating_sub(2) as usize; // Account for borders
-    let scroll_offset = app.get_history_scroll_offset(content_height, visible_height);
-    
-    // Take visible lines for display
-    let visible_lines = formatted_lines
-        .into_iter()
-        .skip(scroll_offset)
-        .take(visible_height)
-        .collect::<Vec<Line>>();
-
-    let drag_indicator = if app.drag_state.is_dragging { "🔀" } else { "↔" };
     let auto_scroll_indicator = if app.history_auto_scroll { "📜" } else { "📌" };
-    let title = format!("{} {} Move History ({}) - {}%", 
-        drag_indicator, 
+    let title = format!("{} Move History ({})", 
         auto_scroll_indicator,
         app.move_history.len(),
-        100 - app.layout_config.stats_width_percent
     );
-
-    let paragraph = Paragraph::new(visible_lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(ratatui::widgets::Wrap { trim: true }); // Enable word wrap
-    f.render_widget(paragraph, chunks[0]);
-
-    // Render scrollbar if content is scrollable and we have space for it
-    let max_scroll = content_height.saturating_sub(visible_height);
-    if max_scroll > 0 && chunks.len() > 1 && chunks[1].height > 2 {
-        let mut scrollbar_state = ScrollbarState::default()
-            .content_length(content_height)
-            .viewport_content_length(visible_height)
-            .position(scroll_offset);
-            
-        let scrollbar = Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓"));
-            
-        f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
-    }
+    
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+    draw_move_history_content(f, app, inner_area);
 }
 
 /// Formats move history for 2-player games with color-coded side-by-side display

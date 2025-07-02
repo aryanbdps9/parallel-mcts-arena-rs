@@ -228,6 +228,22 @@ pub enum GameStatus {
     Draw,
 }
 
+/// Represents the active tab in the combined stats/history pane
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveTab {
+    Debug,
+    History,
+}
+
+impl ActiveTab {
+    pub fn next(&self) -> Self {
+        match self {
+            ActiveTab::Debug => ActiveTab::History,
+            ActiveTab::History => ActiveTab::Debug,
+        }
+    }
+}
+
 /// The main application state
 ///
 /// This struct holds all the state required to run the application,
@@ -249,6 +265,7 @@ pub struct App {
     pub selected_blokus_piece: Option<(usize, usize)>,
     pub history_scroll: u16,
     pub debug_scroll: u16,
+    pub active_tab: ActiveTab,
     // Auto-scroll for move history
     pub history_auto_scroll: bool,
     pub history_user_scroll_time: Option<std::time::Instant>,
@@ -434,6 +451,7 @@ impl App {
             selected_blokus_piece: None,
             history_scroll: 0,
             debug_scroll: 0,
+            active_tab: ActiveTab::Debug,
             // Auto-scroll for move history
             history_auto_scroll: true,
             history_user_scroll_time: None,
@@ -999,6 +1017,7 @@ impl App {
         // This would apply a reflection transformation
     }
 
+    // TODO: Find out why we're giving special treatment to Blokus here.
     pub fn blokus_place_piece(&mut self) {
         if let Some((piece_idx, transformation_idx)) = self.blokus_ui_config.get_selected_piece_info() {
             if let GameWrapper::Blokus(state) = &mut self.game_wrapper {
@@ -1008,11 +1027,11 @@ impl App {
                     self.board_cursor.0 as usize,
                     self.board_cursor.1 as usize,
                 );
-                
+
                 // Check if the move is legal
                 if state.is_legal(&blokus_move) {
                     let move_wrapper = crate::game_wrapper::MoveWrapper::Blokus(blokus_move);
-                    
+
                     // Record the move in history
                     self.move_history.push(crate::app::MoveHistoryEntry::new(
                         self.game_wrapper.get_current_player(),
@@ -1335,9 +1354,9 @@ impl App {
             
             // Calculate actual line position by simulating the content generation
             // This mirrors the logic in draw_blokus_piece_selection
-            let pieces = crate::games::blokus::get_blokus_pieces();
+            let pieces = crate::games::blokus::get_blokus_pieces(); //  TODO: Cache this as get_blokus_pieces() is expensive
             let mut line_count = 0usize;
-            
+
             for player in 1..=4 {
                 // This is where the current player's header will appear
                 if player == current_player {
@@ -1346,7 +1365,7 @@ impl App {
                 
                 // Player header line
                 line_count += 1;
-                
+
                 // Check if this player is expanded
                 let is_expanded = self.blokus_ui_config.players_expanded.get((player - 1) as usize).unwrap_or(&true);
                 

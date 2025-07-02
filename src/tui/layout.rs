@@ -11,7 +11,7 @@
 //! - **Responsive Design**: Automatic adjustment to terminal size changes
 //!
 //! ## Layout Types
-//! - **Standard Layout**: 3-panel vertical split for 2-player games
+//! - **Standard Layout**: 2-panel vertical split for 2-player games
 //! - **Blokus Layout**: 3-panel horizontal split for 4-player Blokus game
 //! - **Settings Layout**: Menu-based layouts for configuration screens
 
@@ -20,12 +20,8 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 /// Defines which boundary can be dragged for resizing panels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragBoundary {
-    /// Boundary between game board and instructions area
-    BoardInstructions,
-    /// Boundary between instructions and stats area
-    InstructionsStats,
-    /// Horizontal boundary between debug stats and move history
-    StatsHistory,
+    /// Boundary between game board and bottom panel
+    BoardBottom,
     /// Left boundary of Blokus piece selection panel
     BlokusPieceSelectionLeft,
     /// Right boundary of Blokus piece selection panel
@@ -39,10 +35,6 @@ pub enum DragBoundary {
 pub struct LayoutConfig {
     /// Percentage of height for the board area (0-100)
     pub board_height_percent: u8,
-    /// Percentage of height for the instructions area (0-100)
-    pub instructions_height_percent: u8,
-    /// Percentage of width for stats vs history split (0-100)
-    pub stats_width_percent: u8,
     /// Width of Blokus piece selection panel
     pub blokus_piece_selection_width: u16,
 }
@@ -51,8 +43,6 @@ impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
             board_height_percent: 65,
-            instructions_height_percent: 15,
-            stats_width_percent: 50,
             blokus_piece_selection_width: 50,
         }
     }
@@ -61,50 +51,23 @@ impl Default for LayoutConfig {
 impl LayoutConfig {
     /// Calculates the main vertical layout areas for standard games
     ///
-    /// Divides the screen into three vertical sections: board area at top,
-    /// game info/instructions in middle, and stats/history at bottom.
+    /// Divides the screen into two vertical sections: board area at top,
+    /// and a combined panel at the bottom for stats, history, and instructions.
     ///
     /// # Arguments
     /// * `area` - Total screen area to divide
     ///
     /// # Returns
-    /// Tuple of (board_area, instructions_area, stats_area) rectangles
-    pub fn get_main_layout(&self, area: Rect) -> (Rect, Rect, Rect) {
+    /// Tuple of (board_area, bottom_area) rectangles
+    pub fn get_main_layout(&self, area: Rect) -> (Rect, Rect) {
         let board_height = (area.height as f32 * self.board_height_percent as f32 / 100.0) as u16;
-        let instructions_height = (area.height as f32 * self.instructions_height_percent as f32 / 100.0) as u16;
-        let stats_height = area.height.saturating_sub(board_height + instructions_height);
+        let bottom_height = area.height.saturating_sub(board_height);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(board_height),
-                Constraint::Length(instructions_height),
-                Constraint::Length(stats_height),
-            ])
-            .split(area);
-
-        (chunks[0], chunks[1], chunks[2])
-    }
-
-    /// Calculates the horizontal split for the bottom stats area
-    ///
-    /// Divides the stats area horizontally between debug statistics on the left
-    /// and move history on the right, based on the configured width percentage.
-    ///
-    /// # Arguments
-    /// * `area` - Stats area rectangle to divide
-    ///
-    /// # Returns
-    /// Tuple of (debug_stats_area, move_history_area) rectangles
-    pub fn get_stats_layout(&self, area: Rect) -> (Rect, Rect) {
-        let stats_width = (area.width as f32 * self.stats_width_percent as f32 / 100.0) as u16;
-        let history_width = area.width.saturating_sub(stats_width);
-
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(stats_width),
-                Constraint::Length(history_width),
+                Constraint::Length(bottom_height),
             ])
             .split(area);
 
@@ -145,16 +108,9 @@ impl LayoutConfig {
         let mut boundaries = Vec::new();
 
         let board_height = (terminal_size.height as f32 * self.board_height_percent as f32 / 100.0) as u16;
-        let instructions_height = (terminal_size.height as f32 * self.instructions_height_percent as f32 / 100.0) as u16;
-        let stats_start = board_height + instructions_height;
 
         // Vertical boundaries
-        boundaries.push((DragBoundary::BoardInstructions, 0, board_height));
-        boundaries.push((DragBoundary::InstructionsStats, 0, board_height + instructions_height));
-
-        // Horizontal boundary in stats area
-        let stats_width_boundary = (terminal_size.width as f32 * self.stats_width_percent as f32 / 100.0) as u16;
-        boundaries.push((DragBoundary::StatsHistory, stats_width_boundary, stats_start));
+        boundaries.push((DragBoundary::BoardBottom, 0, board_height));
 
         boundaries
     }
@@ -179,15 +135,10 @@ impl LayoutConfig {
         }
 
         let boundaries = self.get_drag_boundaries(terminal_size);
-        for (boundary_type, boundary_col, boundary_row) in boundaries {
+        for (boundary_type, _boundary_col, boundary_row) in boundaries {
             match boundary_type {
-                DragBoundary::BoardInstructions | DragBoundary::InstructionsStats => {
+                DragBoundary::BoardBottom => {
                     if row.abs_diff(boundary_row) <= 1 {
-                        return Some(boundary_type);
-                    }
-                }
-                DragBoundary::StatsHistory => {
-                    if row > boundary_row && col.abs_diff(boundary_col) <= 2 {
                         return Some(boundary_type);
                     }
                 }
@@ -199,20 +150,11 @@ impl LayoutConfig {
     }
 
     /// Handle drag events to resize panels
-    pub fn handle_drag(&mut self, boundary: DragBoundary, delta: i16, terminal_size: Rect) {
+    pub fn handle_drag(&mut self, boundary: DragBoundary, delta: i16, _terminal_size: Rect) {
         match boundary {
-            DragBoundary::BoardInstructions => {
+            DragBoundary::BoardBottom => {
                 let new_percent = ((self.board_height_percent as i16 + delta).max(20).min(80)) as u8;
                 self.board_height_percent = new_percent;
-            }
-            DragBoundary::InstructionsStats => {
-                let new_percent = ((self.instructions_height_percent as i16 + delta).max(5).min(30)) as u8;
-                self.instructions_height_percent = new_percent;
-            }
-            DragBoundary::StatsHistory => {
-                let delta_percent = (delta as f32 / terminal_size.width as f32 * 100.0) as i16;
-                let new_percent = ((self.stats_width_percent as i16 + delta_percent).max(20).min(80)) as u8;
-                self.stats_width_percent = new_percent;
             }
             DragBoundary::BlokusPieceSelectionLeft => {
                 let new_width = ((self.blokus_piece_selection_width as i16 + delta).max(30).min(80)) as u16;

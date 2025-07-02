@@ -189,10 +189,21 @@ fn handle_ingame_input(key_code: KeyCode, app: &mut App) {
         KeyCode::Up => move_cursor_up(app),
         KeyCode::Down => move_cursor_down(app),
         KeyCode::Left => move_cursor_left(app),
-        KeyCode::Right => move_cursor_right(app),
+                KeyCode::Right => move_cursor_right(app),
         KeyCode::Enter | KeyCode::Char(' ') => make_move(app),
-        KeyCode::PageUp => app.scroll_debug_up(),
-        KeyCode::PageDown => app.scroll_debug_down(),
+        KeyCode::PageUp => {
+            match app.active_tab {
+                crate::app::ActiveTab::Debug => app.scroll_debug_up(),
+                crate::app::ActiveTab::History => app.scroll_move_history_up(),
+            }
+        },
+        KeyCode::PageDown => {
+            match app.active_tab {
+                crate::app::ActiveTab::Debug => app.scroll_debug_down(),
+                crate::app::ActiveTab::History => app.scroll_move_history_down(),
+            }
+        },
+        KeyCode::Tab => app.active_tab = app.active_tab.next(),
         KeyCode::Home => app.reset_debug_scroll(),
         KeyCode::End => app.enable_history_auto_scroll(),
         KeyCode::Char('f') => {
