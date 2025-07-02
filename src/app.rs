@@ -257,6 +257,7 @@ pub struct App {
     pub mode: AppMode,
     pub games: Vec<(&'static str, Box<dyn Fn() -> GameWrapper>)>, // (name, factory)
     pub game_selection_state: ListState,
+    pub settings_state: ListState,
     pub game_wrapper: GameWrapper,
     pub game_status: GameStatus,
     pub player_options: Vec<(i32, Player)>, // (player_id, type)
@@ -439,12 +440,16 @@ impl App {
 
         let mut game_selection_state = ListState::default();
         game_selection_state.select(Some(initial_game_index));
+        
+        let mut settings_state = ListState::default();
+        settings_state.select(Some(0));
 
         Self {
             should_quit: false,
             mode: initial_mode,
             games,
             game_selection_state,
+            settings_state,
             game_wrapper,
             game_status: GameStatus::InProgress,
             player_options,

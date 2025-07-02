@@ -66,16 +66,32 @@ pub fn run(app: &mut App) -> io::Result<()> {
         app.update();
         
         // Update the component system
-        app.component_manager.update();
+        // Temporarily take ownership to avoid borrowing issues
+        let mut temp_manager = std::mem::take(&mut app.component_manager);
+        temp_manager.update(app);
+        app.component_manager = temp_manager;
 
         terminal.draw(|f| {
-            // For now, use only the legacy widget system while we gradually migrate
-            // TODO: Gradually replace parts with the component system
-            widgets::render(app, f);
+            // Check if we should use component system or legacy widget system
+            let use_components = matches!(app.mode, crate::app::AppMode::GameSelection | crate::app::AppMode::Settings);
             
-            // Component system rendering disabled for now to avoid overlap
-            // let area = f.area();
-            // app.component_manager.render(f, area);
+            if use_components {
+                // Use the component system for migrated modes
+                let terminal_size = f.area();
+                let mut temp_manager = std::mem::take(&mut app.component_manager);
+                
+                if temp_manager.get_root_component_id().is_some() {
+                    temp_manager.render(f, terminal_size, app);
+                } else {
+                    // Fallback to legacy if no root component
+                    crate::tui::widgets::render(app, f);
+                }
+                
+                app.component_manager = temp_manager;
+            } else {
+                // Use legacy widget system for non-migrated modes
+                crate::tui::widgets::render(app, f);
+            }
         })?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -87,12 +103,22 @@ pub fn run(app: &mut App) -> io::Result<()> {
                             crate::components::events::InputEvent::KeyPress(key.code)
                         );
                         
-                        // Try component system first
-                        if app.component_manager.handle_event(&component_event) {
-                            // Event was consumed by component system
+                        // Try component system first for migrated modes
+                        let use_components = matches!(app.mode, crate::app::AppMode::GameSelection | crate::app::AppMode::Settings);
+                        
+                        if use_components {
+                            let mut temp_manager = std::mem::take(&mut app.component_manager);
+                            let consumed = temp_manager.handle_event(&component_event, app);
+                            app.component_manager = temp_manager;
+                            
+                            if consumed {
+                                // Event was consumed by component system
+                            } else {
+                                // Fallback to legacy input handling
+                                input::handle_key_press(app, key.code);
+                            }
                         } else {
-                            // Fallback to legacy input handling if needed
-                            // (This can be removed once all input is handled by components)
+                            // Use legacy input handling for non-migrated modes
                             input::handle_key_press(app, key.code);
                         }
                     }
@@ -126,11 +152,24 @@ pub fn run(app: &mut App) -> io::Result<()> {
                         }
                     };
                     
-                    // Try component system first
-                    if app.component_manager.handle_event(&component_event) {
-                        // Event was consumed by component system
+                    // Try component system first for migrated modes
+                    let use_components = matches!(app.mode, crate::app::AppMode::GameSelection | crate::app::AppMode::Settings);
+                    
+                    if use_components {
+                        let mut temp_manager = std::mem::take(&mut app.component_manager);
+                        let consumed = temp_manager.handle_event(&component_event, app);
+                        app.component_manager = temp_manager;
+                        
+                        if consumed {
+                            // Event was consumed by component system
+                        } else {
+                            // Legacy mouse handling as fallback
+                            let terminal_size = terminal.size()?;
+                            let terminal_rect = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+                            input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal_rect);
+                        }
                     } else {
-                        // Legacy mouse handling as fallback
+                        // Use legacy mouse handling for non-migrated modes
                         let terminal_size = terminal.size()?;
                         let terminal_rect = Rect::new(0, 0, terminal_size.width, terminal_size.height);
                         input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal_rect);

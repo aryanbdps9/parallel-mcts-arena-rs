@@ -48,26 +48,26 @@ impl ComponentManager {
     }
     
     /// Send an event to a specific component
-    pub fn send_event_to_component(&mut self, id: ComponentId, event: &ComponentEvent) -> bool {
+    pub fn send_event_to_component(&mut self, id: ComponentId, event: &ComponentEvent, app: &mut crate::app::App) -> bool {
         if let Some(component) = self.components.get_mut(&id) {
-            component.handle_event(event)
+            component.handle_event(event, app).unwrap_or(false)
         } else {
             false
         }
     }
     
     /// Broadcast an event to all components
-    pub fn broadcast_event(&mut self, event: &ComponentEvent) {
+    pub fn broadcast_event(&mut self, event: &ComponentEvent, app: &mut crate::app::App) {
         for component in self.components.values_mut() {
-            component.handle_event(event);
+            let _ = component.handle_event(event, app);
         }
     }
     
     /// Send an event to the focused component first, then broadcast if not consumed
-    pub fn handle_event(&mut self, event: &ComponentEvent) -> bool {
+    pub fn handle_event(&mut self, event: &ComponentEvent, app: &mut crate::app::App) -> bool {
         // Try focused component first
         if let Some(focused_id) = self.focused_component {
-            if self.send_event_to_component(focused_id, event) {
+            if self.send_event_to_component(focused_id, event, app) {
                 return true; // Event was consumed
             }
         }
@@ -75,53 +75,77 @@ impl ComponentManager {
         // If not consumed by focused component, try root component
         if let Some(root_id) = self.root_component {
             if root_id != self.focused_component.unwrap_or(ComponentId(0)) {
-                if self.send_event_to_component(root_id, event) {
+                if self.send_event_to_component(root_id, event, app) {
                     return true;
                 }
             }
         }
         
         // If still not consumed, broadcast to all components
-        self.broadcast_event(event);
+        self.broadcast_event(event, app);
         false
     }
     
     /// Update all components
-    pub fn update(&mut self) {
-        let update_event = ComponentEvent::Update;
+    pub fn update(&mut self, app: &mut crate::app::App) {
         for component in self.components.values_mut() {
-            component.update();
-            component.handle_event(&update_event);
+            let _ = component.update(app);
         }
     }
     
     /// Render all components starting from root
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
         if let Some(root_id) = self.root_component {
-            if let Some(root_component) = self.components.get(&root_id) {
-                root_component.render(frame, area);
+            if let Some(root_component) = self.components.get_mut(&root_id) {
+                let _ = root_component.render(frame, area, app);
             }
         }
     }
     
+    /// Render components with app access (for gradual migration)
+    pub fn render_with_app(&mut self, frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
+        if let Some(root_id) = self.root_component {
+            if let Some(root_component) = self.components.get_mut(&root_id) {
+                // For now, just delegate to the existing widget system through the root component
+                // This avoids the complex borrowing issues while we set up the component architecture
+                if let Some(root) = root_component.as_any().downcast_ref::<crate::components::ui::root::RootComponent>() {
+                    root.render_with_app(frame, area, app);
+                } else {
+                    // Fallback to regular render
+                    let _ = root_component.render(frame, area, app);
+                }
+            }
+        }
+    }
+
     /// Set the focused component
-    pub fn set_focus(&mut self, id: Option<ComponentId>) {
+    pub fn set_focus(&mut self, id: Option<ComponentId>, app: &mut crate::app::App) {
         if let Some(old_focus) = self.focused_component {
             let lose_focus = ComponentEvent::Focus(crate::components::events::FocusEvent::Lost);
-            self.send_event_to_component(old_focus, &lose_focus);
+            self.send_event_to_component(old_focus, &lose_focus, app);
         }
         
         self.focused_component = id;
         
         if let Some(new_focus) = id {
             let gain_focus = ComponentEvent::Focus(crate::components::events::FocusEvent::Gained);
-            self.send_event_to_component(new_focus, &gain_focus);
+            self.send_event_to_component(new_focus, &gain_focus, app);
         }
     }
     
     /// Get the currently focused component ID
     pub fn get_focused(&self) -> Option<ComponentId> {
         self.focused_component
+    }
+    
+    /// Get the root component ID
+    pub fn get_root_component_id(&self) -> Option<ComponentId> {
+        self.root_component
+    }
+    
+    /// Get a reference to a component
+    pub fn get_component_ref(&self, id: ComponentId) -> Option<&dyn Component> {
+        self.components.get(&id).map(|c| c.as_ref())
     }
 }
 
