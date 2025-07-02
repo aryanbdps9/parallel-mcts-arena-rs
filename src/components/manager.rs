@@ -94,26 +94,10 @@ impl ComponentManager {
     }
     
     /// Render all components starting from root
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, app: &crate::app::App) {
         if let Some(root_id) = self.root_component {
             if let Some(root_component) = self.components.get_mut(&root_id) {
                 let _ = root_component.render(frame, area, app);
-            }
-        }
-    }
-    
-    /// Render components with app access (for gradual migration)
-    pub fn render_with_app(&mut self, frame: &mut Frame, area: Rect, app: &mut crate::app::App) {
-        if let Some(root_id) = self.root_component {
-            if let Some(root_component) = self.components.get_mut(&root_id) {
-                // For now, just delegate to the existing widget system through the root component
-                // This avoids the complex borrowing issues while we set up the component architecture
-                if let Some(root) = root_component.as_any().downcast_ref::<crate::components::ui::root::RootComponent>() {
-                    root.render_with_app(frame, area, app);
-                } else {
-                    // Fallback to regular render
-                    let _ = root_component.render(frame, area, app);
-                }
             }
         }
     }

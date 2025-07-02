@@ -543,13 +543,6 @@ fn draw_move_history_content(f: &mut Frame, app: &App, area: Rect) {
 /// * `f` - Ratatui frame for rendering
 /// * `app` - Application state containing MCTS statistics
 /// * `area` - Screen area to render within
-fn draw_debug_stats(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title("Debug Stats");
-    let inner_area = block.inner(area);
-    f.render_widget(block, area);
-    draw_debug_stats_content(f, app, inner_area);
-}
-
 /// Draws the game information panel
 ///
 /// Shows current game status, active player with color-coded indicators,
@@ -743,19 +736,6 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
 /// * `f` - Ratatui frame for rendering
 /// * `app` - Application state containing move history and scroll settings
 /// * `area` - Screen area to render within
-fn draw_move_history(f: &mut Frame, app: &App, area: Rect) {
-    let auto_scroll_indicator = if app.history_auto_scroll { "📜" } else { "📌" };
-    let title = format!("{} Move History ({})", 
-        auto_scroll_indicator,
-        app.move_history.len(),
-    );
-    
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner_area = block.inner(area);
-    f.render_widget(block, area);
-    draw_move_history_content(f, app, inner_area);
-}
-
 /// Formats move history for 2-player games with color-coded side-by-side display
 ///
 /// Groups moves in pairs per line when space allows, with appropriate spacing
