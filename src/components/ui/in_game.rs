@@ -4,6 +4,7 @@ use ratatui::{
     layout::Rect,
     Frame,
 };
+use ratatui::text::{Line, Span};
 
 use crate::app::{App, AppMode, GameStatus, Player};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
@@ -224,7 +225,6 @@ impl InGameComponent {
         use ratatui::{
             widgets::{Block, Borders, Paragraph},
             style::{Style, Color, Modifier},
-            text::{Line, Span},
             layout::{Constraint, Direction, Layout, Alignment},
         };
         
@@ -248,9 +248,12 @@ impl InGameComponent {
             return Ok(());
         }
         
-        // Handle Blokus differently (no labels for now, more complex rendering)
+        // Handle Blokus differently (use specialized view)
         if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-            return self.render_blokus_board(frame, inner_area, app);
+            // This should not be called for Blokus - use render_blokus_game_view instead
+            let paragraph = Paragraph::new("Blokus board rendering error - use specialized view");
+            frame.render_widget(paragraph, inner_area);
+            return Ok(());
         }
         
         // Calculate column width and determine if we need row labels
@@ -797,6 +800,330 @@ impl InGameComponent {
         }
         Ok(())
     }
+
+    /// Render the specialized Blokus game view with proper layout and panels
+    fn render_blokus_game_view(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
+        use ratatui::{
+            layout::{Constraint, Direction, Layout},
+        };
+        
+        // First split vertically to have the main game area and bottom info area  
+        let vertical_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(area);
+
+        let main_game_area = vertical_chunks[0];
+        let bottom_info_area = vertical_chunks[1];
+
+        // Use Blokus-specific layout for the main game area
+        let (board_area, piece_area, player_area) = app.layout_config.get_blokus_layout(main_game_area);
+
+        // Draw the Blokus board with ghost pieces
+        if let GameWrapper::Blokus(state) = &app.game_wrapper {
+            // Get selected piece info from app state
+            let selected_piece = if let Some((piece_idx, transformation_idx)) = app.blokus_ui_config.get_selected_piece_info() {
+                Some((piece_idx, transformation_idx, app.board_cursor.0 as usize, app.board_cursor.1 as usize))
+            } else {
+                None
+            };
+            // Only show cursor for human turns
+            let show_cursor = self.is_current_player_human(app);
+            self.render_blokus_board_with_ghost(frame, board_area, app, state, selected_piece, show_cursor)?;
+        }
+
+        // Draw piece selection panel
+        self.render_blokus_piece_selection(frame, piece_area, app)?;
+
+        // Draw player status panel
+        self.render_blokus_player_status(frame, player_area, app)?;
+
+        // Split the bottom area into instructions and stats/history
+        let bottom_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(bottom_info_area);
+
+        let instructions_area = bottom_chunks[0];
+        let stats_area = bottom_chunks[1];
+
+        // Draw game info/instructions
+        self.render_game_info(frame, instructions_area, app)?;
+
+        // Draw the combined stats and history pane with tabs
+        self.render_stats_history_tabs(frame, stats_area, app)?;
+
+        Ok(())
+    }
+
+    /// Render Blokus board with ghost piece preview (proper implementation)
+    fn render_blokus_board_with_ghost(&self, frame: &mut Frame, area: Rect, app: &App, state: &crate::games::blokus::BlokusState, selected_piece: Option<(usize, usize, usize, usize)>, show_cursor: bool) -> ComponentResult<()> {
+        use ratatui::{
+            widgets::{Block, Borders, Paragraph},
+            style::{Style, Color, Modifier},
+            text::{Line, Span},
+        };
+        use std::collections::HashSet;
+        use mcts::GameState;
+        
+        let board = state.get_board();
+        let board_height = board.len();
+        let board_width = if board_height > 0 { board[0].len() } else { 0 };
+
+        if board_height == 0 || board_width == 0 {
+            let paragraph = Paragraph::new("No board to display");
+            frame.render_widget(paragraph, area);
+            return Ok(());
+        }
+
+        let block = Block::default().borders(Borders::ALL).title("Blokus Board");
+        let inner_area = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Create board display with ghost pieces
+        let mut board_lines = Vec::new();
+        
+        // Get ghost piece positions if a piece is selected
+        let ghost_positions = if let Some((piece_id, transformation, row, col)) = selected_piece {
+            self.get_ghost_piece_positions(state, piece_id, transformation, row, col)
+        } else {
+            HashSet::new()
+        };
+        
+        // Get last move positions for highlighting
+        let last_move_positions: HashSet<(usize, usize)> = state.get_last_move()
+            .map(|coords| coords.into_iter().collect())
+            .unwrap_or_default();
+        
+        let cursor_pos = (app.board_cursor.0, app.board_cursor.1);
+        
+        for (r, row) in board.iter().enumerate() {
+            let mut line_spans = Vec::new();
+            for (c, &cell) in row.iter().enumerate() {
+                let is_cursor = (r as u16, c as u16) == cursor_pos;
+                let is_ghost = ghost_positions.contains(&(r, c));
+                let is_last_move = last_move_positions.contains(&(r, c));
+                
+                let (symbol, style) = if is_ghost {
+                    // Check if this ghost position would be legal
+                    let is_legal = if let Some((piece_id, transformation, cursor_row, cursor_col)) = selected_piece {
+                        use crate::games::blokus::BlokusMove;
+                        let test_move = BlokusMove(piece_id, transformation, cursor_row, cursor_col);
+                        state.is_legal(&test_move)
+                    } else {
+                        false
+                    };
+                    
+                    if is_legal {
+                        // Legal ghost piece preview (cyan)
+                        ("▓▓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                    } else {
+                        // Illegal ghost piece preview (red)
+                        ("▓▓", Style::default().fg(Color::Red).add_modifier(Modifier::DIM))
+                    }
+                } else {
+                    match cell {
+                        1 => {
+                            let color = if is_last_move { Color::LightRed } else { Color::Red };
+                            ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                        }
+                        2 => {
+                            let color = if is_last_move { Color::LightBlue } else { Color::Blue };
+                            ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                        }
+                        3 => {
+                            let color = if is_last_move { Color::LightGreen } else { Color::Green };
+                            ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                        }
+                        4 => {
+                            let color = if is_last_move { Color::LightYellow } else { Color::Yellow };
+                            ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                        }
+                        _ => {
+                            // Chess-like pattern for empty squares - alternating light and dark
+                            let is_light_square = (r + c) % 2 == 0;
+                            if is_light_square {
+                                ("░░", Style::default().fg(Color::Rgb(100, 100, 100))) // Light gray
+                            } else {
+                                ("▒▒", Style::default().fg(Color::Rgb(60, 60, 60))) // Dark gray
+                            }
+                        }
+                    }
+                };
+
+                let final_style = if is_cursor && cell == 0 && show_cursor {
+                    style.bg(Color::Yellow)
+                } else {
+                    style
+                };
+
+                line_spans.push(Span::styled(symbol, final_style));
+            }
+            board_lines.push(Line::from(line_spans));
+        }
+
+        let paragraph = Paragraph::new(board_lines);
+        frame.render_widget(paragraph, inner_area);
+        Ok(())
+    }
+
+    /// Get ghost piece positions for preview
+    fn get_ghost_piece_positions(&self, _state: &crate::games::blokus::BlokusState, piece_id: usize, transformation: usize, row: usize, col: usize) -> std::collections::HashSet<(usize, usize)> {
+        use std::collections::HashSet;
+        let pieces = crate::games::blokus::get_blokus_pieces();
+        
+        if let Some(piece) = pieces.iter().find(|p| p.id == piece_id) {
+            if transformation < piece.transformations.len() {
+                let shape = &piece.transformations[transformation];
+                let mut positions = HashSet::new();
+                
+                for &(dr, dc) in shape {
+                    let new_r = row as i32 + dr;
+                    let new_c = col as i32 + dc;
+                    
+                    if new_r >= 0 && new_c >= 0 {
+                        positions.insert((new_r as usize, new_c as usize));
+                    }
+                }
+                
+                return positions;
+            }
+        }
+        
+        HashSet::new()
+    }
+
+    /// Render Blokus piece selection panel
+    fn render_blokus_piece_selection(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
+        // For now, use a simplified version of the piece selection
+        // TODO: Implement full piece selection with visual pieces
+        use ratatui::{
+            widgets::{Block, Borders, Paragraph},
+            style::{Style, Color, Modifier},
+            text::{Line, Span},
+        };
+        
+        let block = Block::default()
+            .title("Available Pieces (All Players)")
+            .borders(Borders::ALL);
+        let inner_area = block.inner(area);
+        frame.render_widget(block, area);
+        
+        if let GameWrapper::Blokus(blokus_state) = &app.game_wrapper {
+            let current_player = app.game_wrapper.get_current_player();
+            let player_colors = [Color::Red, Color::Blue, Color::Green, Color::Yellow];
+            let player_names = ["P1", "P2", "P3", "P4"];
+            
+            let mut all_lines = Vec::new();
+            
+            // Generate content for all players
+            for player in 1..=4 {
+                let available_pieces = blokus_state.get_available_pieces(player);
+                let available_count = available_pieces.len();
+                let color = player_colors[(player - 1) as usize];
+                let is_current = player == current_player;
+                let is_expanded = app.blokus_ui_config.players_expanded.get((player - 1) as usize).unwrap_or(&true);
+                
+                // Player header with expand/collapse indicator
+                let expand_indicator = if *is_expanded { "▼" } else { "▶" };
+                let header_style = if is_current {
+                    Style::default().fg(color).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
+                } else {
+                    Style::default().fg(color).add_modifier(Modifier::BOLD)
+                };
+                
+                let header_text = if is_current {
+                    format!("{} ► {} ({} pieces) ◄", expand_indicator, player_names[(player - 1) as usize], available_count)
+                } else {
+                    format!("{}   {} ({} pieces)", expand_indicator, player_names[(player - 1) as usize], available_count)
+                };
+                
+                all_lines.push(Line::from(Span::styled(header_text, header_style)));
+                
+                // Show simplified piece list if expanded
+                if *is_expanded && is_current {
+                    let selected_piece = app.blokus_ui_config.selected_piece_idx;
+                    let pieces_info = available_pieces.iter().take(10).enumerate().map(|(i, &piece_idx)| {
+                        let key_label = if i < 9 { (i + 1).to_string() } else { "0".to_string() };
+                        let is_selected = selected_piece == Some(piece_idx);
+                        let piece_text = if is_selected {
+                            format!("[{}] Piece {}", key_label, piece_idx)
+                        } else {
+                            format!(" {}  Piece {}", key_label, piece_idx)
+                        };
+                        
+                        let style = if is_selected {
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+                        
+                        Line::from(Span::styled(piece_text, style))
+                    }).collect::<Vec<_>>();
+                    
+                    all_lines.extend(pieces_info);
+                }
+            }
+            
+            let paragraph = Paragraph::new(all_lines);
+            frame.render_widget(paragraph, inner_area);
+        }
+        
+        Ok(())
+    }
+
+    /// Render Blokus player status panel
+    fn render_blokus_player_status(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
+        use ratatui::{
+            widgets::{Block, Borders, Paragraph},
+            style::{Style, Color, Modifier},
+            text::{Line, Span},
+        };
+        
+        if let GameWrapper::Blokus(blokus_state) = &app.game_wrapper {
+            let block = Block::default().title("Players").borders(Borders::ALL);
+            let inner_area = block.inner(area);
+            frame.render_widget(block, area);
+            
+            let mut status_lines = Vec::new();
+            let current_player = app.game_wrapper.get_current_player();
+            let player_colors = [Color::Red, Color::Blue, Color::Green, Color::Yellow];
+            let player_names = ["P1", "P2", "P3", "P4"];
+
+            for player in 1..=4 {
+                let available_pieces = blokus_state.get_available_pieces(player);
+                let piece_count = available_pieces.len();
+                let color = player_colors[(player - 1) as usize];
+                
+                let status_text = if player == current_player {
+                    format!("► {} ({} pieces)", player_names[(player - 1) as usize], piece_count)
+                } else {
+                    format!("  {} ({} pieces)", player_names[(player - 1) as usize], piece_count)
+                };
+                
+                let style = if player == current_player {
+                    Style::default().fg(color).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(color)
+                };
+                
+                status_lines.push(Line::from(Span::styled(status_text, style)));
+            }
+
+            // Add controls
+            status_lines.push(Line::from(""));
+            status_lines.push(Line::from(Span::styled("Controls:", Style::default().fg(Color::Gray))));
+            status_lines.push(Line::from(Span::styled("1-9,0,a-k: Select", Style::default().fg(Color::Gray))));
+            status_lines.push(Line::from(Span::styled("R: Rotate  X: Flip", Style::default().fg(Color::Gray))));
+            status_lines.push(Line::from(Span::styled("Enter: Place", Style::default().fg(Color::Gray))));
+            status_lines.push(Line::from(Span::styled("P: Pass", Style::default().fg(Color::Gray))));
+
+            let paragraph = Paragraph::new(status_lines);
+            frame.render_widget(paragraph, inner_area);
+        }
+        
+        Ok(())
+    }
 }
 
 impl Component for InGameComponent {
@@ -809,7 +1136,12 @@ impl Component for InGameComponent {
             layout::{Constraint, Direction, Layout},
         };
         
-        // Use the original layout: board at top, game status in middle, stats/history tabs at bottom
+        // Check if this is Blokus game and use specialized layout
+        if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
+            return self.render_blokus_game_view(frame, area, app);
+        }
+        
+        // Use the original layout for non-Blokus games: board at top, game status in middle, stats/history tabs at bottom
         let (board_area, bottom_area) = app.layout_config.get_main_layout(area);
         
         // Split the bottom area into game info and stats/history
