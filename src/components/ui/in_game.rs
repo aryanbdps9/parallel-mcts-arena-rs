@@ -1615,10 +1615,10 @@ impl InGameComponent {
             // Calculate which cell was clicked based on game type
             match &app.game_wrapper {
                 GameWrapper::Connect4(_) => {
-                    // Connect4: Each column is 4 characters wide
-                    let cell_width = 4;
+                    // Connect4: Each column is 2 characters wide
+                    let cell_width = 2;
                     let board_col = ((col - board_start_col) / cell_width) as usize;
-                    
+
                     if board_col < board_width {
                         // Update cursor position to this column
                         app.board_cursor.1 = board_col as u16;
@@ -1632,8 +1632,8 @@ impl InGameComponent {
                     let cell_width = 2;
                     let cell_height = 1;
                     
-                    let board_col = ((col - board_start_col) / cell_width) as usize;
-                    let board_row = ((row - board_start_row) / cell_height) as usize;
+                    let board_col = ((col - board_start_col) / cell_width - 1) as usize;
+                    let board_row = ((row - board_start_row) / cell_height - 1) as usize;
                     
                     if board_row < board_height && board_col < board_width {
                         app.board_cursor = (board_row as u16, board_col as u16);

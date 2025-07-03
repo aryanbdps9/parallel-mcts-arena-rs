@@ -351,112 +351,113 @@ fn handle_board_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
     }
 
     let (board_area, _) = app.layout_config.get_main_layout(terminal_size);
-    
-    // Check if click is within the board area
-    if row >= board_area.y && row < board_area.y + board_area.height &&
-       col >= board_area.x && col < board_area.x + board_area.width {
 
-        // Convert to relative coordinates within the board area
-        let relative_col = col - board_area.x;
-        let relative_row = row - board_area.y;
-        
-        // Account for the border around the board area (1 character on all sides)
-        // The actual board content is rendered in the inner area
-        if relative_col == 0 || relative_row == 0 || 
-           relative_col >= board_area.width - 1 || relative_row >= board_area.height - 1 {
-            return; // Click is on the border, ignore
-        }
-        
-        // Adjust for the border offset
-        let inner_col = relative_col - 1;
-        let inner_row = relative_row - 1;
-        
-        let (board_height, board_width) = {
-            let board = app.game_wrapper.get_board();
-            (board.len(), if board.len() > 0 { board[0].len() } else { 0 })
-        };
+    // Return if click is not within the board area
+    if !(row >= board_area.y && row < board_area.y + board_area.height &&
+        col >= board_area.x && col < board_area.x + board_area.width) {
+        return;
+    }
 
-        // Handle Connect4 column label clicks (first row in inner area)
-        if matches!(app.game_wrapper, GameWrapper::Connect4(_)) && inner_row == 0 { // First row is column labels
-            let col_width = 2; // Match draw_standard_board logic
-            let board_col = (inner_col / col_width) as usize;
-            
-            if board_col < board_width {
-                // Update cursor to this column
-                app.board_cursor.1 = board_col as u16;
-                update_connect4_cursor_row(app);
-                
-                // Make the move immediately
-                let player_move = MoveWrapper::Connect4(Connect4Move(board_col));
-                if app.game_wrapper.is_legal(&player_move) {
-                    make_move_with_move(app, player_move);
-                }
+    // Convert to relative coordinates within the board area
+    let relative_col = col - board_area.x;
+    let relative_row = row - board_area.y;
+
+    // Account for the border around the board area (1 character on all sides)
+    // The actual board content is rendered in the inner area
+    if relative_col == 0 || relative_row == 0 ||
+        relative_col >= board_area.width - 1 || relative_row >= board_area.height - 1 {
+        return; // Click is on the border, ignore
+    }
+
+    // Adjust for the border offset
+    let inner_col = relative_col - 1;
+    let inner_row = relative_row - 1;
+
+    let (board_height, board_width) = {
+        let board = app.game_wrapper.get_board();
+        (board.len(), if board.len() > 0 { board[0].len() } else { 0 })
+    };
+
+    // Handle Connect4 column label clicks (first row in inner area)
+    if matches!(app.game_wrapper, GameWrapper::Connect4(_)) && inner_row == 0 { // First row is column labels
+        let col_width = 2; // Match draw_standard_board logic
+        let board_col = (inner_col / col_width) as usize;
+
+        if board_col < board_width {
+            // Update cursor to this column
+            app.board_cursor.1 = board_col as u16;
+            update_connect4_cursor_row(app);
+
+            // Make the move immediately
+            let player_move = MoveWrapper::Connect4(Connect4Move(board_col));
+            if app.game_wrapper.is_legal(&player_move) {
+                make_move_with_move(app, player_move);
             }
-            return;
         }
+        return;
+    }
 
-        // For Connect4, ignore clicks on the board itself (only column labels are clickable)
-        if matches!(app.game_wrapper, GameWrapper::Connect4(_)) {
-            return;
-        }
+    // For Connect4, ignore clicks on the board itself (only column labels are clickable)
+    if matches!(app.game_wrapper, GameWrapper::Connect4(_)) {
+        return;
+    }
 
-        // Calculate board cell from click position for Gomoku/Othello
-        // Account for borders and labels
-        let needs_row_labels = !matches!(app.game_wrapper, GameWrapper::Connect4(_));
-        let row_label_width = if needs_row_labels { 2 } else { 0 };
+    // Calculate board cell from click position for Gomoku/Othello
+    // Account for borders and labels
+    let needs_row_labels = !matches!(app.game_wrapper, GameWrapper::Connect4(_));
+    let row_label_width = if needs_row_labels { 2 } else { 0 };
+
+    // Skip the column header row
+    if inner_row == 0 {
+        return;
+    }
+
+    if inner_col >= row_label_width && inner_row >= 1 {
+        // Use the same layout logic as the board rendering to get accurate coordinates
+        let col_width = match &app.game_wrapper {
+            GameWrapper::Othello(_) => 2,
+            _ => 2, // Standard width for X/O
+        };
         
-        // Skip the column header row
-        if inner_row == 0 {
-            return;
-        }
-        
-        if inner_col >= row_label_width && inner_row >= 1 {
-            // Use the same layout logic as the board rendering to get accurate coordinates
-            let col_width = match &app.game_wrapper {
-                GameWrapper::Othello(_) => 2,  
-                _ => 2, // Standard width for X/O
+        // Calculate actual board position using the same logic as rendering
+        // The key insight: in rendering, board cells start at cell_areas[1] for Gomoku/Othello
+        // So when calculating from mouse coordinates, we need to account for this offset
+        let adjusted_col = inner_col - row_label_width;
+        let board_col = (adjusted_col / col_width) as usize;
+        let board_row = (inner_row - 1) as usize; // -1 to account for column header row
+
+        if board_row < board_height && board_col < board_width {
+            // Update cursor position
+            app.board_cursor = (board_row as u16, board_col as u16);
+
+            // Check if move is legal before making it
+            let player_move = {
+                let board = app.game_wrapper.get_board();
+                match &app.game_wrapper {
+                    GameWrapper::Gomoku(_) => {
+                        if board[board_row][board_col] == 0 {
+                            Some(MoveWrapper::Gomoku(GomokuMove(board_row, board_col)))
+                        } else {
+                            None
+                        }
+                    },
+                    GameWrapper::Othello(_) => {
+                        Some(MoveWrapper::Othello(OthelloMove(board_row, board_col)))
+                    },
+                    GameWrapper::Blokus(_) => {
+                        // Blokus handled separately
+                        None
+                    }
+                    GameWrapper::Connect4(_) => {
+                        // Already handled above
+                        None
+                    }
+                }
             };
-            
-            // Calculate actual board position using the same logic as rendering
-            // The key insight: in rendering, board cells start at cell_areas[1] for Gomoku/Othello
-            // So when calculating from mouse coordinates, we need to account for this offset
-            let adjusted_col = inner_col - row_label_width;
-            let board_col = (adjusted_col / col_width) as usize;
-            let board_row = (inner_row - 1) as usize; // -1 to account for column header row
-            
-            if board_row < board_height && board_col < board_width {
-                // Update cursor position
-                app.board_cursor = (board_row as u16, board_col as u16);
-                
-                // Check if move is legal before making it
-                let player_move = {
-                    let board = app.game_wrapper.get_board();
-                    match &app.game_wrapper {
-                        GameWrapper::Gomoku(_) => {
-                            if board[board_row][board_col] == 0 {
-                                Some(MoveWrapper::Gomoku(GomokuMove(board_row, board_col)))
-                            } else {
-                                None
-                            }
-                        },
-                        GameWrapper::Othello(_) => {
-                            Some(MoveWrapper::Othello(OthelloMove(board_row, board_col)))
-                        },
-                        GameWrapper::Blokus(_) => {
-                            // Blokus handled separately
-                            None
-                        }
-                        GameWrapper::Connect4(_) => {
-                            // Already handled above
-                            None
-                        }
-                    }
-                };
-                
-                if let Some(mv) = player_move {
-                    if app.game_wrapper.is_legal(&mv) {
-                        make_move_with_move(app, mv);
-                    }
+
+            if let Some(mv) = player_move {
+                if app.game_wrapper.is_legal(&mv) {
+                    make_move_with_move(app, mv);
                 }
             }
         }
