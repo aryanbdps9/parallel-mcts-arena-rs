@@ -52,6 +52,22 @@ impl UITheme {
         }
     }
 
+    /// Get a darker shade of a color for ghost/preview effects
+    pub fn darken_color(&self, color: Color) -> Color {
+        match color {
+            Color::Red => Color::Rgb(128, 0, 0),
+            Color::Blue => Color::Rgb(0, 0, 128),
+            Color::Green => Color::Rgb(0, 128, 0),
+            Color::Yellow => Color::Rgb(128, 128, 0),
+            Color::LightRed => Color::Rgb(160, 80, 80),
+            Color::LightBlue => Color::Rgb(80, 80, 160),
+            Color::LightGreen => Color::Rgb(80, 160, 80),
+            Color::LightYellow => Color::Rgb(160, 160, 80),
+            Color::Rgb(r, g, b) => Color::Rgb(r / 2, g / 2, b / 2),
+            _ => Color::DarkGray,
+        }
+    }
+
     /// Get the highlighted version of a player color
     pub fn player_color_highlighted(&self, player: u8) -> Color {
         match player {
@@ -143,11 +159,14 @@ impl UITheme {
     }
 
     /// Get ghost piece style for Blokus
-    pub fn blokus_ghost_style(&self, is_legal: bool) -> (&'static str, Style) {
+    pub fn blokus_ghost_style(&self, is_legal: bool, current_player: u8) -> (&'static str, Style) {
+        let player_color = self.player_color(current_player);
+        let ghost_color = self.darken_color(player_color);
+        
         if is_legal {
-            ("▓▓", Style::default().fg(self.ghost_legal_color).add_modifier(Modifier::BOLD))
+            ("▓▓", Style::default().fg(ghost_color).add_modifier(Modifier::BOLD))
         } else {
-            ("▓▓", Style::default().fg(self.ghost_illegal_color).add_modifier(Modifier::DIM))
+            ("▓▓", Style::default().fg(ghost_color).add_modifier(Modifier::DIM))
         }
     }
 

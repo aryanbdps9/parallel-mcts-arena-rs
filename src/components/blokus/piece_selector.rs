@@ -87,8 +87,8 @@ impl BlokusPieceSelectorComponent {
     }
 
     /// Calculate total content height
-    pub fn calculate_total_height(&self, app: &App) -> u16 {
-        self.player_panels.iter().map(|panel| panel.calculate_height(app)).sum()
+    pub fn calculate_total_height(&self, _app: &App) -> u16 {
+        self.player_panels.iter().map(|panel| panel.calculate_height()).sum()
     }
 
     /// Handle mouse scroll
@@ -123,11 +123,11 @@ impl BlokusPieceSelectorComponent {
             if panel.get_player() == current_player as u8 {
                 break;
             }
-            current_player_start += panel.calculate_height(app);
+            current_player_start += panel.calculate_height();
         }
 
         let current_player_height = if let Some(panel) = self.player_panels.get((current_player - 1) as usize) {
-            panel.calculate_height(app)
+            panel.calculate_height()
         } else {
             return;
         };
@@ -181,7 +181,7 @@ impl BlokusPieceSelectorComponent {
         // Find which player panel this click belongs to
         let mut current_y = 0;
         for panel in &mut self.player_panels {
-            let panel_height = panel.calculate_height(app);
+            let panel_height = panel.calculate_height();
             if content_y >= current_y && content_y < current_y + panel_height {
                 // Create panel area for this render
                 let panel_area = Rect::new(

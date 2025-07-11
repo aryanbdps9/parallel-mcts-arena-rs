@@ -12,8 +12,8 @@ use crate::components::core::{Component, ComponentId, ComponentResult, EventResu
 use crate::components::events::{ComponentEvent, InputEvent};
 use crate::components::ui::{ResponsiveLayoutComponent, ResponsiveLayoutType, MoveHistoryComponent};
 use crate::components::blokus::{
-    BlokusBoardComponent, BlokusPieceSelectorComponent, BlokusGameStatsComponent, 
-    BlokusInstructionPanelComponent
+    BlokusBoardComponent, BlokusPieceSelectorComponent, EnhancedBlokusPieceSelectorComponent, 
+    ImprovedBlokusPieceSelectorComponent, BlokusGameStatsComponent, BlokusInstructionPanelComponent
 };
 use crossterm::event::KeyCode;
 use mcts::GameState;
@@ -24,6 +24,8 @@ pub struct InGameComponent {
     // Modular Blokus components
     blokus_board: Option<BlokusBoardComponent>,
     blokus_piece_selector: Option<BlokusPieceSelectorComponent>,
+    enhanced_blokus_piece_selector: Option<EnhancedBlokusPieceSelectorComponent>,
+    improved_blokus_piece_selector: Option<ImprovedBlokusPieceSelectorComponent>,
     blokus_game_stats: Option<BlokusGameStatsComponent>,
     blokus_instruction_panel: Option<BlokusInstructionPanelComponent>,
     // Move history component
@@ -48,6 +50,8 @@ impl InGameComponent {
             id: ComponentId::new(),
             blokus_board: None,
             blokus_piece_selector: None,
+            enhanced_blokus_piece_selector: None,
+            improved_blokus_piece_selector: None,
             blokus_game_stats: None,
             blokus_instruction_panel: None,
             move_history: MoveHistoryComponent::new(),
@@ -62,6 +66,12 @@ impl InGameComponent {
         }
         if self.blokus_piece_selector.is_none() {
             self.blokus_piece_selector = Some(BlokusPieceSelectorComponent::new());
+        }
+        if self.enhanced_blokus_piece_selector.is_none() {
+            self.enhanced_blokus_piece_selector = Some(EnhancedBlokusPieceSelectorComponent::new());
+        }
+        if self.improved_blokus_piece_selector.is_none() {
+            self.improved_blokus_piece_selector = Some(ImprovedBlokusPieceSelectorComponent::new());
         }
         if self.blokus_game_stats.is_none() {
             self.blokus_game_stats = Some(BlokusGameStatsComponent::new());
@@ -805,8 +815,14 @@ impl InGameComponent {
             board_component.render(frame, board_area, app)?;
         }
 
-        // Render piece selection panel using the modular component
-        if let Some(ref mut piece_selector) = self.blokus_piece_selector {
+        // Render piece selection panel using the improved modular component
+        if let Some(ref mut improved_piece_selector) = self.improved_blokus_piece_selector {
+            improved_piece_selector.render(frame, piece_area, app)?;
+        } else if let Some(ref mut enhanced_piece_selector) = self.enhanced_blokus_piece_selector {
+            // Fallback to enhanced piece selector
+            enhanced_piece_selector.render(frame, piece_area, app)?;
+        } else if let Some(ref mut piece_selector) = self.blokus_piece_selector {
+            // Fallback to original piece selector
             piece_selector.render(frame, piece_area, app)?;
         }
 
@@ -1335,8 +1351,16 @@ impl Component for InGameComponent {
         if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
             self.ensure_blokus_components();
             
-            // Try to handle the event with Blokus components first
-            if let Some(ref mut piece_selector) = self.blokus_piece_selector {
+            // Try to handle the event with improved Blokus piece selector first
+            if let Some(ref mut improved_piece_selector) = self.improved_blokus_piece_selector {
+                if let Ok(true) = improved_piece_selector.handle_event(event, app) {
+                    return Ok(true);
+                }
+            } else if let Some(ref mut enhanced_piece_selector) = self.enhanced_blokus_piece_selector {
+                if let Ok(true) = enhanced_piece_selector.handle_event(event, app) {
+                    return Ok(true);
+                }
+            } else if let Some(ref mut piece_selector) = self.blokus_piece_selector {
                 if let Ok(true) = piece_selector.handle_event(event, app) {
                     return Ok(true);
                 }
@@ -1408,7 +1432,11 @@ impl Component for InGameComponent {
             ComponentEvent::Input(InputEvent::MouseScroll { x: _, y: _, up: _ }) => {
                 // Route mouse scroll to piece selector for Blokus
                 if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
-                    if let Some(ref mut piece_selector) = self.blokus_piece_selector {
+                    if let Some(ref mut improved_piece_selector) = self.improved_blokus_piece_selector {
+                        improved_piece_selector.handle_event(event, app)
+                    } else if let Some(ref mut enhanced_piece_selector) = self.enhanced_blokus_piece_selector {
+                        enhanced_piece_selector.handle_event(event, app)
+                    } else if let Some(ref mut piece_selector) = self.blokus_piece_selector {
                         piece_selector.handle_event(event, app)
                     } else {
                         Ok(false)
