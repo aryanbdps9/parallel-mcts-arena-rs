@@ -10,7 +10,7 @@ use std::any::Any;
 use crate::app::App;
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::{ComponentEvent, InputEvent};
-use crate::components::ui::{ResponsiveLayoutComponent, ResponsiveLayoutType, ScrollableComponent};
+use crate::components::ui::{ResponsiveLayoutComponent, ResponsiveLayoutType};
 use crate::components::blokus::player_panel::BlokusPlayerPanelComponent;
 
 /// Component managing the piece selector for all players in Blokus
@@ -20,7 +20,6 @@ pub struct BlokusPieceSelectorComponent {
     scroll_offset: u16,
     area: Option<Rect>,
     responsive_layout: ResponsiveLayoutComponent,
-    scrollable_content: ScrollableComponent,
 }
 
 impl BlokusPieceSelectorComponent {
@@ -46,9 +45,6 @@ impl BlokusPieceSelectorComponent {
             scroll_offset: 0,
             area: None,
             responsive_layout,
-            scrollable_content: ScrollableComponent::new()
-                .with_title("Available Pieces (All Players)".to_string())
-                .with_auto_scroll(false),
         }
     }
 

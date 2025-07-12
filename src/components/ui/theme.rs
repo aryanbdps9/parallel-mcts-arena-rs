@@ -7,7 +7,6 @@ pub struct UITheme {
     // Player colors for consistent game representation
     player_colors: [Color; 4],
     // UI element colors
-    background_color: Color,
     border_color: Color,
     text_color: Color,
     highlight_color: Color,
@@ -26,7 +25,6 @@ impl Default for UITheme {
     fn default() -> Self {
         Self {
             player_colors: [Color::Red, Color::Blue, Color::Green, Color::Yellow],
-            background_color: Color::Black,
             border_color: Color::White,
             text_color: Color::White,
             highlight_color: Color::Yellow,

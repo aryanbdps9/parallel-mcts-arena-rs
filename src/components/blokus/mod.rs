@@ -12,6 +12,12 @@ pub mod piece_selector;
 pub mod game_stats;
 pub mod instruction_panel;
 
+// Utility modules for modular piece grid functionality
+pub mod grid_border;
+pub mod piece_visualizer;
+pub mod click_handler;
+pub mod grid_layout;
+
 pub use board::BlokusBoardComponent;
 pub use piece_cell::PieceCellComponent;
 pub use piece_shape::{PieceShapeComponent, PieceShapeConfig};

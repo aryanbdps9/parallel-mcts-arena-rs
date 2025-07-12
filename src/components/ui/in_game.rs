@@ -10,7 +10,6 @@ use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::games::{gomoku::GomokuMove, connect4::Connect4Move, othello::OthelloMove, blokus::BlokusMove};
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::{ComponentEvent, InputEvent};
-use crate::components::ui::{ResponsiveLayoutComponent, ResponsiveLayoutType, MoveHistoryComponent};
 use crate::components::blokus::{
     BlokusBoardComponent, BlokusPieceSelectorComponent, EnhancedBlokusPieceSelectorComponent, 
     ImprovedBlokusPieceSelectorComponent, BlokusGameStatsComponent, BlokusInstructionPanelComponent
@@ -28,24 +27,10 @@ pub struct InGameComponent {
     improved_blokus_piece_selector: Option<ImprovedBlokusPieceSelectorComponent>,
     blokus_game_stats: Option<BlokusGameStatsComponent>,
     blokus_instruction_panel: Option<BlokusInstructionPanelComponent>,
-    // Move history component
-    move_history: MoveHistoryComponent,
-    // Responsive layout for dynamic screen adaptation
-    layout_manager: ResponsiveLayoutComponent,
 }
 
 impl InGameComponent {
     pub fn new() -> Self {
-        let mut layout_manager = ResponsiveLayoutComponent::new(
-            ResponsiveLayoutType::Adaptive, 
-            ratatui::layout::Direction::Horizontal
-        );
-        
-        // Configure responsive layout for Blokus: board (50%), pieces (35%), stats (15%)
-        layout_manager.add_panel(40, 50, 60); // Board area
-        layout_manager.add_panel(30, 35, 45); // Piece selector area
-        layout_manager.add_panel(15, 15, 25); // Stats area
-        
         Self {
             id: ComponentId::new(),
             blokus_board: None,
@@ -54,8 +39,6 @@ impl InGameComponent {
             improved_blokus_piece_selector: None,
             blokus_game_stats: None,
             blokus_instruction_panel: None,
-            move_history: MoveHistoryComponent::new(),
-            layout_manager,
         }
     }
 
@@ -849,6 +832,7 @@ impl InGameComponent {
     }
 
     /// Render Blokus board with ghost piece preview (proper implementation)
+    #[allow(dead_code)]
     fn render_blokus_board_with_ghost(&self, frame: &mut Frame, area: Rect, app: &App, state: &crate::games::blokus::BlokusState, selected_piece: Option<(usize, usize, usize, usize)>, show_cursor: bool) -> ComponentResult<()> {
         use ratatui::{
             widgets::{Block, Borders, Paragraph},
@@ -959,6 +943,7 @@ impl InGameComponent {
     }
 
     /// Get ghost piece positions for preview
+    #[allow(dead_code)]
     fn get_ghost_piece_positions(&self, _state: &crate::games::blokus::BlokusState, piece_id: usize, transformation: usize, row: usize, col: usize) -> std::collections::HashSet<(usize, usize)> {
         use std::collections::HashSet;
         let pieces = crate::games::blokus::get_blokus_pieces();
@@ -985,6 +970,7 @@ impl InGameComponent {
     }
 
     /// Render Blokus piece selection panel
+    #[allow(dead_code)]
     fn render_blokus_piece_selection(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
         use ratatui::{
             widgets::{Block, Borders, Paragraph},
@@ -1250,6 +1236,7 @@ impl InGameComponent {
     }
 
     /// Render Blokus player status panel
+    #[allow(dead_code)]
     fn render_blokus_player_status(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
         use ratatui::{
             widgets::{Block, Borders, Paragraph},
@@ -1616,6 +1603,7 @@ impl InGameComponent {
     }
 
     /// Handle Blokus-specific clicks during AI turn (only expand/collapse allowed)
+    #[allow(dead_code)]
     fn handle_blokus_mouse_click_ai_turn(&self, app: &mut App, col: u16, row: u16) {
         // Get layout areas - need to calculate from the render method's logic
         let terminal_size = Rect::new(0, 0, 120, 40); // Use a reasonable default size
@@ -2057,6 +2045,7 @@ impl InGameComponent {
     }
 
     /// Handle expand/collapse clicks only (for AI turns)
+    #[allow(dead_code)]
     fn handle_blokus_piece_expand_collapse_only(&self, app: &mut App, col: u16, row: u16) {
         // Simplified version that only handles expand/collapse, not piece selection
         if let GameWrapper::Blokus(_) = app.game_wrapper {

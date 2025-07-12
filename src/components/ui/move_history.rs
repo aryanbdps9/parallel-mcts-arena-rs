@@ -10,7 +10,7 @@ use std::any::Any;
 use crate::app::{App, MoveHistoryEntry};
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::ComponentEvent;
-use crate::components::ui::{ScrollableComponent, UITheme};
+use crate::components::ui::ScrollableComponent;
 
 /// Component that manages and displays move history
 pub struct MoveHistoryComponent {
@@ -18,7 +18,6 @@ pub struct MoveHistoryComponent {
     area: Option<Rect>,
     move_history: Vec<MoveHistoryEntry>,
     scrollable: ScrollableComponent,
-    theme: UITheme,
     auto_scroll: bool,
 }
 
@@ -32,7 +31,6 @@ impl MoveHistoryComponent {
                 .with_title("Move History".to_string())
                 .with_border(true)
                 .with_auto_scroll(true),
-            theme: UITheme::default(),
             auto_scroll: true,
         }
     }

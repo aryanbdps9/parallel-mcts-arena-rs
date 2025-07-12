@@ -1,4 +1,19 @@
 //! Responsive piece grid component with uniform layout for accurate click detection.
+//!
+//! **Component Overview:**
+//! This is the main Blokus piece selector component that displays all available pieces
+//! in a responsive grid layout. The component handles:
+//! - Dynamic grid sizing based on terminal dimensions
+//! - Uniform cell heights for accurate mouse click detection
+//! - Visual feedback for piece selection and placement validity
+//! - Responsive layout that adapts to different screen sizes
+//!
+//! **Why this component is complex:**
+//! 1. **Terminal UI Constraints:** Text-based rendering requires careful character positioning
+//! 2. **Mouse Interaction:** Precise coordinate mapping for click detection
+//! 3. **Responsive Design:** Dynamic layout adaptation to varying terminal sizes
+//! 4. **Visual Consistency:** Uniform cell sizing across different piece shapes
+//! 5. **Game Logic Integration:** Real-time validation of piece placement legality
 
 use ratatui::{
     layout::Rect,
@@ -17,7 +32,39 @@ use crate::components::core::{Component, ComponentId, ComponentResult, EventResu
 use crate::components::events::{ComponentEvent, InputEvent};
 use crate::games::blokus::get_blokus_pieces;
 
+// Import modular utilities
+use super::grid_border::GridBorderRenderer;
+use super::piece_visualizer::PieceVisualizer;
+use super::click_handler::ClickHandler;
+use super::grid_layout::GridLayoutCalculator;
+
 /// Configuration for the responsive piece grid
+/// 
+/// **Purpose:** Centralized configuration for all grid layout and visual parameters
+/// 
+/// **Configuration Categories:**
+/// 
+/// 1. **Layout Constraints:**
+///    - min_pieces_per_row: Minimum pieces in a row (prevents overly tall grids)
+///    - max_pieces_per_row: Maximum pieces in a row (prevents overly wide grids)
+///    - uniform_cell_height: Fixed height for all cells (critical for click detection)
+/// 
+/// 2. **Visual Dimensions:**
+///    - piece_width: Character width for piece display
+///    - piece_height: Character height for piece shapes
+/// 
+/// 3. **UI Features:**
+///    - show_borders: Draw borders around the grid
+///    - show_labels: Display piece numbers/letters
+///    - compact_mode: Reduce spacing for smaller terminals
+/// 
+/// 4. **Color Scheme:**
+///    - player_color: Main color for pieces and selection
+///    - empty_cell_light/dark: Checkerboard pattern colors
+/// 
+/// **Why uniform_cell_height is critical:**
+/// Without fixed cell heights, different piece shapes would create uneven rows,
+/// making mouse click coordinate mapping extremely difficult and error-prone.
 #[derive(Clone)]
 pub struct ResponsivePieceGridConfig {
     pub player_color: Color,
@@ -35,6 +82,29 @@ pub struct ResponsivePieceGridConfig {
 }
 
 impl Default for ResponsivePieceGridConfig {
+    /// Default configuration values optimized for terminal display
+    /// 
+    /// **Design Rationale:**
+    /// 
+    /// **Layout Constraints:**
+    /// - min_pieces_per_row: 3 (prevents overly narrow grids on wide terminals)
+    /// - max_pieces_per_row: 8 (prevents tiny pieces on narrow terminals)
+    /// 
+    /// **Visual Dimensions:**
+    /// - piece_width: 8 characters (enough for complex pentomino shapes)
+    /// - piece_height: 4 characters (adequate vertical space for piece shapes)
+    /// - uniform_cell_height: 5 (4 for piece + 1 for label row)
+    /// 
+    /// **UI Features:**
+    /// - show_borders: true (helps with visual separation and click targets)
+    /// - show_labels: true (essential for piece identification)
+    /// - compact_mode: false (prioritize readability over space)
+    /// 
+    /// **Color Scheme:**
+    /// - player_color: White (high contrast on most terminal backgrounds)
+    /// - empty_cell colors: Gray gradient (subtle checkerboard pattern)
+    /// 
+    /// These defaults balance readability, usability, and terminal compatibility.
     fn default() -> Self {
         Self {
             player_color: Color::White,
@@ -53,14 +123,47 @@ impl Default for ResponsivePieceGridConfig {
 }
 
 /// Responsive piece grid that optimally arranges pieces in a near-square grid
+/// 
+/// **Core Architecture:**
+/// This component uses a modular design with specialized sub-components:
+/// - GridLayoutCalculator: Computes optimal grid dimensions
+/// - GridBorderRenderer: Handles visual borders and separators
+/// - PieceVisualizer: Converts piece shapes to terminal text
+/// - ClickHandler: Maps mouse coordinates to piece selections
+/// 
+/// **Responsiveness Strategy:**
+/// The grid adapts to different terminal sizes by:
+/// 1. Calculating available space within the component area
+/// 2. Determining optimal pieces_per_row using aspect ratio optimization
+/// 3. Using uniform cell heights for consistent layout
+/// 4. Dynamically adjusting grid dimensions while maintaining usability
+/// 
+/// **State Management:**
+/// - available_pieces: List of piece indices the player can use
+/// - selected_piece: Currently highlighted piece (for placement)
+/// - is_current_player: Whether this player can interact with the grid
+/// - Layout state: Cached grid dimensions for rendering and click detection
+/// 
+/// **Why modular design:**
+/// Each algorithm (layout, rendering, interaction) is complex enough to warrant
+/// separation, making the code more maintainable and testable.
 pub struct ResponsivePieceGridComponent {
     id: ComponentId,
     player: u8,
-    config: ResponsivePieceGridConfig,
     available_pieces: Vec<usize>,
     selected_piece: Option<usize>,
     is_current_player: bool,
     area: Option<Rect>,
+    
+    // Modular components
+    layout_calculator: GridLayoutCalculator,
+    #[allow(dead_code)]
+    border_renderer: GridBorderRenderer,
+    #[allow(dead_code)]
+    piece_visualizer: PieceVisualizer,
+    click_handler: ClickHandler,
+    
+    // Layout state
     pieces_per_row: usize,
     total_rows: usize,
 }
@@ -71,11 +174,18 @@ impl ResponsivePieceGridComponent {
         Self {
             id: ComponentId::new(),
             player,
-            config,
             available_pieces: Vec::new(),
             selected_piece: None,
             is_current_player: false,
             area: None,
+            
+            // Initialize modular components
+            layout_calculator: GridLayoutCalculator::new(config.clone()),
+            border_renderer: GridBorderRenderer::new(pieces_per_row, config.piece_width),
+            piece_visualizer: PieceVisualizer::new(config.piece_width),
+            click_handler: ClickHandler::new(config, pieces_per_row, 1),
+            
+            // Layout state
             pieces_per_row,
             total_rows: 1,
         }
@@ -94,62 +204,43 @@ impl ResponsivePieceGridComponent {
         self.is_current_player = is_current;
     }
 
-    pub fn get_config(&self) -> &ResponsivePieceGridConfig {
-        &self.config
+    pub fn set_area(&mut self, area: Option<Rect>) {
+        self.area = area;
     }
 
     pub fn get_area(&self) -> Option<Rect> {
         self.area
     }
 
-    pub fn set_area(&mut self, area: Option<Rect>) {
-        self.area = area;
-    }
-
     /// Calculate optimal grid layout for near-square arrangement
     fn update_layout(&mut self) {
         let piece_count = self.available_pieces.len();
         if piece_count == 0 {
-            self.pieces_per_row = self.config.min_pieces_per_row;
+            self.pieces_per_row = self.layout_calculator.get_config().min_pieces_per_row;
             self.total_rows = 1;
             return;
         }
 
-        // Find the layout that produces the most square-like grid
-        let mut best_layout = (self.config.min_pieces_per_row, 1);
-        let mut best_ratio = f64::INFINITY;
-
-        for cols in self.config.min_pieces_per_row..=self.config.max_pieces_per_row {
-            let rows = (piece_count + cols - 1) / cols; // Ceiling division
-            let ratio = if rows > 0 {
-                (cols as f64 / rows as f64 - 1.0).abs() // How far from 1:1 ratio
-            } else {
-                f64::INFINITY
-            };
-
-            if ratio < best_ratio {
-                best_ratio = ratio;
-                best_layout = (cols, rows);
-            }
-        }
-
-        self.pieces_per_row = best_layout.0;
-        self.total_rows = best_layout.1;
+        let (pieces_per_row, total_rows) = self.layout_calculator.calculate_optimal_layout(piece_count);
+        self.pieces_per_row = pieces_per_row;
+        self.total_rows = total_rows;
+        
+        // Update click handler with new layout
+        self.click_handler.update_layout(pieces_per_row, total_rows);
     }
 
     /// Update layout based on available width for responsive design
     fn update_responsive_layout(&mut self, available_width: u16) {
         let separator_width = 1;
-        let border_width = if self.config.show_borders { 2 } else { 0 };
+        let border_width = if self.layout_calculator.get_config().show_borders { 2 } else { 0 };
         let usable_width = available_width.saturating_sub(border_width);
         
         if usable_width > 0 {
             // Calculate max pieces that can fit
-            let max_pieces_that_fit = ((usable_width as usize + separator_width) / (self.config.piece_width + separator_width)).max(1);
+            let max_pieces_that_fit = ((usable_width as usize + separator_width) / (self.layout_calculator.get_config().piece_width + separator_width)).max(1);
             
-            // Constrain to config limits
-            let old_max = self.config.max_pieces_per_row;
-            self.config.max_pieces_per_row = max_pieces_that_fit.min(old_max).max(self.config.min_pieces_per_row);
+            // Update layout calculator with new constraints
+            self.layout_calculator.update_width_constraints(max_pieces_that_fit);
             
             // Recalculate layout with new constraints
             self.update_layout();
@@ -212,37 +303,20 @@ impl ResponsivePieceGridComponent {
     pub fn handle_piece_click(&mut self, app: &mut App, local_x: u16, local_y: u16) -> Option<usize> {
         if self.area.is_none() { return None; }
         
-        // Account for border offset
-        let click_x = local_x.saturating_sub(if self.config.show_borders { 1 } else { 0 });
-        let click_y = local_y.saturating_sub(if self.config.show_borders { 1 } else { 0 });
-
-        // Account for the top border of the internal grid
-        let click_y = click_y.saturating_sub(1); // Top border line
-
-        // Calculate row accounting for row separators
-        // Each row takes uniform_cell_height lines + 1 line for row separator (except last row)
-        let total_row_height = self.config.uniform_cell_height + 1; // Include row separator
-        let row = (click_y as usize) / total_row_height;
-        
-        // Account for the left border of the internal grid
-        let click_x = click_x.saturating_sub(1); // Left border column
-        
-        // Calculate column based on fixed piece width + separator
-        let separator_width = 1;
-        let total_cell_width = self.config.piece_width + separator_width;
-        let col = (click_x as usize) / total_cell_width;
-
-        // Calculate piece index
-        let piece_index = row * self.pieces_per_row + col;
-        
-        // Check if this piece exists and is available
-        if piece_index < self.available_pieces.len() && row < self.total_rows && col < self.pieces_per_row {
-            let actual_piece_idx = self.available_pieces[piece_index];
+        // Use click handler to calculate piece index
+        if let Some((row, col)) = self.click_handler.calculate_piece_index(local_x, local_y) {
+            // Calculate piece index
+            let piece_index = row * self.pieces_per_row + col;
             
-            // Only allow selection for current player
-            if self.is_current_player {
-                app.blokus_ui_config.select_piece(actual_piece_idx);
-                return Some(actual_piece_idx);
+            // Check if this piece exists and is available
+            if piece_index < self.available_pieces.len() && row < self.total_rows && col < self.pieces_per_row {
+                let actual_piece_idx = self.available_pieces[piece_index];
+                
+                // Only allow selection for current player
+                if self.is_current_player {
+                    app.blokus_ui_config.select_piece(actual_piece_idx);
+                    return Some(actual_piece_idx);
+                }
             }
         }
         
@@ -251,12 +325,13 @@ impl ResponsivePieceGridComponent {
 
     /// Calculate the height needed for this grid including separators and internal borders
     pub fn calculate_height(&self) -> u16 {
-        let content_height = self.total_rows as u16 * self.config.uniform_cell_height as u16;
+        let config = self.layout_calculator.get_config();
+        let content_height = self.total_rows as u16 * config.uniform_cell_height as u16;
         // Add height for row separators (one less than total rows)
         let separator_height = if self.total_rows > 1 { self.total_rows as u16 - 1 } else { 0 };
         // Add height for top and bottom internal grid borders
         let internal_border_height = 2;
-        let border_height = if self.config.show_borders { 2 } else { 0 };
+        let border_height = if config.show_borders { 2 } else { 0 };
         content_height + separator_height + internal_border_height + border_height
     }
 
@@ -288,7 +363,7 @@ impl ResponsivePieceGridComponent {
                 let style = if is_selected {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
                 } else if is_available {
-                    Style::default().fg(self.config.player_color).add_modifier(Modifier::BOLD)
+                    Style::default().fg(self.get_config().player_color).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
                 };
@@ -302,7 +377,7 @@ impl ResponsivePieceGridComponent {
         }
 
         // Render exactly uniform_cell_height lines for this row
-        for line_index in 0..self.config.uniform_cell_height {
+        for line_index in 0..self.get_config().uniform_cell_height {
             let mut line_spans = Vec::new();
             
             // Add left border
@@ -313,18 +388,18 @@ impl ResponsivePieceGridComponent {
                     // We have a piece in this column
                     let (piece_label, piece_visual_lines, _) = &pieces_data[col];
                     
-                    if line_index == 0 && self.config.show_labels {
+                    if line_index == 0 && self.get_config().show_labels {
                         // First line: show label
                         let label_text = if self.selected_piece == Some(pieces_in_row[col]) {
                             format!("[{}]", piece_label)
                         } else {
                             format!(" {} ", piece_label)
                         };
-                        format!("{:^width$}", label_text, width = self.config.piece_width)
+                        format!("{:^width$}", label_text, width = self.get_config().piece_width)
                     } else {
                         // Other lines: show piece shape with padding
-                        let visual_line_index = if self.config.show_labels {
-                            line_index.saturating_sub(1)
+                        let visual_line_index = if self.get_config().show_labels {
+                            (line_index as usize).saturating_sub(1)
                         } else {
                             line_index
                         };
@@ -333,8 +408,8 @@ impl ResponsivePieceGridComponent {
                             let piece_line = &piece_visual_lines[visual_line_index];
                             // Pad to exact width
                             let current_width = piece_line.chars().count();
-                            if current_width < self.config.piece_width {
-                                let total_padding = self.config.piece_width - current_width;
+                            if current_width < self.get_config().piece_width {
+                                let total_padding = self.get_config().piece_width - current_width;
                                 let left_padding = total_padding / 2;
                                 let right_padding = total_padding - left_padding;
                                 format!("{}{}{}", 
@@ -342,19 +417,19 @@ impl ResponsivePieceGridComponent {
                                     piece_line, 
                                     " ".repeat(right_padding)
                                 )
-                            } else if current_width > self.config.piece_width {
-                                piece_line.chars().take(self.config.piece_width).collect()
+                            } else if current_width > self.get_config().piece_width {
+                                piece_line.chars().take(self.get_config().piece_width).collect()
                             } else {
                                 piece_line.to_string()
                             }
                         } else {
                             // Empty line with proper padding
-                            " ".repeat(self.config.piece_width)
+                            " ".repeat(self.get_config().piece_width)
                         }
                     }
                 } else {
                     // Empty cell - no piece in this column
-                    " ".repeat(self.config.piece_width)
+                    " ".repeat(self.get_config().piece_width)
                 };
 
                 // Apply styling to the content
@@ -386,7 +461,7 @@ impl ResponsivePieceGridComponent {
         // Build the separator character by character to ensure proper alignment
         for col in 0..self.pieces_per_row {
             // Add horizontal line for this piece cell
-            for _ in 0..self.config.piece_width {
+            for _ in 0..self.get_config().piece_width {
                 separator_chars.push('─');
             }
             
@@ -409,7 +484,7 @@ impl ResponsivePieceGridComponent {
         
         for col in 0..self.pieces_per_row {
             // Add horizontal line for this piece cell
-            for _ in 0..self.config.piece_width {
+            for _ in 0..self.get_config().piece_width {
                 border_chars.push('─');
             }
             
@@ -432,7 +507,7 @@ impl ResponsivePieceGridComponent {
         
         for col in 0..self.pieces_per_row {
             // Add horizontal line for this piece cell
-            for _ in 0..self.config.piece_width {
+            for _ in 0..self.get_config().piece_width {
                 border_chars.push('─');
             }
             
@@ -446,6 +521,10 @@ impl ResponsivePieceGridComponent {
         
         let border_line: String = border_chars.into_iter().collect();
         all_lines.push(Line::from(Span::styled(border_line, Style::default().fg(Color::DarkGray))));
+    }
+
+    pub fn get_config(&self) -> &ResponsivePieceGridConfig {
+        self.layout_calculator.get_config()
     }
 }
 
@@ -486,12 +565,13 @@ impl Component for ResponsivePieceGridComponent {
         }
 
         // Create the main block if borders are enabled
-        let inner_area = if self.config.show_borders {
+        let config = self.layout_calculator.get_config();
+        let inner_area = if config.show_borders {
             let title = format!("Player {} Pieces", self.player);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(Style::default().fg(self.config.player_color));
+                .border_style(Style::default().fg(config.player_color));
             
             let inner = block.inner(area);
             frame.render_widget(block, area);
