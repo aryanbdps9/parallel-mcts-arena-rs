@@ -1,4 +1,4 @@
-//! Responsive piece grid component with optimal layout calculations.
+//! Responsive piece grid component with uniform layout for accurate click detection.
 
 use ratatui::{
     layout::Rect,
@@ -30,6 +30,8 @@ pub struct ResponsivePieceGridConfig {
     pub compact_mode: bool,
     pub empty_cell_light: Color,
     pub empty_cell_dark: Color,
+    /// Fixed cell height ensures uniform sizing for accurate click detection
+    pub uniform_cell_height: usize,
 }
 
 impl Default for ResponsivePieceGridConfig {
@@ -38,13 +40,14 @@ impl Default for ResponsivePieceGridConfig {
             player_color: Color::White,
             min_pieces_per_row: 3,
             max_pieces_per_row: 8,
-            piece_width: 8,     // Increased back to accommodate double-width characters
-            piece_height: 4,    // Keep same height for piece shapes
+            piece_width: 8,     // Width for piece display
+            piece_height: 4,    // Height for piece shapes
             show_borders: true,
             show_labels: true,
             compact_mode: false,
             empty_cell_light: Color::Rgb(100, 100, 100),
             empty_cell_dark: Color::Rgb(60, 60, 60),
+            uniform_cell_height: 5,  // Fixed height: 4 for piece + 1 for label
         }
     }
 }
@@ -153,7 +156,7 @@ impl ResponsivePieceGridComponent {
         }
     }
 
-    /// Create visual representation of a piece shape
+    /// Create visual representation of a piece shape (simplified)
     fn create_visual_piece_shape(&self, piece_shape: &[(i32, i32)]) -> Vec<String> {
         if piece_shape.is_empty() {
             return vec!["██".to_string()];
@@ -167,31 +170,26 @@ impl ResponsivePieceGridComponent {
         let height = (max_r - min_r + 1) as usize;
         let width = (max_c - min_c + 1) as usize;
 
-        // Create a grid with double characters for square appearance
+        // Create a simplified grid
         let mut grid = vec![vec!["  "; width]; height];
 
         for &(r, c) in piece_shape {
             let gr = (r - min_r) as usize;
             let gc = (c - min_c) as usize;
             if gr < height && gc < width {
-                grid[gr][gc] = "██"; // Double block characters for square appearance
+                grid[gr][gc] = "██"; // Double block characters
             }
         }
 
-        // Convert to vector of strings with checkerboard background
-        grid.iter().enumerate()
-            .map(|(row_idx, row)| {
-                row.iter().enumerate()
-                    .map(|(col_idx, cell)| {
+        // Convert to vector of strings
+        grid.iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
                         if *cell == "██" {
                             "██".to_string()
                         } else {
-                            // Create checkerboard pattern for empty cells using theme colors
-                            if (row_idx + col_idx) % 2 == 0 {
-                                "░░".to_string() // Will be styled with light color
-                            } else {
-                                "▒▒".to_string() // Will be styled with dark color
-                            }
+                            "  ".to_string() // Simple empty space
                         }
                     })
                     .collect::<String>()
@@ -210,37 +208,35 @@ impl ResponsivePieceGridComponent {
         }
     }
 
-    /// Handle piece click with grid coordinate mapping
+    /// Simple, predictable click handling with separator awareness and grid borders
     pub fn handle_piece_click(&mut self, app: &mut App, local_x: u16, local_y: u16) -> Option<usize> {
-        let Some(area) = self.area else { return None; };
+        if self.area.is_none() { return None; }
         
-        let _inner_area = if self.config.show_borders {
-            Rect::new(
-                area.x + 1,
-                area.y + 1,
-                area.width.saturating_sub(2),
-                area.height.saturating_sub(2),
-            )
-        } else {
-            area
-        };
-
         // Account for border offset
         let click_x = local_x.saturating_sub(if self.config.show_borders { 1 } else { 0 });
         let click_y = local_y.saturating_sub(if self.config.show_borders { 1 } else { 0 });
 
-        // Calculate row and column
-        let row_height = self.config.piece_height + (if self.config.show_labels { 1 } else { 0 });
-        let row = (click_y as usize) / row_height;
+        // Account for the top border of the internal grid
+        let click_y = click_y.saturating_sub(1); // Top border line
+
+        // Calculate row accounting for row separators
+        // Each row takes uniform_cell_height lines + 1 line for row separator (except last row)
+        let total_row_height = self.config.uniform_cell_height + 1; // Include row separator
+        let row = (click_y as usize) / total_row_height;
         
+        // Account for the left border of the internal grid
+        let click_x = click_x.saturating_sub(1); // Left border column
+        
+        // Calculate column based on fixed piece width + separator
         let separator_width = 1;
-        let col = (click_x as usize) / (self.config.piece_width + separator_width);
+        let total_cell_width = self.config.piece_width + separator_width;
+        let col = (click_x as usize) / total_cell_width;
 
         // Calculate piece index
         let piece_index = row * self.pieces_per_row + col;
         
         // Check if this piece exists and is available
-        if piece_index < self.available_pieces.len() && row < self.total_rows {
+        if piece_index < self.available_pieces.len() && row < self.total_rows && col < self.pieces_per_row {
             let actual_piece_idx = self.available_pieces[piece_index];
             
             // Only allow selection for current player
@@ -253,12 +249,203 @@ impl ResponsivePieceGridComponent {
         None
     }
 
-    /// Calculate the height needed for this grid
+    /// Calculate the height needed for this grid including separators and internal borders
     pub fn calculate_height(&self) -> u16 {
-        let row_height = self.config.piece_height + (if self.config.show_labels { 1 } else { 0 });
-        let content_height = self.total_rows as u16 * row_height as u16;
+        let content_height = self.total_rows as u16 * self.config.uniform_cell_height as u16;
+        // Add height for row separators (one less than total rows)
+        let separator_height = if self.total_rows > 1 { self.total_rows as u16 - 1 } else { 0 };
+        // Add height for top and bottom internal grid borders
+        let internal_border_height = 2;
         let border_height = if self.config.show_borders { 2 } else { 0 };
-        content_height + border_height
+        content_height + separator_height + internal_border_height + border_height
+    }
+
+    /// Render a single row of pieces with uniform cell heights
+    fn render_piece_row(
+        &self,
+        all_lines: &mut Vec<Line>,
+        pieces_in_row: &[usize],
+        pieces: &[crate::games::blokus::Piece],
+        available_set: &HashSet<usize>,
+    ) {
+        // Create piece data for this row
+        let mut pieces_data = Vec::new();
+        for piece_idx in pieces_in_row {
+            if *piece_idx < pieces.len() {
+                let piece = &pieces[*piece_idx];
+                let piece_shape = if !piece.transformations.is_empty() {
+                    &piece.transformations[0]
+                } else {
+                    continue;
+                };
+
+                let is_available = available_set.contains(piece_idx);
+                let is_selected = self.selected_piece == Some(*piece_idx);
+                
+                let piece_visual_lines = self.create_visual_piece_shape(piece_shape);
+                let piece_label = self.get_piece_label(*piece_idx);
+
+                let style = if is_selected {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
+                } else if is_available {
+                    Style::default().fg(self.config.player_color).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                };
+
+                pieces_data.push((piece_label, piece_visual_lines, style));
+            }
+        }
+
+        if pieces_data.is_empty() {
+            return;
+        }
+
+        // Render exactly uniform_cell_height lines for this row
+        for line_index in 0..self.config.uniform_cell_height {
+            let mut line_spans = Vec::new();
+            
+            // Add left border
+            line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+            
+            for col in 0..self.pieces_per_row {
+                let content = if col < pieces_data.len() {
+                    // We have a piece in this column
+                    let (piece_label, piece_visual_lines, _) = &pieces_data[col];
+                    
+                    if line_index == 0 && self.config.show_labels {
+                        // First line: show label
+                        let label_text = if self.selected_piece == Some(pieces_in_row[col]) {
+                            format!("[{}]", piece_label)
+                        } else {
+                            format!(" {} ", piece_label)
+                        };
+                        format!("{:^width$}", label_text, width = self.config.piece_width)
+                    } else {
+                        // Other lines: show piece shape with padding
+                        let visual_line_index = if self.config.show_labels {
+                            line_index.saturating_sub(1)
+                        } else {
+                            line_index
+                        };
+                        
+                        if visual_line_index < piece_visual_lines.len() {
+                            let piece_line = &piece_visual_lines[visual_line_index];
+                            // Pad to exact width
+                            let current_width = piece_line.chars().count();
+                            if current_width < self.config.piece_width {
+                                let total_padding = self.config.piece_width - current_width;
+                                let left_padding = total_padding / 2;
+                                let right_padding = total_padding - left_padding;
+                                format!("{}{}{}", 
+                                    " ".repeat(left_padding), 
+                                    piece_line, 
+                                    " ".repeat(right_padding)
+                                )
+                            } else if current_width > self.config.piece_width {
+                                piece_line.chars().take(self.config.piece_width).collect()
+                            } else {
+                                piece_line.to_string()
+                            }
+                        } else {
+                            // Empty line with proper padding
+                            " ".repeat(self.config.piece_width)
+                        }
+                    }
+                } else {
+                    // Empty cell - no piece in this column
+                    " ".repeat(self.config.piece_width)
+                };
+
+                // Apply styling to the content
+                let style = if col < pieces_data.len() {
+                    pieces_data[col].2
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                line_spans.push(Span::styled(content, style));
+                
+                // Add separator between columns (extend to full grid width)
+                if col < self.pieces_per_row - 1 {
+                    line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                }
+            }
+            
+            // Add right border
+            line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+            
+            all_lines.push(Line::from(line_spans));
+        }
+    }
+
+    /// Add a horizontal row separator line across the full grid width with proper junctions
+    fn add_row_separator(&self, all_lines: &mut Vec<Line>) {
+        let mut separator_chars = Vec::new();
+        separator_chars.push('├'); // Left border junction
+        
+        // Build the separator character by character to ensure proper alignment
+        for col in 0..self.pieces_per_row {
+            // Add horizontal line for this piece cell
+            for _ in 0..self.config.piece_width {
+                separator_chars.push('─');
+            }
+            
+            // Add vertical line separator (junction) after each column except the last
+            if col < self.pieces_per_row - 1 {
+                separator_chars.push('┼'); // Cross junction for intersection
+            }
+        }
+        
+        separator_chars.push('┤'); // Right border junction
+        
+        let separator_line: String = separator_chars.into_iter().collect();
+        all_lines.push(Line::from(Span::styled(separator_line, Style::default().fg(Color::DarkGray))));
+    }
+
+    /// Add top border of the grid
+    fn add_grid_top_border(&self, all_lines: &mut Vec<Line>) {
+        let mut border_chars = Vec::new();
+        border_chars.push('┌'); // Top-left corner
+        
+        for col in 0..self.pieces_per_row {
+            // Add horizontal line for this piece cell
+            for _ in 0..self.config.piece_width {
+                border_chars.push('─');
+            }
+            
+            // Add junction or corner
+            if col < self.pieces_per_row - 1 {
+                border_chars.push('┬'); // Top junction
+            } else {
+                border_chars.push('┐'); // Top-right corner
+            }
+        }
+        
+        let border_line: String = border_chars.into_iter().collect();
+        all_lines.push(Line::from(Span::styled(border_line, Style::default().fg(Color::DarkGray))));
+    }
+
+    /// Add bottom border of the grid
+    fn add_grid_bottom_border(&self, all_lines: &mut Vec<Line>) {
+        let mut border_chars = Vec::new();
+        border_chars.push('└'); // Bottom-left corner
+        
+        for col in 0..self.pieces_per_row {
+            // Add horizontal line for this piece cell
+            for _ in 0..self.config.piece_width {
+                border_chars.push('─');
+            }
+            
+            // Add junction or corner
+            if col < self.pieces_per_row - 1 {
+                border_chars.push('┴'); // Bottom junction
+            } else {
+                border_chars.push('┘'); // Bottom-right corner
+            }
+        }
+        
+        let border_line: String = border_chars.into_iter().collect();
+        all_lines.push(Line::from(Span::styled(border_line, Style::default().fg(Color::DarkGray))));
     }
 }
 
@@ -299,18 +486,18 @@ impl Component for ResponsivePieceGridComponent {
         }
 
         // Create the main block if borders are enabled
-        let (inner_area, _title) = if self.config.show_borders {
+        let inner_area = if self.config.show_borders {
             let title = format!("Player {} Pieces", self.player);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(title.clone())
+                .title(title)
                 .border_style(Style::default().fg(self.config.player_color));
             
             let inner = block.inner(area);
             frame.render_widget(block, area);
-            (inner, title)
+            inner
         } else {
-            (area, format!("Player {} Pieces", self.player))
+            area
         };
 
         if self.available_pieces.is_empty() {
@@ -324,8 +511,11 @@ impl Component for ResponsivePieceGridComponent {
         let pieces = get_blokus_pieces();
         let available_set: HashSet<usize> = self.available_pieces.iter().cloned().collect();
 
-        // Create content for each row
+        // Create content with uniform cell heights and complete grid structure
         let mut all_lines = Vec::new();
+
+        // Add top border of the grid
+        self.add_grid_top_border(&mut all_lines);
 
         for row in 0..self.total_rows {
             let chunk_start = row * self.pieces_per_row;
@@ -341,146 +531,17 @@ impl Component for ResponsivePieceGridComponent {
                 continue;
             }
 
-            // Create piece data for this row
-            let mut pieces_in_row_data = Vec::new();
-            for piece_idx in &pieces_in_row {
-                if *piece_idx < pieces.len() {
-                    let piece = &pieces[*piece_idx];
-                    let piece_shape = if !piece.transformations.is_empty() {
-                        &piece.transformations[0]
-                    } else {
-                        continue;
-                    };
-
-                    let is_available = available_set.contains(piece_idx);
-                    let is_selected = self.selected_piece == Some(*piece_idx);
-                    
-                    let piece_visual_lines = self.create_visual_piece_shape(piece_shape);
-                    let piece_label = self.get_piece_label(*piece_idx);
-
-                    let style = if is_selected {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
-                    } else if is_available {
-                        Style::default().fg(self.config.player_color).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
-                    };
-
-                    pieces_in_row_data.push((piece_label, piece_visual_lines, style));
-                }
-            }
-
-            if pieces_in_row_data.is_empty() {
-                continue;
-            }
-
-            // Find max height for alignment
-            let max_height = pieces_in_row_data.iter()
-                .map(|(_, lines, _)| lines.len())
-                .max()
-                .unwrap_or(1);
-
-            // Add piece labels row if enabled
-            if self.config.show_labels {
-                let mut key_line_spans = Vec::new();
-                for (i, (piece_label, _, style)) in pieces_in_row_data.iter().enumerate() {
-                    let label_text = if self.selected_piece == Some(self.available_pieces[chunk_start + i]) {
-                        format!("[{}]", piece_label)
-                    } else {
-                        format!(" {} ", piece_label)
-                    };
-                    let padded_label = format!("{:^width$}", label_text, width = self.config.piece_width);
-                    key_line_spans.push(Span::styled(padded_label, *style));
-                    if i < pieces_in_row_data.len() - 1 {
-                        key_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
-                    }
-                }
-                all_lines.push(Line::from(key_line_spans));
-            }
-
-            // Add piece visual rows
-            for line_idx in 0..max_height {
-                let mut shape_line_spans = Vec::new();
-                for (i, (_, piece_visual_lines, style)) in pieces_in_row_data.iter().enumerate() {
-                    // Get the piece line content, or empty if beyond piece height
-                    let piece_line = if line_idx < piece_visual_lines.len() {
-                        &piece_visual_lines[line_idx]
-                    } else {
-                        ""
-                    };
-                    
-                    // Create a properly sized line by padding to exact piece_width
-                    let current_width = piece_line.chars().count();
-                    let formatted_line = if current_width < self.config.piece_width {
-                        let total_padding = self.config.piece_width - current_width;
-                        let left_padding = total_padding / 2;
-                        let right_padding = total_padding - left_padding;
-                        format!("{}{}{}", 
-                            " ".repeat(left_padding), 
-                            piece_line, 
-                            " ".repeat(right_padding)
-                        )
-                    } else if current_width > self.config.piece_width {
-                        // Truncate if too wide
-                        piece_line.chars().take(self.config.piece_width).collect()
-                    } else {
-                        piece_line.to_string()
-                    };
-                    
-                    // Now parse the formatted line and apply styles
-                    let chars: Vec<char> = formatted_line.chars().collect();
-                    let mut j = 0;
-                    
-                    while j < chars.len() {
-                        if j + 1 < chars.len() {
-                            let two_char = format!("{}{}", chars[j], chars[j + 1]);
-                            match two_char.as_str() {
-                                "██" => {
-                                    // Piece block - use player color
-                                    shape_line_spans.push(Span::styled("██", *style));
-                                }
-                                "░░" => {
-                                    // Light checkerboard cell
-                                    shape_line_spans.push(Span::styled("░░", Style::default().fg(self.config.empty_cell_light)));
-                                }
-                                "▒▒" => {
-                                    // Dark checkerboard cell
-                                    shape_line_spans.push(Span::styled("▒▒", Style::default().fg(self.config.empty_cell_dark)));
-                                }
-                                "  " => {
-                                    // Empty space - use default style
-                                    shape_line_spans.push(Span::styled("  ", Style::default()));
-                                }
-                                _ => {
-                                    // Fallback for any other two-character combinations
-                                    shape_line_spans.push(Span::styled(two_char, *style));
-                                }
-                            }
-                            j += 2;
-                        } else {
-                            // Handle single character at end (shouldn't happen with double-width approach)
-                            shape_line_spans.push(Span::styled(chars[j].to_string(), Style::default()));
-                            j += 1;
-                        }
-                    }
-                    
-                    // Add vertical separator between pieces
-                    if i < pieces_in_row_data.len() - 1 {
-                        shape_line_spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
-                    }
-                }
-                all_lines.push(Line::from(shape_line_spans));
-            }
-
-            // Add separator line between rows (except last)
-            if row < self.total_rows - 1 && chunk_end < self.available_pieces.len() {
-                // Calculate actual width: pieces + separators between pieces
-                let num_pieces_in_row = pieces_in_row.len();
-                let separator_width = num_pieces_in_row * self.config.piece_width + (num_pieces_in_row.saturating_sub(1));
-                let separator_line = "─".repeat(separator_width);
-                all_lines.push(Line::from(Span::styled(separator_line, Style::default().fg(Color::DarkGray))));
+            // Create uniform cell for each piece in this row
+            self.render_piece_row(&mut all_lines, &pieces_in_row, &pieces, &available_set);
+            
+            // Add row separator after each row except the last one
+            if row < self.total_rows - 1 {
+                self.add_row_separator(&mut all_lines);
             }
         }
+
+        // Add bottom border of the grid
+        self.add_grid_bottom_border(&mut all_lines);
 
         // Render the content
         let paragraph = Paragraph::new(all_lines);
