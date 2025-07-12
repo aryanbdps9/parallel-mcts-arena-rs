@@ -1,32 +1,92 @@
 //! # Application State and Core Components
 //!
-//! This module defines the core data structures and components that manage the
-//! application's state, including UI state, player types, AI workers, and communication
-//! channels between the UI, game logic, and AI threads.
+//! This module serves as the central orchestrator for the entire multi-game MCTS engine.
+//! It defines the core data structures and components that manage application state,
+//! coordinate between UI and AI threads, and handle game lifecycle management.
+//!
+//! ## Key Responsibilities
+//! - **State Management**: Centralized application state including game state, UI state, and AI status
+//! - **AI Coordination**: Thread-safe communication with background AI worker processes
+//! - **Event Handling**: Processing user input and system events across all game modes
+//! - **Game Abstraction**: Unified interface for multiple game types through GameWrapper
+//! - **UI Orchestration**: Coordinating between different UI components and screens
+//!
+//! ## Architecture Overview
+//! ```text
+//! ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+//! │   UI Components │◄──►│    App State     │◄──►│   AI Worker     │
+//! │                 │    │                  │    │                 │
+//! │ • Game View     │    │ • Game Wrapper   │    │ • MCTS Engine   │
+//! │ • Menu System   │    │ • Player Config  │    │ • Search Tree   │
+//! │ • Settings      │    │ • Move History   │    │ • Statistics    │
+//! └─────────────────┘    └──────────────────┘    └─────────────────┘
+//! ```
+//!
+//! ## Thread Safety
+//! The AI worker runs in a separate thread with message-passing communication.
+//! This ensures the UI remains responsive while AI performs intensive computations.
+//!
+//! ## Memory Management
+//! The application uses various optimization strategies:
+//! - Tree reuse between moves to avoid redundant computation
+//! - Automatic history scrolling with user override detection
+//! - Component lifecycle management for UI elements
+//! - Node recycling in the MCTS search tree
 
-use crate::game_wrapper::{GameWrapper, MoveWrapper};
-use crate::tui::layout::LayoutConfig;
-use crate::tui::mouse::DragState;
-use crate::tui::blokus_ui::BlokusUIConfig;
-use mcts::{GameState, MCTS};
-use ratatui::widgets::ListState;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, atomic::AtomicBool};
-use std::thread::{self, JoinHandle};
-use std::time::SystemTime;
+// Import dependencies for game management and UI coordination
+use crate::game_wrapper::{GameWrapper, MoveWrapper};  // Unified game interface
+use crate::tui::layout::LayoutConfig;                 // Responsive UI layout management  
+use crate::tui::mouse::DragState;                     // Mouse interaction state tracking
+use crate::tui::blokus_ui::BlokusUIConfig;            // Blokus-specific UI configuration
+use mcts::{GameState, MCTS};                          // Monte Carlo Tree Search engine
+use ratatui::widgets::ListState;                      // TUI list widget state management
+use std::sync::mpsc::{self, Receiver, Sender};        // Thread communication channels
+use std::sync::{Arc, atomic::AtomicBool};             // Thread-safe shared state
+use std::thread::{self, JoinHandle};                  // Background thread management
+use std::time::SystemTime;                           // Timestamp tracking for moves
 
 /// Represents a single move in the game's move history
 ///
-/// Tracks when a move was made, which player made it, and what the move was.
-/// Used for game replay and analysis.
+/// This structure captures all relevant information about a move for later
+/// analysis, replay, or debugging purposes. Each entry is immutable once
+/// created to maintain historical integrity.
+///
+/// # Fields
+/// - `timestamp`: When the move was made (for performance analysis)
+/// - `player`: Which player made the move (using game-specific player IDs)
+/// - `a_move`: The actual move that was made (wrapped for type safety)
+///
+/// # Usage
+/// Move history is primarily used for:
+/// - Game replay and analysis
+/// - Debugging game logic issues
+/// - Performance metrics (time per move)
+/// - UI display of past moves
+/// - Undo functionality (future enhancement)
 #[derive(Debug, Clone)]
 pub struct MoveHistoryEntry {
+    /// System timestamp when the move was executed
+    /// Used for performance analysis and replay timing
     pub timestamp: SystemTime,
+    
+    /// Player ID who made this move
+    /// Uses game-specific numbering (e.g., 1/-1 for two-player games, 1-4 for Blokus)
     pub player: i32,
+    
+    /// The move that was made, type-erased for storage
+    /// Contains game-specific move data wrapped in MoveWrapper enum
     pub a_move: MoveWrapper,
 }
 
 impl MoveHistoryEntry {
+    /// Creates a new move history entry with the current timestamp
+    /// 
+    /// # Arguments
+    /// * `player` - The player ID who made the move
+    /// * `a_move` - The move that was made
+    /// 
+    /// # Returns
+    /// A new MoveHistoryEntry with current system time
     pub fn new(player: i32, a_move: MoveWrapper) -> Self {
         Self {
             timestamp: SystemTime::now(),
@@ -38,29 +98,111 @@ impl MoveHistoryEntry {
 
 /// Messages sent to AI worker threads
 ///
-/// Controls AI behavior and requests information from the AI engine.
+/// This enum defines the communication protocol between the main application
+/// thread and the background AI worker. All AI operations are asynchronous
+/// to keep the UI responsive during intensive computations.
+///
+/// # Message Types
+/// - `Search`: Initiate a new MCTS search from a given position
+/// - `AdvanceRoot`: Update the search tree after a move is made
+/// - `Stop`: Gracefully terminate the AI worker
+///
+/// # Thread Safety
+/// All messages are designed to be safely sent across thread boundaries.
+/// The AI worker processes these messages sequentially to maintain consistency.
 #[derive(Debug)]
 pub enum AIRequest {
-    Search(GameWrapper, u64), // GameWrapper and timeout in seconds
-    AdvanceRoot(MoveWrapper), // Advance the MCTS tree root to reflect a move that was made
+    /// Request the AI to search for the best move from a given position
+    /// 
+    /// # Parameters
+    /// - `GameWrapper`: Current game state to search from
+    /// - `u64`: Maximum search time in seconds
+    /// 
+    /// The AI will perform MCTS until either the time limit is reached
+    /// or the maximum iteration count is exceeded, whichever comes first.
+    Search(GameWrapper, u64),
+    
+    /// Advance the MCTS tree root to reflect a move that was made
+    /// 
+    /// # Parameters  
+    /// - `MoveWrapper`: The move that was executed in the game
+    /// 
+    /// This allows the AI to reuse previous search results by updating
+    /// the tree structure rather than starting from scratch. This is a
+    /// key optimization for maintaining AI strength across moves.
+    AdvanceRoot(MoveWrapper),
+    
+    /// Signal the AI worker to stop processing and exit gracefully
+    /// 
+    /// The worker will finish its current operation and then terminate.
+    /// This is used during application shutdown or when reconfiguring AI settings.
     Stop,
 }
 
 /// Messages received from AI worker threads
 ///
-/// Provides AI moves, status updates, and analysis information.
+/// Responses from the AI worker containing search results and analysis data.
+/// The main thread polls for these messages to update the UI and game state.
+///
+/// # Design Rationale
+/// Currently only contains move responses, but designed to be extensible
+/// for future enhancements like progressive search updates or analysis data.
 #[derive(Debug)]
 pub enum AIResponse {
+    /// The AI's selected move along with detailed search statistics
+    /// 
+    /// # Parameters
+    /// - `MoveWrapper`: The best move found by the AI
+    /// - `mcts::SearchStatistics`: Detailed analysis including node counts, 
+    ///   evaluation scores, and top move candidates
+    /// 
+    /// This provides both the actionable result (the move) and rich
+    /// information for debugging and user education about AI reasoning.
     Move(MoveWrapper, mcts::SearchStatistics),
 }
 
 /// The AI worker that runs in a separate thread
 ///
-/// Handles MCTS search requests and manages the search tree.
+/// This struct manages a background thread dedicated to AI computation.
+/// It provides a clean interface for asynchronous AI operations while
+/// maintaining thread safety and resource management.
+///
+/// # Architecture
+/// ```text
+/// Main Thread                    AI Worker Thread
+/// ┌─────────────┐               ┌──────────────────┐
+/// │             │──AIRequest──► │                  │
+/// │ Application │               │ MCTS Engine      │
+/// │             │◄─AIResponse── │                  │
+/// └─────────────┘               └──────────────────┘
+/// ```
+///
+/// # Key Features
+/// - **Asynchronous Operation**: AI computation doesn't block the UI
+/// - **Persistent State**: Maintains MCTS tree across multiple searches
+/// - **Graceful Shutdown**: Proper cleanup when the worker is no longer needed
+/// - **Error Isolation**: AI failures don't crash the main application
+///
+/// # Lifecycle
+/// 1. Created with configuration parameters
+/// 2. Processes search requests asynchronously  
+/// 3. Maintains search tree for efficiency
+/// 4. Cleaned up automatically when dropped
 pub struct AIWorker {
+    /// Handle to the background thread for proper cleanup
+    /// None after the worker has been stopped and joined
     handle: Option<JoinHandle<()>>,
+    
+    /// Channel for sending requests to the AI worker
+    /// Requests are processed sequentially in the worker thread
     tx_req: Sender<AIRequest>,
+    
+    /// Channel for receiving responses from the AI worker
+    /// Main thread polls this non-blockingly for results
     rx_resp: Receiver<AIResponse>,
+    
+    /// Atomic flag for signaling the worker to stop current operations
+    /// Allows for immediate interruption of long-running searches
     stop_flag: Arc<AtomicBool>,
 }
 

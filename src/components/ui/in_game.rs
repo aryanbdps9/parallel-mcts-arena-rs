@@ -1,4 +1,58 @@
-//! In-game component.
+//! # In-Game Component - Primary Gameplay Interface
+//!
+//! This module implements the main gameplay interface that handles all aspects of
+//! active game rendering and interaction. It serves as the central hub for game
+//! display, move input, AI status monitoring, and game state visualization.
+//!
+//! ## Key Responsibilities
+//! - **Game Board Rendering**: Display current game state with appropriate styling for each game type
+//! - **Move Input Processing**: Handle keyboard and mouse input for making moves
+//! - **Cursor Management**: Visual cursor for move selection with game-specific constraints
+//! - **AI Status Display**: Real-time AI thinking progress and search statistics
+//! - **Game Information**: Current player, game status, and contextual instructions
+//! - **History Integration**: Move history display with tabbed interface
+//! - **Blokus Specialization**: Complex multi-panel layout for Blokus game
+//!
+//! ## Architecture Overview
+//! ```text
+//! InGameComponent
+//! ├── Game Board (game-specific rendering)
+//! ├── Game Info Panel (status, current player, AI progress)
+//! └── Stats/History Tabs
+//!     ├── Debug Stats (AI analysis, search metrics)
+//!     └── Move History (chronological move list)
+//! 
+//! Special for Blokus:
+//! ├── Blokus Board (20x20 grid with piece preview)
+//! ├── Piece Selector (21 pieces with transformations)
+//! ├── Game Stats (scores, remaining pieces)
+//! └── Instructions (controls and rules)
+//! ```
+//!
+//! ## Game-Specific Rendering
+//! The component adapts its rendering based on the active game type:
+//! - **Gomoku**: Grid with X/O pieces, coordinate labels, win line highlighting
+//! - **Connect 4**: Vertical board with gravity indication, column-based cursor
+//! - **Othello**: 8x8 grid with disk pieces, legal move highlighting, territory counts
+//! - **Blokus**: Large 20x20 grid with specialized multi-panel interface
+//!
+//! ## Input Handling Strategy
+//! - **Universal Controls**: Arrow keys for cursor movement, Enter/Space for moves
+//! - **Game-Specific**: Special handling for each game's unique mechanics
+//! - **Mouse Support**: Click-to-move with position translation
+//! - **Accessibility**: Clear visual feedback and keyboard-only operation
+//!
+//! ## AI Integration
+//! - **Non-blocking UI**: AI computation runs in background threads
+//! - **Progress Indication**: Real-time thinking time and search progress
+//! - **Statistics Display**: Detailed MCTS analysis for educational purposes
+//! - **Smooth Transitions**: Minimum display duration prevents jarring updates
+//!
+//! ## Performance Considerations
+//! - **Efficient Rendering**: Only re-render changed areas when possible
+//! - **Component Caching**: Blokus components are lazily initialized and cached
+//! - **Event Filtering**: Process only relevant events for the current game state
+//! - **Memory Management**: Proper cleanup of temporary display data
 
 use ratatui::{
     layout::Rect,
@@ -17,19 +71,85 @@ use crate::components::blokus::{
 use crossterm::event::KeyCode;
 use mcts::GameState;
 
-/// Component for in-game view
+/// Component for in-game view - the primary gameplay interface
+///
+/// This is the most complex UI component in the application, responsible for
+/// coordinating all aspects of active gameplay. It handles rendering different
+/// game types, processing user input, displaying AI status, and managing the
+/// overall game experience.
+///
+/// ## Design Philosophy
+/// The InGameComponent follows a hybrid approach:
+/// - **Unified Interface**: Common functionality shared across all games
+/// - **Specialized Rendering**: Game-specific optimizations where needed
+/// - **Modular Architecture**: Blokus uses separate sub-components for complexity management
+/// - **Responsive Layout**: Adapts to different terminal sizes and aspect ratios
+///
+/// ## Component Structure
+/// ```text
+/// InGameComponent
+/// ├── Core rendering (Gomoku, Connect4, Othello)
+/// │   ├── render_game_board()
+/// │   ├── render_game_info()
+/// │   └── render_stats_history_tabs()
+/// └── Blokus specialization
+///     ├── BlokusBoardComponent
+///     ├── BlokusPieceSelectorComponent (multiple variants)
+///     ├── BlokusGameStatsComponent
+///     └── BlokusInstructionPanelComponent
+/// ```
+///
+/// ## State Management
+/// The component maintains minimal internal state, primarily focusing on:
+/// - **Lazy Initialization**: Blokus components created only when needed
+/// - **Cursor Validation**: Ensuring cursor positions are valid for selected pieces
+/// - **Event Routing**: Directing events to appropriate sub-components
+///
+/// ## Error Handling
+/// - **Graceful Degradation**: Falls back to basic rendering if specialized components fail
+/// - **Input Validation**: Validates all user input before processing moves
+/// - **Component Isolation**: Errors in one sub-component don't affect others
 pub struct InGameComponent {
+    /// Unique identifier for this component instance
     id: ComponentId,
-    // Modular Blokus components
+    
+    // Modular Blokus sub-components (initialized lazily)
+    // These are Option<T> because they're only created when Blokus is active
+    
+    /// Core Blokus board rendering component
+    /// Handles the 20x20 game board with piece placement and ghost previews
     blokus_board: Option<BlokusBoardComponent>,
+    
+    /// Original piece selector component
+    /// Basic piece selection interface (fallback option)
     blokus_piece_selector: Option<BlokusPieceSelectorComponent>,
+    
+    /// Enhanced piece selector with improved visualization
+    /// Better piece representation and selection feedback
     enhanced_blokus_piece_selector: Option<EnhancedBlokusPieceSelectorComponent>,
+    
+    /// Most advanced piece selector with full feature set
+    /// Includes piece rotation, ghost preview, and advanced navigation
     improved_blokus_piece_selector: Option<ImprovedBlokusPieceSelectorComponent>,
+    
+    /// Game statistics and score tracking component
+    /// Shows current scores, remaining pieces, and game progress
     blokus_game_stats: Option<BlokusGameStatsComponent>,
+    
+    /// Instructions and help panel component
+    /// Provides contextual help and control instructions for Blokus
     blokus_instruction_panel: Option<BlokusInstructionPanelComponent>,
 }
 
 impl InGameComponent {
+    /// Creates a new InGameComponent with uninitialized sub-components
+    ///
+    /// The component starts with all Blokus sub-components set to None.
+    /// They will be lazily initialized when Blokus is first played to
+    /// avoid unnecessary memory usage for other games.
+    ///
+    /// # Returns
+    /// A new InGameComponent ready to handle any game type
     pub fn new() -> Self {
         Self {
             id: ComponentId::new(),
@@ -42,34 +162,93 @@ impl InGameComponent {
         }
     }
 
-    /// Initialize Blokus components when needed
+    /// Initialize Blokus components when needed (lazy initialization)
+    ///
+    /// This method creates all Blokus-specific sub-components on first use.
+    /// Lazy initialization provides several benefits:
+    /// - **Memory Efficiency**: Components only created when Blokus is played
+    /// - **Startup Performance**: Faster application startup for other games
+    /// - **Resource Management**: Easier to manage complex component hierarchies
+    ///
+    /// The method is idempotent - calling it multiple times is safe and
+    /// will only initialize components that don't already exist.
+    ///
+    /// # Component Initialization Order
+    /// 1. BlokusBoardComponent - Core board rendering
+    /// 2. BlokusPieceSelectorComponent - Basic piece selection (fallback)
+    /// 3. EnhancedBlokusPieceSelectorComponent - Improved visualization
+    /// 4. ImprovedBlokusPieceSelectorComponent - Full feature set
+    /// 5. BlokusGameStatsComponent - Statistics and scoring
+    /// 6. BlokusInstructionPanelComponent - Help and instructions
     fn ensure_blokus_components(&mut self) {
+        // Initialize board component if not already present
         if self.blokus_board.is_none() {
             self.blokus_board = Some(BlokusBoardComponent::new());
         }
+        
+        // Initialize basic piece selector (fallback option)
         if self.blokus_piece_selector.is_none() {
             self.blokus_piece_selector = Some(BlokusPieceSelectorComponent::new());
         }
+        
+        // Initialize enhanced piece selector with improved visualization
         if self.enhanced_blokus_piece_selector.is_none() {
             self.enhanced_blokus_piece_selector = Some(EnhancedBlokusPieceSelectorComponent::new());
         }
+        
+        // Initialize the most advanced piece selector
         if self.improved_blokus_piece_selector.is_none() {
             self.improved_blokus_piece_selector = Some(ImprovedBlokusPieceSelectorComponent::new());
         }
+        
+        // Initialize game statistics component
         if self.blokus_game_stats.is_none() {
             self.blokus_game_stats = Some(BlokusGameStatsComponent::new());
         }
+        
+        // Initialize instruction panel component
         if self.blokus_instruction_panel.is_none() {
             self.blokus_instruction_panel = Some(BlokusInstructionPanelComponent::new());
         }
     }
 
     /// Checks if the current player is human (vs AI)
+    ///
+    /// This is a convenience method that wraps the app's AI player detection.
+    /// It's used throughout the component to determine when to show interactive
+    /// elements like cursors and input prompts.
+    ///
+    /// # Arguments
+    /// * `app` - Current application state
+    ///
+    /// # Returns
+    /// `true` if the current player is human, `false` if AI
     fn is_current_player_human(&self, app: &App) -> bool {
         !app.is_current_player_ai()
     }
 
     /// Attempts to make a move at the current cursor position
+    ///
+    /// This method handles move creation and execution for all game types.
+    /// It performs the following steps:
+    /// 1. **Move Construction**: Create appropriate move based on game type and cursor position
+    /// 2. **Legality Check**: Validate that the move is legal in the current position
+    /// 3. **Move Execution**: Apply the move to the game state
+    /// 4. **History Update**: Add the move to the move history for replay
+    /// 5. **AI Notification**: Inform the AI worker about the new position
+    /// 6. **State Updates**: Update UI state (clear selections, check for game end)
+    ///
+    /// # Arguments
+    /// * `app` - Mutable application state to update
+    ///
+    /// # Game-Specific Move Creation
+    /// - **Gomoku/Othello**: Simple (row, col) coordinate moves
+    /// - **Connect4**: Column-only moves with gravity handling
+    /// - **Blokus**: Complex moves including piece ID, transformation, and position
+    ///
+    /// # Error Handling
+    /// If a move is illegal, this method silently does nothing. The UI will
+    /// continue to show the current position without any error message.
     fn make_move(&self, app: &mut App) {
         let (row, col) = (app.board_cursor.0 as usize, app.board_cursor.1 as usize);
         
