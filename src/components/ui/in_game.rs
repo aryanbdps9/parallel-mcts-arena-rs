@@ -1380,9 +1380,14 @@ impl Component for InGameComponent {
                         app.should_quit = true;
                         Ok(true)
                     }
-                    KeyCode::Char('r') => {
-                        app.reset_game();
-                        Ok(true)
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        // For Blokus, let the keyboard input handler deal with rotation vs reset
+                        if matches!(app.game_wrapper, GameWrapper::Blokus(_)) && self.is_current_player_human(app) {
+                            self.handle_keyboard_input(app, key)
+                        } else {
+                            app.reset_game();
+                            Ok(true)
+                        }
                     }
                     KeyCode::Esc => {
                         app.mode = AppMode::GameSelection;
@@ -1471,7 +1476,7 @@ impl InGameComponent {
                 app.should_quit = true;
                 Ok(true)
             }
-            KeyCode::Char('r') => {
+            KeyCode::Char('r') | KeyCode::Char('R') => {
                 if matches!(app.game_wrapper, GameWrapper::Blokus(_)) && self.is_current_player_human(app) {
                     app.blokus_rotate_piece();
                 } else {
