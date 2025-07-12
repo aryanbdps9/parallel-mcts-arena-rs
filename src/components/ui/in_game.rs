@@ -65,8 +65,7 @@ use crate::games::{gomoku::GomokuMove, connect4::Connect4Move, othello::OthelloM
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::{ComponentEvent, InputEvent};
 use crate::components::blokus::{
-    BlokusBoardComponent, BlokusPieceSelectorComponent, EnhancedBlokusPieceSelectorComponent, 
-    ImprovedBlokusPieceSelectorComponent, BlokusGameStatsComponent, BlokusInstructionPanelComponent
+    BlokusBoardComponent, ImprovedBlokusPieceSelectorComponent, BlokusGameStatsComponent, BlokusInstructionPanelComponent
 };
 use crossterm::event::KeyCode;
 use mcts::GameState;
@@ -94,7 +93,7 @@ use mcts::GameState;
 /// │   └── render_stats_history_tabs()
 /// └── Blokus specialization
 ///     ├── BlokusBoardComponent
-///     ├── BlokusPieceSelectorComponent (multiple variants)
+///     ├── ImprovedBlokusPieceSelectorComponent (advanced piece selection)
 ///     ├── BlokusGameStatsComponent
 ///     └── BlokusInstructionPanelComponent
 /// ```
@@ -120,16 +119,8 @@ pub struct InGameComponent {
     /// Handles the 20x20 game board with piece placement and ghost previews
     blokus_board: Option<BlokusBoardComponent>,
     
-    /// Original piece selector component
-    /// Basic piece selection interface (fallback option)
-    blokus_piece_selector: Option<BlokusPieceSelectorComponent>,
-    
-    /// Enhanced piece selector with improved visualization
-    /// Better piece representation and selection feedback
-    enhanced_blokus_piece_selector: Option<EnhancedBlokusPieceSelectorComponent>,
-    
-    /// Most advanced piece selector with full feature set
-    /// Includes piece rotation, ghost preview, and advanced navigation
+    /// Blokus piece selector component with advanced features
+    /// Includes piece rotation, ghost preview, scrolling, and smart layout
     improved_blokus_piece_selector: Option<ImprovedBlokusPieceSelectorComponent>,
     
     /// Game statistics and score tracking component
@@ -154,8 +145,6 @@ impl InGameComponent {
         Self {
             id: ComponentId::new(),
             blokus_board: None,
-            blokus_piece_selector: None,
-            enhanced_blokus_piece_selector: None,
             improved_blokus_piece_selector: None,
             blokus_game_stats: None,
             blokus_instruction_panel: None,
@@ -175,28 +164,16 @@ impl InGameComponent {
     ///
     /// # Component Initialization Order
     /// 1. BlokusBoardComponent - Core board rendering
-    /// 2. BlokusPieceSelectorComponent - Basic piece selection (fallback)
-    /// 3. EnhancedBlokusPieceSelectorComponent - Improved visualization
-    /// 4. ImprovedBlokusPieceSelectorComponent - Full feature set
-    /// 5. BlokusGameStatsComponent - Statistics and scoring
-    /// 6. BlokusInstructionPanelComponent - Help and instructions
+    /// 2. ImprovedBlokusPieceSelectorComponent - Advanced piece selection with all features
+    /// 3. BlokusGameStatsComponent - Statistics and scoring
+    /// 4. BlokusInstructionPanelComponent - Help and instructions
     fn ensure_blokus_components(&mut self) {
         // Initialize board component if not already present
         if self.blokus_board.is_none() {
             self.blokus_board = Some(BlokusBoardComponent::new());
         }
         
-        // Initialize basic piece selector (fallback option)
-        if self.blokus_piece_selector.is_none() {
-            self.blokus_piece_selector = Some(BlokusPieceSelectorComponent::new());
-        }
-        
-        // Initialize enhanced piece selector with improved visualization
-        if self.enhanced_blokus_piece_selector.is_none() {
-            self.enhanced_blokus_piece_selector = Some(EnhancedBlokusPieceSelectorComponent::new());
-        }
-        
-        // Initialize the most advanced piece selector
+        // Initialize the advanced piece selector with all features
         if self.improved_blokus_piece_selector.is_none() {
             self.improved_blokus_piece_selector = Some(ImprovedBlokusPieceSelectorComponent::new());
         }
@@ -272,7 +249,7 @@ impl InGameComponent {
             app.move_history.push(crate::app::MoveHistoryEntry::new(current_player, player_move.clone()));
             app.on_move_added(); // Auto-scroll to bottom
             app.game_wrapper.make_move(&player_move);
-            
+
             // Advance the AI worker's MCTS tree root to reflect the move that was just made
             app.ai_worker.advance_root(&player_move);
             
@@ -977,15 +954,9 @@ impl InGameComponent {
             board_component.render(frame, board_area, app)?;
         }
 
-        // Render piece selection panel using the improved modular component
+        // Render piece selection panel using the improved component
         if let Some(ref mut improved_piece_selector) = self.improved_blokus_piece_selector {
             improved_piece_selector.render(frame, piece_area, app)?;
-        } else if let Some(ref mut enhanced_piece_selector) = self.enhanced_blokus_piece_selector {
-            // Fallback to enhanced piece selector
-            enhanced_piece_selector.render(frame, piece_area, app)?;
-        } else if let Some(ref mut piece_selector) = self.blokus_piece_selector {
-            // Fallback to original piece selector
-            piece_selector.render(frame, piece_area, app)?;
         }
 
         // Split the bottom area into instructions and stats/history
@@ -1517,17 +1488,9 @@ impl Component for InGameComponent {
         if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
             self.ensure_blokus_components();
             
-            // Try to handle the event with improved Blokus piece selector first
+            // Try to handle the event with the improved Blokus piece selector
             if let Some(ref mut improved_piece_selector) = self.improved_blokus_piece_selector {
                 if let Ok(true) = improved_piece_selector.handle_event(event, app) {
-                    return Ok(true);
-                }
-            } else if let Some(ref mut enhanced_piece_selector) = self.enhanced_blokus_piece_selector {
-                if let Ok(true) = enhanced_piece_selector.handle_event(event, app) {
-                    return Ok(true);
-                }
-            } else if let Some(ref mut piece_selector) = self.blokus_piece_selector {
-                if let Ok(true) = piece_selector.handle_event(event, app) {
                     return Ok(true);
                 }
             }
@@ -1605,10 +1568,6 @@ impl Component for InGameComponent {
                 if matches!(app.game_wrapper, GameWrapper::Blokus(_)) {
                     if let Some(ref mut improved_piece_selector) = self.improved_blokus_piece_selector {
                         improved_piece_selector.handle_event(event, app)
-                    } else if let Some(ref mut enhanced_piece_selector) = self.enhanced_blokus_piece_selector {
-                        enhanced_piece_selector.handle_event(event, app)
-                    } else if let Some(ref mut piece_selector) = self.blokus_piece_selector {
-                        piece_selector.handle_event(event, app)
                     } else {
                         Ok(false)
                     }

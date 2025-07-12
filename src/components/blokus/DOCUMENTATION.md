@@ -6,7 +6,7 @@ This document provides a comprehensive overview of all the components in the Blo
 
 The Blokus UI system is organized into **three main categories**:
 
-1. **Core Components** - Main game elements (board, piece selectors)
+1. **Core Components** - Main game elements (board, piece selector)
 2. **Supporting Components** - Player panels, statistics, instructions
 3. **Utility Modules** - Shared functionality for grid layout, click handling, etc.
 
@@ -42,24 +42,22 @@ The Blokus UI system is organized into **three main categories**:
 - Cursor positioning within borders
 - Real-time move validation display
 
-#### `piece_selector.rs` - Legacy Piece Selector
-**Primary Purpose:** Original piece selector using player panels
+#### `improved_piece_selector.rs` - Advanced Piece Selector
+**Primary Purpose:** Sophisticated piece selector with ~scrolling~, responsive layout, and advanced UX
 
 **Key Structs:**
-- `BlokusPieceSelectorComponent` - Main selector container
-- Uses `BlokusPlayerPanelComponent` for each player
+- `ImprovedBlokusPieceSelectorComponent` - Main selector
+- `ImprovedPieceSelectorConfig` - Advanced configuration
+- `ImprovedPlayerPanel` - Individual player wrapper
 
-**Functionality:**
-- Manages 4 player panels in responsive layout
-- Handles panel expand/collapse
-- Provides scrolling for overflow content
-- Integrates with responsive layout system
+**Advanced Features:**
+- **Scrollable Layout:** Handles overflow with scrolling
+- **Current Player Priority:** Auto-expands current player's grid
+- **Compact Mode:** Smaller display for non-current players
+- **Dynamic Sizing:** Responsive height calculation
+- **Enhanced UX:** Better visual feedback and interaction
 
-**Note:** This appears to be an earlier implementation, potentially superseded by newer selector components.
-
-### Piece Selection Components (Multiple Implementations)
-
-The codebase contains **multiple piece selector implementations**, indicating iterative improvement:
+### Piece Grid Components
 
 #### `responsive_piece_grid.rs` - Advanced Responsive Grid
 **Primary Purpose:** Sophisticated piece grid with responsive layout and precise click detection
@@ -83,7 +81,7 @@ The codebase contains **multiple piece selector implementations**, indicating it
 - Color theming for empty cells and pieces
 
 **Why It's Complex:**
-This is the most sophisticated implementation because:
+This is a sophisticated implementation because:
 1. **Terminal UI Constraints** - Text-based rendering requires precise character positioning
 2. **Mouse Interaction** - Complex coordinate mapping for click detection
 3. **Dynamic Layout** - Grid adapts to screen size changes
@@ -101,33 +99,6 @@ This is the most sophisticated implementation because:
 - Responsive pieces-per-row calculation
 - Simplified configuration compared to responsive grid
 - Focus on visual consistency and borders
-
-#### `enhanced_piece_selector.rs` - Multi-Player Enhanced Selector
-**Primary Purpose:** Container for multiple enhanced grids (all 4 players)
-
-**Key Structs:**
-- `EnhancedBlokusPieceSelectorComponent` - Multi-player container
-
-**Features:**
-- Manages 4 `EnhancedPieceGridComponent` instances
-- Calculates optimal layout (vertical stack, 2x2 grid, horizontal)
-- Updates all grids with current game state
-- Responsive layout switching based on available space
-
-#### `improved_piece_selector.rs` - Advanced Multi-Player Selector
-**Primary Purpose:** Most advanced piece selector with scrolling and UX improvements
-
-**Key Structs:**
-- `ImprovedBlokusPieceSelectorComponent` - Main selector
-- `ImprovedPieceSelectorConfig` - Advanced configuration
-- `ImprovedPlayerPanel` - Individual player wrapper
-
-**Advanced Features:**
-- **Scrollable Layout:** Handles overflow with scrolling
-- **Current Player Priority:** Auto-expands current player's grid
-- **Compact Mode:** Smaller display for non-current players
-- **Dynamic Sizing:** Responsive height calculation
-- **Enhanced UX:** Better visual feedback and interaction
 
 ### Supporting Components
 
@@ -264,23 +235,6 @@ Click detection in terminal UI is challenging because:
 - Prevents extremely tall grids (1×21) that waste horizontal space
 - Creates balanced grids (~5×4) that look good and use space efficiently
 
-## Component Evolution & Redundancy
-
-The codebase shows **iterative development** with multiple implementations:
-
-### Evolution Timeline (Inferred):
-1. **`piece_selector.rs`** - Original implementation with basic panels
-2. **`enhanced_piece_grid.rs`** - Improved grid with better borders
-3. **`responsive_piece_grid.rs`** - Added responsive layout and precise click detection
-4. **`improved_piece_selector.rs`** - Advanced UX with scrolling and smart layout
-
-### Current Redundancy:
-The codebase has **4 different piece selector approaches**, which contributes to complexity:
-- Basic piece selector (legacy)
-- Enhanced piece grid (border-focused)
-- Responsive piece grid (layout-focused)
-- Improved piece selector (UX-focused)
-
 ## Key Design Patterns
 
 ### 1. Component Architecture
@@ -334,12 +288,19 @@ Components adapt to terminal size using:
 - Consistent color theming
 - Border alignment and spacing
 
-## Recommendations for Cleanup
+## Architecture Summary
 
-1. **Consolidate Piece Selectors:** Choose one implementation and deprecate others
-2. **Extract Common Interfaces:** Create shared traits for piece grids
-3. **Centralize Configuration:** Unify configuration structs
-4. **Simplify Utility Modules:** Reduce overlapping functionality
-5. **Add Documentation:** Document chosen patterns and deprecate old ones
+The Blokus component system has been streamlined to use a single, advanced piece selector implementation:
 
-The complexity is justified by the sophisticated terminal UI requirements, but the codebase would benefit from consolidation and choosing a single piece selector implementation.
+### Current Implementation
+- **`improved_piece_selector.rs`** - The primary and only piece selector implementation
+- **Advanced Features:** Scrolling, current player priority, responsive layout, enhanced UX
+- **Simplified Architecture:** No fallback logic or redundant implementations
+
+### Design Benefits
+1. **Maintainability:** Single implementation reduces code complexity
+2. **Consistency:** Unified user experience across all Blokus games
+3. **Performance:** No overhead from unused fallback components
+4. **Clarity:** Clear component responsibilities and interactions
+
+The complexity is justified by the sophisticated terminal UI requirements, and the codebase now provides a clean, maintainable solution for Blokus piece selection.

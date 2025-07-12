@@ -175,7 +175,7 @@ The AI system uses a parallel Monte Carlo Tree Search implementation:
 The UI system provides a rich terminal interface using both legacy TUI utilities and a modern component system:
 
 ```
-src/tui/                 # Legacy TUI utilities (being phased out)
+src/tui/                # Legacy TUI utilities (being phased out)
 ├── mod.rs              # TUI module coordination & event loop
 ├── widgets.rs          # Legacy UI rendering functions
 ├── input.rs            # Keyboard input handling  
@@ -201,9 +201,7 @@ src/components/          # Modern component-based UI system
 │   └── theme.rs        # Visual styling and themes
 └── blokus/             # Blokus-specific components
     ├── board.rs        # Blokus board rendering
-    ├── piece_selector.rs # Basic piece selection
-    ├── enhanced_piece_selector.rs # Enhanced piece selection
-    ├── improved_piece_selector.rs # Latest piece selection UI
+    ├── improved_piece_selector.rs # Piece selection UI
     ├── player_panel.rs # Individual player panels
     ├── piece_grid.rs   # Piece grid layouts
     ├── piece_shape.rs  # Individual piece shape rendering
