@@ -42,7 +42,7 @@ pub struct LayoutConfig {
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
-            board_height_percent: 65,
+            board_height_percent: 30,  // Lower default since dynamic sizing handles actual requirements
             blokus_piece_selection_width: 50,
         }
     }
@@ -51,22 +51,30 @@ impl Default for LayoutConfig {
 impl LayoutConfig {
     /// Calculates the main vertical layout areas for standard games
     ///
-    /// Divides the screen into two vertical sections: board area at top,
-    /// and a combined panel at the bottom for stats, history, and instructions.
+    /// Uses dynamic sizing based on actual board requirements rather than fixed percentages.
+    /// Ensures the board always has adequate space while maximizing debug panel space.
     ///
     /// # Arguments
     /// * `area` - Total screen area to divide
+    /// * `board_height` - Number of rows in the game board
+    /// * `board_width` - Number of columns in the game board  
+    /// * `game_type` - Type of game (affects space requirements)
     ///
     /// # Returns
     /// Tuple of (board_area, bottom_area) rectangles
-    pub fn get_main_layout(&self, area: Rect) -> (Rect, Rect) {
-        let board_height = (area.height as f32 * self.board_height_percent as f32 / 100.0) as u16;
-        let bottom_height = area.height.saturating_sub(board_height);
+    pub fn get_main_layout_dynamic(&self, area: Rect, board_height: usize, board_width: usize, game_type: &str) -> (Rect, Rect) {
+        let required_board_height = Self::calculate_required_board_height(board_height, board_width, game_type);
+        
+        // Use the larger of: required height or user's dragged preference (but capped)
+        let board_height_from_percent = (area.height as f32 * self.board_height_percent as f32 / 100.0) as u16;
+        let actual_board_height = required_board_height.max(board_height_from_percent).min(area.height - 10); // Leave at least 10 rows for bottom
+        
+        let bottom_height = area.height.saturating_sub(actual_board_height);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(board_height),
+                Constraint::Length(actual_board_height),
                 Constraint::Length(bottom_height),
             ])
             .split(area);
@@ -165,5 +173,71 @@ impl LayoutConfig {
                 self.blokus_piece_selection_width = new_width;
             }
         }
+    }
+
+    /// Calculate the minimum height needed for the game board based on game type and board size
+    ///
+    /// Takes into account the actual board dimensions and adds space for borders and labels.
+    /// This ensures the board always has enough space regardless of terminal size.
+    ///
+    /// # Arguments
+    /// * `board_height` - Number of rows in the game board
+    /// * `board_width` - Number of columns in the game board  
+    /// * `game_type` - Type of game (affects label requirements)
+    ///
+    /// # Returns
+    /// Minimum height in terminal rows needed for the board area
+    pub fn calculate_required_board_height(board_height: usize, board_width: usize, game_type: &str) -> u16 {
+        if board_height == 0 || board_width == 0 {
+            return 6; // Minimum fallback height
+        }
+
+        let mut required_height = 2; // Top and bottom borders
+        
+        // Add space for column labels (1 row)
+        required_height += 1;
+        
+        // Add space for each board row (1 row per board row)
+        required_height += board_height as u16;
+        
+        // Add small padding for visual spacing
+        required_height += 1;
+        
+        // Game-specific adjustments
+        match game_type {
+            "blokus" => required_height += 2, // Blokus needs extra space
+            "connect4" => {}, // Connect4 is more compact
+            _ => {}, // Standard games
+        }
+        
+        // Ensure minimum usable height
+        required_height.max(8)
+    }
+
+    /// Calculate the required board width (for future horizontal layout optimizations)
+    pub fn calculate_required_board_width(board_height: usize, board_width: usize, game_type: &str) -> u16 {
+        if board_height == 0 || board_width == 0 {
+            return 20; // Minimum fallback width
+        }
+
+        let col_width = match game_type {
+            "connect4" | "othello" => 2,
+            _ => 2, // Standard width
+        };
+        
+        let needs_row_labels = game_type != "connect4";
+        let row_label_width = if needs_row_labels { 2 } else { 0 };
+        
+        let required_width = 2 + // Left and right borders
+                           row_label_width + // Row labels if needed
+                           (board_width as u16 * col_width); // Board columns
+        
+        required_width.max(20)
+    }
+
+    /// Legacy method for backward compatibility - uses dynamic sizing now
+    pub fn get_main_layout(&self, area: Rect) -> (Rect, Rect) {
+        // Use reasonable defaults when we don't have game info
+        self.get_main_layout_dynamic(area, 15, 15, "gomoku")
     }
 }

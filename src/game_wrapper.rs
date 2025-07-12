@@ -1,49 +1,158 @@
-//! # Game Wrapper Module
+//! # Game Wrapper Module - Unified Game Interface
 //!
-//! This module provides unified interfaces for all games in the engine.
-//! The GameWrapper enum allows the MCTS engine to work with any game type
-//! through a single interface, while MoveWrapper handles moves for all games.
+//! This module provides the abstraction layer that allows the MCTS engine and UI
+//! components to work with any supported game type through a single, unified interface.
+//! It implements the adapter pattern to bridge between game-specific implementations
+//! and the generic algorithms that operate on them.
 //!
-//! ## Key Components
-//! - **GameWrapper**: Enum that wraps all game types into a single interface
-//! - **MoveWrapper**: Enum that wraps all move types for unified handling
+//! ## Design Philosophy
+//! The wrapper system serves several critical purposes:
+//! - **Type Safety**: Each game maintains its specific types while being usable generically
+//! - **Algorithm Reuse**: MCTS and UI code works with any game without modification
+//! - **Extensibility**: New games can be added with minimal changes to existing code
+//! - **Performance**: Zero-cost abstractions that compile to direct calls
+//!
+//! ## Architecture Overview
+//! ```text
+//! ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+//! │   MCTS Engine   │◄──►│   GameWrapper    │◄──►│  Game-Specific  │
+//! │                 │    │                  │    │ Implementations │
+//! │ • Generic AI    │    │ • Unified API    │    │                 │
+//! │ • Tree Search   │    │ • Type Safety    │    │ • GomokuState   │
+//! │ • Statistics    │    │ • Move Handling  │    │ • Connect4State │
+//! └─────────────────┘    └──────────────────┘    │ • OthelloState  │
+//!                                                 │ • BlokusState   │
+//!                                                 └─────────────────┘
+//! ```
+//!
+//! ## Key Benefits
+//! - **Code Reuse**: Write UI and AI code once, use with all games
+//! - **Maintainability**: Changes to game rules don't affect AI or UI code
+//! - **Testing**: Easy to test algorithms against different game implementations
+//! - **Performance**: Compile-time polymorphism with no runtime overhead
+//!
+//! ## Thread Safety
+//! Both GameWrapper and MoveWrapper implement Send + Sync, making them safe
+//! to use across thread boundaries. This is essential for the parallel MCTS
+//! implementation where game states are shared between worker threads.
+//!
+//! ## Memory Efficiency
+//! The wrapper enums use Rust's efficient enum representation, so there's
+//! minimal memory overhead compared to using the game types directly.
 
-use crate::games::connect4::{Connect4Move, Connect4State};
-use crate::games::gomoku::{GomokuMove, GomokuState};
-use crate::games::blokus::{BlokusMove, BlokusState};
-use crate::games::othello::{OthelloMove, OthelloState};
-use mcts::GameState;
-use std::fmt;
+// Import all game-specific types that will be wrapped
+use crate::games::connect4::{Connect4Move, Connect4State};   // Gravity-based 4-in-a-row game
+use crate::games::gomoku::{GomokuMove, GomokuState};         // Classic 5-in-a-row game
+use crate::games::blokus::{BlokusMove, BlokusState};         // Multi-player territory game
+use crate::games::othello::{OthelloMove, OthelloState};      // Reversi/Othello territory game
+use mcts::GameState;                                         // Core trait for MCTS compatibility
+use std::fmt;                                                // Formatting traits for display
 
 /// Wrapper enum for all supported game types
 /// 
-/// Allows the MCTS engine and UI to work with any game through a unified interface.
-/// Each variant contains the specific game state for that game type.
+/// This enum provides a unified interface for all game implementations while
+/// maintaining type safety and zero-cost abstractions. Each variant contains
+/// the complete game state for its respective game type.
+///
+/// ## Design Rationale
+/// Using an enum rather than trait objects provides several advantages:
+/// - **Performance**: No dynamic dispatch or heap allocation overhead
+/// - **Type Safety**: Compile-time checking ensures all methods are implemented
+/// - **Pattern Matching**: Allows game-specific optimizations when needed
+/// - **Memory Efficiency**: No vtable overhead, optimal memory layout
+///
+/// ## Usage Patterns
+/// The GameWrapper is used in two main contexts:
+/// 1. **AI Engine**: MCTS algorithms operate on GameWrapper instances
+/// 2. **UI System**: Rendering and input handling code works with any game type
+///
+/// ## Thread Safety
+/// All contained game states implement Clone + Send + Sync, making the
+/// wrapper safe to use in multi-threaded contexts like parallel MCTS.
 #[derive(Debug, Clone)]
 pub enum GameWrapper {
     /// Gomoku (Five in a Row) game state
+    /// 
+    /// Classic board game where players alternate placing stones on a grid,
+    /// trying to get five in a row horizontally, vertically, or diagonally.
+    /// - Variable board size (typically 15×15 or 19×19)
+    /// - Simple rules but deep strategic gameplay
+    /// - Good for testing basic MCTS functionality
     Gomoku(GomokuState),
+    
     /// Connect 4 game state
+    /// 
+    /// Gravity-based game where pieces fall to the lowest available position
+    /// in each column. Players try to get four in a row.
+    /// - Typically 7 wide × 6 tall board
+    /// - Fast-paced tactical gameplay
+    /// - Constrained move space (only 7 possible moves per turn)
     Connect4(Connect4State),
+    
     /// Blokus game state
+    /// 
+    /// Complex 4-player game where players place polyomino pieces on a board,
+    /// trying to maximize territory while blocking opponents.
+    /// - Fixed 20×20 board with 4 players
+    /// - 21 unique pieces per player with multiple orientations
+    /// - Very high complexity and branching factor
     Blokus(BlokusState),
+    
     /// Othello (Reversi) game state
+    /// 
+    /// Territory control game where players place discs and flip opponent
+    /// pieces by flanking them. Winner has most pieces at end.
+    /// - Fixed 8×8 board
+    /// - Complex positional evaluation
+    /// - Classic AI testbed with well-understood strategy
     Othello(OthelloState),
 }
 
 /// Wrapper enum for all supported move types
 /// 
-/// Allows moves from any game to be stored and passed around uniformly.
-/// Each variant contains the specific move type for that game.
+/// Provides unified handling of moves across all game types while maintaining
+/// type safety and allowing game-specific move data to be preserved.
+///
+/// ## Move Type Complexity
+/// Different games have vastly different move complexity:
+/// - **Gomoku/Othello**: Simple (row, col) coordinates
+/// - **Connect4**: Single column number (gravity determines row)
+/// - **Blokus**: Complex (piece_id, transformation, row, col) with validation
+///
+/// ## Serialization Support
+/// All move types implement standard traits needed for serialization,
+/// making it easy to save/load games or implement network play.
+///
+/// ## Hash and Equality
+/// Moves implement Eq and Hash for use in data structures like HashSet
+/// and HashMap, which is essential for MCTS tree node identification.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MoveWrapper {
-    /// Gomoku move (row, col)
+    /// Gomoku move: simple coordinate placement
+    /// 
+    /// Contains (row, col) coordinates where the player wants to place their stone.
+    /// Move validation ensures the position is empty and within board bounds.
     Gomoku(GomokuMove),
-    /// Connect4 move (column)
+    
+    /// Connect4 move: column selection with gravity
+    /// 
+    /// Contains only the column number where the piece should be dropped.
+    /// The actual row is determined by gravity (lowest available position).
     Connect4(Connect4Move),
-    /// Blokus move (piece_id, transformation, row, col)
+    
+    /// Blokus move: complex piece placement
+    /// 
+    /// Contains (piece_id, transformation_id, row, col) specifying:
+    /// - Which of the 21 pieces to place
+    /// - Which transformation (rotation/reflection) to use
+    /// - Where to place the piece's anchor point
+    /// This is the most complex move type due to piece shape validation.
     Blokus(BlokusMove),
-    /// Othello move (row, col)
+    
+    /// Othello move: coordinate placement with captures
+    /// 
+    /// Contains (row, col) coordinates, but move execution automatically
+    /// calculates and performs all necessary piece captures in all directions.
     Othello(OthelloMove),
 }
 

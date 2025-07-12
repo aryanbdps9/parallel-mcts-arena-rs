@@ -1,32 +1,92 @@
 //! # Application State and Core Components
 //!
-//! This module defines the core data structures and components that manage the
-//! application's state, including UI state, player types, AI workers, and communication
-//! channels between the UI, game logic, and AI threads.
+//! This module serves as the central orchestrator for the entire multi-game MCTS engine.
+//! It defines the core data structures and components that manage application state,
+//! coordinate between UI and AI threads, and handle game lifecycle management.
+//!
+//! ## Key Responsibilities
+//! - **State Management**: Centralized application state including game state, UI state, and AI status
+//! - **AI Coordination**: Thread-safe communication with background AI worker processes
+//! - **Event Handling**: Processing user input and system events across all game modes
+//! - **Game Abstraction**: Unified interface for multiple game types through GameWrapper
+//! - **UI Orchestration**: Coordinating between different UI components and screens
+//!
+//! ## Architecture Overview
+//! ```text
+//! ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+//! │   UI Components │◄──►│    App State     │◄──►│   AI Worker     │
+//! │                 │    │                  │    │                 │
+//! │ • Game View     │    │ • Game Wrapper   │    │ • MCTS Engine   │
+//! │ • Menu System   │    │ • Player Config  │    │ • Search Tree   │
+//! │ • Settings      │    │ • Move History   │    │ • Statistics    │
+//! └─────────────────┘    └──────────────────┘    └─────────────────┘
+//! ```
+//!
+//! ## Thread Safety
+//! The AI worker runs in a separate thread with message-passing communication.
+//! This ensures the UI remains responsive while AI performs intensive computations.
+//!
+//! ## Memory Management
+//! The application uses various optimization strategies:
+//! - Tree reuse between moves to avoid redundant computation
+//! - Automatic history scrolling with user override detection
+//! - Component lifecycle management for UI elements
+//! - Node recycling in the MCTS search tree
 
-use crate::game_wrapper::{GameWrapper, MoveWrapper};
-use crate::tui::layout::LayoutConfig;
-use crate::tui::mouse::DragState;
-use crate::tui::blokus_ui::BlokusUIConfig;
-use mcts::{GameState, MCTS};
-use ratatui::widgets::ListState;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, atomic::AtomicBool};
-use std::thread::{self, JoinHandle};
-use std::time::SystemTime;
+// Import dependencies for game management and UI coordination
+use crate::game_wrapper::{GameWrapper, MoveWrapper};  // Unified game interface
+use crate::tui::layout::LayoutConfig;                 // Responsive UI layout management  
+use crate::tui::mouse::DragState;                     // Mouse interaction state tracking
+use crate::tui::blokus_ui::BlokusUIConfig;            // Blokus-specific UI configuration
+use mcts::{GameState, MCTS};                          // Monte Carlo Tree Search engine
+use ratatui::widgets::ListState;                      // TUI list widget state management
+use std::sync::mpsc::{self, Receiver, Sender};        // Thread communication channels
+use std::sync::{Arc, atomic::AtomicBool};             // Thread-safe shared state
+use std::thread::{self, JoinHandle};                  // Background thread management
+use std::time::SystemTime;                           // Timestamp tracking for moves
 
 /// Represents a single move in the game's move history
 ///
-/// Tracks when a move was made, which player made it, and what the move was.
-/// Used for game replay and analysis.
+/// This structure captures all relevant information about a move for later
+/// analysis, replay, or debugging purposes. Each entry is immutable once
+/// created to maintain historical integrity.
+///
+/// # Fields
+/// - `timestamp`: When the move was made (for performance analysis)
+/// - `player`: Which player made the move (using game-specific player IDs)
+/// - `a_move`: The actual move that was made (wrapped for type safety)
+///
+/// # Usage
+/// Move history is primarily used for:
+/// - Game replay and analysis
+/// - Debugging game logic issues
+/// - Performance metrics (time per move)
+/// - UI display of past moves
+/// - Undo functionality (future enhancement)
 #[derive(Debug, Clone)]
 pub struct MoveHistoryEntry {
+    /// System timestamp when the move was executed
+    /// Used for performance analysis and replay timing
     pub timestamp: SystemTime,
+    
+    /// Player ID who made this move
+    /// Uses game-specific numbering (e.g., 1/-1 for two-player games, 1-4 for Blokus)
     pub player: i32,
+    
+    /// The move that was made, type-erased for storage
+    /// Contains game-specific move data wrapped in MoveWrapper enum
     pub a_move: MoveWrapper,
 }
 
 impl MoveHistoryEntry {
+    /// Creates a new move history entry with the current timestamp
+    /// 
+    /// # Arguments
+    /// * `player` - The player ID who made the move
+    /// * `a_move` - The move that was made
+    /// 
+    /// # Returns
+    /// A new MoveHistoryEntry with current system time
     pub fn new(player: i32, a_move: MoveWrapper) -> Self {
         Self {
             timestamp: SystemTime::now(),
@@ -38,29 +98,111 @@ impl MoveHistoryEntry {
 
 /// Messages sent to AI worker threads
 ///
-/// Controls AI behavior and requests information from the AI engine.
+/// This enum defines the communication protocol between the main application
+/// thread and the background AI worker. All AI operations are asynchronous
+/// to keep the UI responsive during intensive computations.
+///
+/// # Message Types
+/// - `Search`: Initiate a new MCTS search from a given position
+/// - `AdvanceRoot`: Update the search tree after a move is made
+/// - `Stop`: Gracefully terminate the AI worker
+///
+/// # Thread Safety
+/// All messages are designed to be safely sent across thread boundaries.
+/// The AI worker processes these messages sequentially to maintain consistency.
 #[derive(Debug)]
 pub enum AIRequest {
-    Search(GameWrapper, u64), // GameWrapper and timeout in seconds
-    AdvanceRoot(MoveWrapper), // Advance the MCTS tree root to reflect a move that was made
+    /// Request the AI to search for the best move from a given position
+    /// 
+    /// # Parameters
+    /// - `GameWrapper`: Current game state to search from
+    /// - `u64`: Maximum search time in seconds
+    /// 
+    /// The AI will perform MCTS until either the time limit is reached
+    /// or the maximum iteration count is exceeded, whichever comes first.
+    Search(GameWrapper, u64),
+    
+    /// Advance the MCTS tree root to reflect a move that was made
+    /// 
+    /// # Parameters  
+    /// - `MoveWrapper`: The move that was executed in the game
+    /// 
+    /// This allows the AI to reuse previous search results by updating
+    /// the tree structure rather than starting from scratch. This is a
+    /// key optimization for maintaining AI strength across moves.
+    AdvanceRoot(MoveWrapper),
+    
+    /// Signal the AI worker to stop processing and exit gracefully
+    /// 
+    /// The worker will finish its current operation and then terminate.
+    /// This is used during application shutdown or when reconfiguring AI settings.
     Stop,
 }
 
 /// Messages received from AI worker threads
 ///
-/// Provides AI moves, status updates, and analysis information.
+/// Responses from the AI worker containing search results and analysis data.
+/// The main thread polls for these messages to update the UI and game state.
+///
+/// # Design Rationale
+/// Currently only contains move responses, but designed to be extensible
+/// for future enhancements like progressive search updates or analysis data.
 #[derive(Debug)]
 pub enum AIResponse {
+    /// The AI's selected move along with detailed search statistics
+    /// 
+    /// # Parameters
+    /// - `MoveWrapper`: The best move found by the AI
+    /// - `mcts::SearchStatistics`: Detailed analysis including node counts, 
+    ///   evaluation scores, and top move candidates
+    /// 
+    /// This provides both the actionable result (the move) and rich
+    /// information for debugging and user education about AI reasoning.
     Move(MoveWrapper, mcts::SearchStatistics),
 }
 
 /// The AI worker that runs in a separate thread
 ///
-/// Handles MCTS search requests and manages the search tree.
+/// This struct manages a background thread dedicated to AI computation.
+/// It provides a clean interface for asynchronous AI operations while
+/// maintaining thread safety and resource management.
+///
+/// # Architecture
+/// ```text
+/// Main Thread                    AI Worker Thread
+/// ┌─────────────┐               ┌──────────────────┐
+/// │             │──AIRequest──► │                  │
+/// │ Application │               │ MCTS Engine      │
+/// │             │◄─AIResponse── │                  │
+/// └─────────────┘               └──────────────────┘
+/// ```
+///
+/// # Key Features
+/// - **Asynchronous Operation**: AI computation doesn't block the UI
+/// - **Persistent State**: Maintains MCTS tree across multiple searches
+/// - **Graceful Shutdown**: Proper cleanup when the worker is no longer needed
+/// - **Error Isolation**: AI failures don't crash the main application
+///
+/// # Lifecycle
+/// 1. Created with configuration parameters
+/// 2. Processes search requests asynchronously  
+/// 3. Maintains search tree for efficiency
+/// 4. Cleaned up automatically when dropped
 pub struct AIWorker {
+    /// Handle to the background thread for proper cleanup
+    /// None after the worker has been stopped and joined
     handle: Option<JoinHandle<()>>,
+    
+    /// Channel for sending requests to the AI worker
+    /// Requests are processed sequentially in the worker thread
     tx_req: Sender<AIRequest>,
+    
+    /// Channel for receiving responses from the AI worker
+    /// Main thread polls this non-blockingly for results
     rx_resp: Receiver<AIResponse>,
+    
+    /// Atomic flag for signaling the worker to stop current operations
+    /// Allows for immediate interruption of long-running searches
     stop_flag: Arc<AtomicBool>,
 }
 
@@ -257,6 +399,7 @@ pub struct App {
     pub mode: AppMode,
     pub games: Vec<(&'static str, Box<dyn Fn() -> GameWrapper>)>, // (name, factory)
     pub game_selection_state: ListState,
+    pub settings_state: ListState,
     pub game_wrapper: GameWrapper,
     pub game_status: GameStatus,
     pub player_options: Vec<(i32, Player)>, // (player_id, type)
@@ -300,6 +443,8 @@ pub struct App {
     pub layout_config: LayoutConfig,
     pub drag_state: DragState,
     pub blokus_ui_config: BlokusUIConfig,
+    // Component-based UI system
+    pub component_manager: crate::components::manager::ComponentManager,
 }
 
 impl App {
@@ -437,12 +582,16 @@ impl App {
 
         let mut game_selection_state = ListState::default();
         game_selection_state.select(Some(initial_game_index));
+        
+        let mut settings_state = ListState::default();
+        settings_state.select(Some(0));
 
         Self {
             should_quit: false,
             mode: initial_mode,
             games,
             game_selection_state,
+            settings_state,
             game_wrapper,
             game_status: GameStatus::InProgress,
             player_options,
@@ -486,6 +635,64 @@ impl App {
             layout_config: LayoutConfig::default(),
             drag_state: DragState::default(),
             blokus_ui_config: BlokusUIConfig::default(),
+            // Component-based UI system
+            component_manager: {
+                let mut manager = crate::components::manager::ComponentManager::new();
+                let root = Box::new(crate::components::ui::root::RootComponent::new());
+                manager.set_root_component(root);
+                manager
+            },
+        }
+    }
+
+    /// Creates a game instance using current settings values
+    /// 
+    /// This ensures that when games are started from the menu, they use the
+    /// updated settings rather than the original command-line parameters.
+    /// 
+    /// # Arguments
+    /// * `game_name` - Name of the game to create
+    /// 
+    /// # Returns
+    /// GameWrapper instance configured with current settings
+    pub fn create_game_with_current_settings(&self, game_name: &str) -> GameWrapper {
+        match game_name {
+            "gomoku" => {
+                GameWrapper::Gomoku(crate::games::gomoku::GomokuState::new(
+                    self.settings_board_size, 
+                    self.settings_line_size,
+                ))
+            }
+            "connect4" => {
+                // For Connect4, board_size becomes width, and height is derived
+                let width = self.settings_board_size;
+                let height = (self.settings_board_size.saturating_sub(1)).max(4); // Height is usually width - 1, min 4
+                GameWrapper::Connect4(crate::games::connect4::Connect4State::new(
+                    width,
+                    height,
+                    self.settings_line_size,
+                ))
+            }
+            "othello" => {
+                // Ensure even number for Othello
+                let board_size = if self.settings_board_size % 2 == 0 { 
+                    self.settings_board_size 
+                } else { 
+                    self.settings_board_size + 1 
+                };
+                GameWrapper::Othello(crate::games::othello::OthelloState::new(board_size))
+            }
+            "blokus" => {
+                // Blokus doesn't use settings for board size (it's always 20x20)
+                GameWrapper::Blokus(crate::games::blokus::BlokusState::new())
+            }
+            _ => {
+                // Default to Gomoku
+                GameWrapper::Gomoku(crate::games::gomoku::GomokuState::new(
+                    self.settings_board_size, 
+                    self.settings_line_size,
+                ))
+            }
         }
     }
 
@@ -601,8 +808,9 @@ impl App {
     pub fn start_game(&mut self) {
         if let Some(selected) = self.game_selection_state.selected() {
             if selected < self.games.len() {
-                let factory = &self.games[selected].1;
-                self.game_wrapper = factory();
+                // Create game using current settings instead of old factory
+                let game_name = self.games[selected].0;
+                self.game_wrapper = self.create_game_with_current_settings(game_name);
                 self.game_status = GameStatus::InProgress;
                 self.last_search_stats = None;
                 self.move_history.clear();
@@ -715,8 +923,9 @@ impl App {
         // Get the currently selected game and reset its state without changing player config
         if let Some(selected) = self.game_selection_state.selected() {
             if selected < self.games.len() {
-                let factory = &self.games[selected].1;
-                self.game_wrapper = factory();
+                // Create game using current settings instead of old factory
+                let game_name = self.games[selected].0;
+                self.game_wrapper = self.create_game_with_current_settings(game_name);
                 self.game_status = GameStatus::InProgress;
                 self.last_search_stats = None;
                 self.move_history.clear();
@@ -881,8 +1090,68 @@ impl App {
         );
     }
 
-    // Debug and history scrolling methods
-    
+    /// Apply current settings to the active game
+    /// 
+    /// Recreates the current game using updated settings if we're currently in a game.
+    /// This ensures that settings changes take effect immediately without requiring manual reset.
+    pub fn apply_settings_to_current_game(&mut self) {
+        // Only recreate game if we're currently in game mode (not in menus)
+        if matches!(self.mode, AppMode::InGame | AppMode::GameOver) {
+            if let Some(selected) = self.game_selection_state.selected() {
+                if selected < self.games.len() {
+                    let game_name = self.games[selected].0;
+                    
+                    // Store the current game state
+                    let was_in_progress = self.game_status == GameStatus::InProgress;
+                    
+                    // Recreate the game with current settings
+                    self.game_wrapper = self.create_game_with_current_settings(game_name);
+                    
+                    // Reset game state
+                    self.game_status = GameStatus::InProgress;
+                    self.last_search_stats = None;
+                    self.move_history.clear();
+                    
+                    // Reset cursor position based on new game type
+                    let (initial_row, initial_col) = match &self.game_wrapper {
+                        GameWrapper::Gomoku(_) => {
+                            let board = self.game_wrapper.get_board();
+                            let size = board.len();
+                            (size / 2, size / 2)
+                        }
+                        GameWrapper::Connect4(_) => {
+                            let board = self.game_wrapper.get_board();
+                            let width = if !board.is_empty() { board[0].len() } else { 7 };
+                            (0, width / 2)
+                        }
+                        GameWrapper::Othello(_) => {
+                            let board = self.game_wrapper.get_board();
+                            let size = board.len();
+                            (size / 2 - 1, size / 2 - 1)
+                        }
+                        GameWrapper::Blokus(_) => (10, 10), // Center of Blokus board
+                    };
+                    
+                    self.board_cursor = (initial_row as u16, initial_col as u16);
+                    
+                    // Clear any game-specific selections
+                    if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
+                        self.blokus_ui_config.selected_piece_idx = None;
+                        self.blokus_ui_config.selected_transformation_idx = 0;
+                    }
+                    
+                    // Recreate AI worker to ensure fresh state
+                    self.recreate_ai_worker();
+                    
+                    // If we were in game mode, stay in game mode; if game over, go back to game
+                    if was_in_progress || self.mode == AppMode::GameOver {
+                        self.mode = AppMode::InGame;
+                    }
+                }
+            }
+        }
+    }
+
     /// Scrolls the debug panel up by one line
     pub fn scroll_debug_up(&mut self) {
         self.debug_scroll = self.debug_scroll.saturating_sub(1);
