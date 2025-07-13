@@ -1,7 +1,7 @@
 //! # Gomoku (Five in a Row) Game Implementation
 //!
 //! This module implements the classic Gomoku board game, also known as Five in a Row.
-//! Players alternate placing pieces on a grid, trying to get five (or a configurable number) 
+//! Players alternate placing pieces on a grid, trying to get five (or a configurable number)
 //! pieces in a row horizontally, vertically, or diagonally.
 //!
 //! ## Rules
@@ -15,14 +15,14 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Represents a move in Gomoku
-/// 
+///
 /// Contains the row and column coordinates where a player wants to place their piece.
 /// Both coordinates are 0-based indices.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct GomokuMove(pub usize, pub usize);
 
 /// Represents the complete state of a Gomoku game
-/// 
+///
 /// Contains the board state, current player, game configuration, and move history.
 /// The board uses 1 for player 1 pieces, -1 for player 2 pieces, and 0 for empty spaces.
 #[derive(Debug, Clone)]
@@ -62,12 +62,12 @@ impl GomokuState {
     }
 
     /// Checks if a move is legal in the current game state
-    /// 
+    ///
     /// A move is legal if it's within the board bounds and the target square is empty.
-    /// 
+    ///
     /// # Arguments
     /// * `mv` - The move to check
-    /// 
+    ///
     /// # Returns
     /// True if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &GomokuMove) -> bool {
@@ -130,12 +130,12 @@ impl GameState for GomokuState {
         let last_move = self.last_move?;
         let (r, c) = last_move;
         let player = self.board[r][c];
-        
+
         // If the position is empty, there's no winner (shouldn't happen in normal play)
         if player == 0 {
             return None;
         }
-        
+
         // Check horizontal (left-right through the last move)
         let mut count = 1;
         // Check left
@@ -157,7 +157,7 @@ impl GameState for GomokuState {
         if count >= self.line_size {
             return Some(player);
         }
-        
+
         // Check vertical (up-down through the last move)
         count = 1;
         // Check up
@@ -179,7 +179,7 @@ impl GameState for GomokuState {
         if count >= self.line_size {
             return Some(player);
         }
-        
+
         // Check diagonal (top-left to bottom-right through the last move)
         count = 1;
         // Check top-left
@@ -192,7 +192,10 @@ impl GameState for GomokuState {
         }
         // Check bottom-right
         for i in 1..self.line_size {
-            if r + i < self.board_size && c + i < self.board_size && self.board[r + i][c + i] == player {
+            if r + i < self.board_size
+                && c + i < self.board_size
+                && self.board[r + i][c + i] == player
+            {
                 count += 1;
             } else {
                 break;
@@ -201,7 +204,7 @@ impl GameState for GomokuState {
         if count >= self.line_size {
             return Some(player);
         }
-        
+
         // Check diagonal (top-right to bottom-left through the last move)
         count = 1;
         // Check top-right
@@ -223,7 +226,7 @@ impl GameState for GomokuState {
         if count >= self.line_size {
             return Some(player);
         }
-        
+
         None
     }
 
@@ -236,12 +239,12 @@ impl FromStr for GomokuMove {
     type Err = String;
 
     /// Creates a GomokuMove from a string representation
-    /// 
+    ///
     /// Expected format is "row,col" where both are 0-based indices.
-    /// 
+    ///
     /// # Arguments
     /// * `s` - String in format "r,c" (e.g., "3,4")
-    /// 
+    ///
     /// # Returns
     /// Ok(GomokuMove) if parsing succeeds, Err(String) if format is invalid
     fn from_str(s: &str) -> Result<Self, Self::Err> {

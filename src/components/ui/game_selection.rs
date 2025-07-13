@@ -1,10 +1,10 @@
 //! Game selection component.
 
 use ratatui::{
-    layout::Rect,
     Frame,
+    layout::Rect,
+    style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, ListItem},
-    style::{Style, Color, Modifier},
 };
 
 use crate::app::App;
@@ -30,7 +30,7 @@ impl Component for GameSelectionComponent {
     fn id(&self) -> ComponentId {
         self.id
     }
-    
+
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
         let mut items: Vec<ListItem> = app
             .games
@@ -59,7 +59,7 @@ impl Component for GameSelectionComponent {
         frame.render_stateful_widget(list, area, &mut app.game_selection_state.clone());
         Ok(())
     }
-    
+
     fn handle_event(&mut self, event: &ComponentEvent, app: &mut App) -> EventResult {
         match event {
             ComponentEvent::Input(InputEvent::KeyPress(key)) => {
@@ -87,10 +87,14 @@ impl Component for GameSelectionComponent {
                                 app.move_history.clear();
 
                                 let num_players = app.game_wrapper.get_num_players();
-                                
+
                                 // Only reset player options if we don't have the right number of players
-                                if app.player_options.is_empty() || app.player_options.len() != num_players as usize {
-                                    app.player_options = (1..=num_players).map(|i| (i, crate::app::Player::Human)).collect();
+                                if app.player_options.is_empty()
+                                    || app.player_options.len() != num_players as usize
+                                {
+                                    app.player_options = (1..=num_players)
+                                        .map(|i| (i, crate::app::Player::Human))
+                                        .collect();
                                     app.selected_player_config_index = 0;
                                 }
 
@@ -114,7 +118,7 @@ impl Component for GameSelectionComponent {
                         }
                         Ok(true)
                     }
-                    _ => Ok(false)
+                    _ => Ok(false),
                 }
             }
             _ => Ok(false),

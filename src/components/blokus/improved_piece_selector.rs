@@ -1,19 +1,19 @@
 //! Improved piece selector component with scrollable column layout and better UX.
 
+use mcts::GameState;
 use ratatui::{
-    layout::Rect,
     Frame,
-    widgets::{Block, Borders, Paragraph},
-    style::{Style, Color, Modifier},
+    layout::Rect,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
 };
 use std::any::Any;
-use mcts::GameState;
 
 use crate::app::App;
+use crate::components::blokus::{ResponsivePieceGridComponent, ResponsivePieceGridConfig};
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::{ComponentEvent, InputEvent};
-use crate::components::blokus::{ResponsivePieceGridComponent, ResponsivePieceGridConfig};
 
 /// Configuration for the improved piece selector
 #[derive(Clone)]
@@ -51,9 +51,12 @@ impl ImprovedPlayerPanel {
         let player_colors = [Color::Red, Color::Blue, Color::Green, Color::Yellow];
         let theme = crate::components::ui::theme::UITheme::default();
         let (empty_light, empty_dark) = theme.empty_cell_colors();
-        
+
         let mut config = ResponsivePieceGridConfig::default();
-        config.player_color = player_colors.get((player - 1) as usize).cloned().unwrap_or(Color::White);
+        config.player_color = player_colors
+            .get((player - 1) as usize)
+            .cloned()
+            .unwrap_or(Color::White);
         config.min_pieces_per_row = 4;
         config.max_pieces_per_row = 7;
         config.piece_width = 8;
@@ -61,7 +64,7 @@ impl ImprovedPlayerPanel {
         config.show_borders = true;
         config.show_labels = true;
         config.compact_mode = false;
-        
+
         // Use theme colors for checkerboard pattern (same as board)
         config.empty_cell_light = empty_light;
         config.empty_cell_dark = empty_dark;
@@ -78,7 +81,7 @@ impl ImprovedPlayerPanel {
     fn update_state(&mut self, app: &App) {
         let current_player = app.game_wrapper.get_current_player();
         self.is_current_player = current_player == self.player as i32;
-        
+
         // Auto-expand current player, keep others as configured
         if self.is_current_player {
             self.is_expanded = true;
@@ -103,24 +106,34 @@ impl ImprovedPlayerPanel {
         self.height
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, app: &App, config: &ImprovedPieceSelectorConfig) -> ComponentResult<()> {
+    fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        app: &App,
+        config: &ImprovedPieceSelectorConfig,
+    ) -> ComponentResult<()> {
         let player_name = ["Red", "Blue", "Green", "Yellow"][(self.player - 1) as usize];
-        let player_color = [Color::Red, Color::Blue, Color::Green, Color::Yellow][(self.player - 1) as usize];
+        let player_color =
+            [Color::Red, Color::Blue, Color::Green, Color::Yellow][(self.player - 1) as usize];
 
         if !self.is_expanded {
             // Render collapsed header
             let expand_indicator = if self.is_current_player { "►" } else { "▷" };
-            let header_text = format!("{} {} Player {} (collapsed)", expand_indicator, player_name, self.player);
-            
+            let header_text = format!(
+                "{} {} Player {} (collapsed)",
+                expand_indicator, player_name, self.player
+            );
+
             let style = if self.is_current_player {
-                Style::default().fg(player_color).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(player_color)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(player_color)
             };
 
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(style);
+            let block = Block::default().borders(Borders::ALL).border_style(style);
             let inner = block.inner(area);
             frame.render_widget(block, area);
 
@@ -154,15 +167,17 @@ impl ImprovedPlayerPanel {
         match event {
             ComponentEvent::Input(InputEvent::MouseClick { x, y, .. }) => {
                 if let Some(area) = self.get_area() {
-                    if *x >= area.x && *x < area.x + area.width &&
-                       *y >= area.y && *y < area.y + area.height {
-                        
+                    if *x >= area.x
+                        && *x < area.x + area.width
+                        && *y >= area.y
+                        && *y < area.y + area.height
+                    {
                         // Check if clicking on header to toggle expansion
                         if !self.is_expanded && *y == area.y + 1 {
                             self.is_expanded = true;
                             return Ok(true);
                         }
-                        
+
                         // Forward to grid if expanded
                         if self.is_expanded {
                             return self.grid.handle_event(event, app);
@@ -198,7 +213,7 @@ impl ImprovedBlokusPieceSelectorComponent {
     pub fn new() -> Self {
         let config = ImprovedPieceSelectorConfig::default();
         let mut player_panels = Vec::new();
-        
+
         for player in 1..=4 {
             player_panels.push(ImprovedPlayerPanel::new(player, true));
         }
@@ -228,7 +243,7 @@ impl ImprovedBlokusPieceSelectorComponent {
     /// Calculate total content height and update scroll bounds
     fn update_scroll_bounds(&mut self, available_height: u16) {
         let total_content_height: u16 = self.player_panels.iter().map(|p| p.height).sum();
-        
+
         if total_content_height > available_height {
             self.max_scroll = total_content_height.saturating_sub(available_height);
         } else {
@@ -359,7 +374,7 @@ impl Component for ImprovedBlokusPieceSelectorComponent {
                 // Calculate visible portion
                 let visible_start = panel_start.max(scroll_offset);
                 let visible_height = (panel_end.min(visible_end) - visible_start) as u16;
-                
+
                 if visible_height > 0 {
                     let panel_area = Rect::new(
                         inner_area.x,
@@ -385,8 +400,11 @@ impl Component for ImprovedBlokusPieceSelectorComponent {
         match event {
             ComponentEvent::Input(InputEvent::MouseScroll { x, y, up }) => {
                 if let Some(area) = self.area {
-                    if *x >= area.x && *x < area.x + area.width &&
-                       *y >= area.y && *y < area.y + area.height {
+                    if *x >= area.x
+                        && *x < area.x + area.width
+                        && *y >= area.y
+                        && *y < area.y + area.height
+                    {
                         self.handle_scroll(*up);
                         return Ok(true);
                     }
@@ -394,7 +412,9 @@ impl Component for ImprovedBlokusPieceSelectorComponent {
             }
             ComponentEvent::Input(InputEvent::MouseClick { .. }) => {
                 // Calculate visible panel areas and forward clicks
-                let Some(area) = self.area else { return Ok(false); };
+                let Some(area) = self.area else {
+                    return Ok(false);
+                };
                 let inner_area = Rect::new(
                     area.x + 1,
                     area.y + 1,
@@ -415,7 +435,7 @@ impl Component for ImprovedBlokusPieceSelectorComponent {
                     if panel_end > scroll_offset && panel_start < visible_end {
                         let visible_start = panel_start.max(scroll_offset);
                         let visible_height = (panel_end.min(visible_end) - visible_start) as u16;
-                        
+
                         if visible_height > 0 {
                             let panel_area = Rect::new(
                                 inner_area.x,

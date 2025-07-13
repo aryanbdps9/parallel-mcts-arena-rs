@@ -1,10 +1,10 @@
 //! Scrollable component for consistent scrolling behavior across UI elements.
 
 use ratatui::{
-    layout::Rect,
     Frame,
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    layout::Rect,
     text::Line,
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use std::any::Any;
 
@@ -123,7 +123,7 @@ impl ScrollableComponent {
                 .direction(ratatui::layout::Direction::Horizontal)
                 .constraints([
                     ratatui::layout::Constraint::Min(0),
-                    ratatui::layout::Constraint::Length(1)
+                    ratatui::layout::Constraint::Length(1),
                 ])
                 .split(area);
             (chunks[0], Some(chunks[1]))
@@ -148,7 +148,7 @@ impl ScrollableComponent {
             if self.content.len() <= visible_height {
                 return 0.0;
             }
-            
+
             let max_scroll = self.content.len() - visible_height;
             if max_scroll == 0 {
                 0.0
@@ -185,7 +185,12 @@ impl Component for ScrollableComponent {
         self
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _app: &crate::app::App) -> ComponentResult<()> {
+    fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        _app: &crate::app::App,
+    ) -> ComponentResult<()> {
         self.set_area(area);
 
         let (content_area, scrollbar_area) = self.get_layout_areas(area);
@@ -209,18 +214,17 @@ impl Component for ScrollableComponent {
         let max_scroll = self.content.len().saturating_sub(visible_height);
         self.scroll_offset = self.scroll_offset.min(max_scroll);
 
-        let visible_lines: Vec<Line> = if self.content.len() > visible_height && self.scroll_offset < self.content.len() {
-            self.content.iter()
-                .skip(self.scroll_offset)
-                .take(visible_height)
-                .cloned()
-                .collect()
-        } else {
-            self.content.iter()
-                .take(visible_height)
-                .cloned()
-                .collect()
-        };
+        let visible_lines: Vec<Line> =
+            if self.content.len() > visible_height && self.scroll_offset < self.content.len() {
+                self.content
+                    .iter()
+                    .skip(self.scroll_offset)
+                    .take(visible_height)
+                    .cloned()
+                    .collect()
+            } else {
+                self.content.iter().take(visible_height).cloned().collect()
+            };
 
         // Render content
         let paragraph = Paragraph::new(visible_lines);
@@ -276,7 +280,7 @@ impl Component for ScrollableComponent {
                                 self.scroll_to_bottom();
                                 Ok(true) // Handled
                             }
-                            _ => Ok(false) // Not handled
+                            _ => Ok(false), // Not handled
                         }
                     }
                     InputEvent::MouseScroll { up, .. } => {
@@ -287,10 +291,10 @@ impl Component for ScrollableComponent {
                         }
                         Ok(true) // Handled
                     }
-                    _ => Ok(false) // Not handled
+                    _ => Ok(false), // Not handled
                 }
             }
-            _ => Ok(false) // Not handled
+            _ => Ok(false), // Not handled
         }
     }
 }

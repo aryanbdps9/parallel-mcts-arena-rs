@@ -1,9 +1,9 @@
 //! Reusable board cell component for consistent rendering across games.
 
 use ratatui::{
-    layout::Rect,
     Frame,
-    style::{Style, Color, Modifier},
+    layout::Rect,
+    style::{Color, Modifier, Style},
     text::Span,
 };
 use std::any::Any;
@@ -75,27 +75,87 @@ impl BoardCellComponent {
     fn get_blokus_appearance(&self) -> (&'static str, Style) {
         if self.is_ghost {
             if self.ghost_legal {
-                ("▓▓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                (
+                    "▓▓",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                ("▓▓", Style::default().fg(Color::Red).add_modifier(Modifier::DIM))
+                (
+                    "▓▓",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+                )
             }
         } else {
             match self.cell_value {
                 1 => {
-                    let color = if self.is_highlighted { Color::LightRed } else { Color::Red };
-                    ("██", Style::default().fg(color).add_modifier(if self.is_highlighted { Modifier::BOLD } else { Modifier::empty() }))
+                    let color = if self.is_highlighted {
+                        Color::LightRed
+                    } else {
+                        Color::Red
+                    };
+                    (
+                        "██",
+                        Style::default()
+                            .fg(color)
+                            .add_modifier(if self.is_highlighted {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    )
                 }
                 2 => {
-                    let color = if self.is_highlighted { Color::LightBlue } else { Color::Blue };
-                    ("██", Style::default().fg(color).add_modifier(if self.is_highlighted { Modifier::BOLD } else { Modifier::empty() }))
+                    let color = if self.is_highlighted {
+                        Color::LightBlue
+                    } else {
+                        Color::Blue
+                    };
+                    (
+                        "██",
+                        Style::default()
+                            .fg(color)
+                            .add_modifier(if self.is_highlighted {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    )
                 }
                 3 => {
-                    let color = if self.is_highlighted { Color::LightGreen } else { Color::Green };
-                    ("██", Style::default().fg(color).add_modifier(if self.is_highlighted { Modifier::BOLD } else { Modifier::empty() }))
+                    let color = if self.is_highlighted {
+                        Color::LightGreen
+                    } else {
+                        Color::Green
+                    };
+                    (
+                        "██",
+                        Style::default()
+                            .fg(color)
+                            .add_modifier(if self.is_highlighted {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    )
                 }
                 4 => {
-                    let color = if self.is_highlighted { Color::LightYellow } else { Color::Yellow };
-                    ("██", Style::default().fg(color).add_modifier(if self.is_highlighted { Modifier::BOLD } else { Modifier::empty() }))
+                    let color = if self.is_highlighted {
+                        Color::LightYellow
+                    } else {
+                        Color::Yellow
+                    };
+                    (
+                        "██",
+                        Style::default()
+                            .fg(color)
+                            .add_modifier(if self.is_highlighted {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    )
                 }
                 _ => {
                     // Chess-like pattern for empty squares - alternating light and dark
@@ -109,8 +169,18 @@ impl BoardCellComponent {
 
     fn get_othello_appearance(&self) -> (&'static str, Style) {
         match self.cell_value {
-            1 => ("●●", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            2 => ("●●", Style::default().fg(Color::Black).add_modifier(Modifier::BOLD)),
+            1 => (
+                "●●",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            2 => (
+                "●●",
+                Style::default()
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
             _ => {
                 if self.is_cursor {
                     ("··", Style::default().fg(Color::Yellow).bg(Color::DarkGray))
@@ -123,8 +193,16 @@ impl BoardCellComponent {
 
     fn get_connect4_appearance(&self) -> (&'static str, Style) {
         match self.cell_value {
-            1 => ("●●", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            2 => ("●●", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            1 => (
+                "●●",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            2 => (
+                "●●",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             _ => {
                 if self.is_cursor {
                     ("··", Style::default().fg(Color::Cyan).bg(Color::DarkGray))
@@ -137,8 +215,18 @@ impl BoardCellComponent {
 
     fn get_gomoku_appearance(&self) -> (&'static str, Style) {
         match self.cell_value {
-            1 => ("●●", Style::default().fg(Color::Black).add_modifier(Modifier::BOLD)),
-            2 => ("○○", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            1 => (
+                "●●",
+                Style::default()
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            2 => (
+                "○○",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             _ => {
                 if self.is_cursor {
                     ("++", Style::default().fg(Color::Yellow).bg(Color::DarkGray))
@@ -167,11 +255,16 @@ impl Component for BoardCellComponent {
         self
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, _app: &crate::app::App) -> ComponentResult<()> {
+    fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        _app: &crate::app::App,
+    ) -> ComponentResult<()> {
         self.set_area(area);
 
         let (symbol, mut style) = self.get_cell_appearance();
-        
+
         // Apply cursor background if needed
         if self.is_cursor && self.cell_value == 0 {
             style = style.bg(Color::Yellow);
@@ -184,7 +277,11 @@ impl Component for BoardCellComponent {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: &crate::components::events::ComponentEvent, _app: &mut crate::app::App) -> EventResult {
+    fn handle_event(
+        &mut self,
+        event: &crate::components::events::ComponentEvent,
+        _app: &mut crate::app::App,
+    ) -> EventResult {
         let _ = event;
         Ok(false)
     }

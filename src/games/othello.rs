@@ -17,14 +17,14 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Represents a move in Othello
-/// 
+///
 /// Contains the row and column coordinates where a player wants to place their piece.
 /// Both coordinates are 0-based indices.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct OthelloMove(pub usize, pub usize);
 
 /// Represents the complete state of an Othello game
-/// 
+///
 /// Contains the board state, current player, and move history.
 /// The board uses 1 for black pieces, -1 for white pieces, and 0 for empty spaces.
 #[derive(Debug, Clone)]
@@ -148,7 +148,10 @@ impl OthelloState {
     /// # Returns
     /// A new OthelloState ready to play
     pub fn new(board_size: usize) -> Self {
-        assert!(board_size > 0 && board_size % 2 == 0, "Board size must be a positive even number.");
+        assert!(
+            board_size > 0 && board_size % 2 == 0,
+            "Board size must be a positive even number."
+        );
         let mut board = vec![vec![0; board_size]; board_size];
         let center = board_size / 2;
         board[center - 1][center - 1] = -1;
@@ -165,7 +168,7 @@ impl OthelloState {
     }
 
     /// Returns the line size for the game
-    /// 
+    ///
     /// Othello doesn't use a line size concept like other games,
     /// so this returns 1 as a default value.
     pub fn get_line_size(&self) -> usize {
@@ -173,12 +176,12 @@ impl OthelloState {
     }
 
     /// Checks if a move is legal in the current game state
-    /// 
+    ///
     /// A move is legal if it's on an empty square and would flip at least one opponent piece.
-    /// 
+    ///
     /// # Arguments
     /// * `mv` - The move to check
-    /// 
+    ///
     /// # Returns
     /// True if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &OthelloMove) -> bool {
@@ -186,13 +189,13 @@ impl OthelloState {
     }
 
     /// Internal helper to check if a move at given coordinates is valid
-    /// 
+    ///
     /// Checks all 8 directions from the proposed move to see if any opponent
     /// pieces would be flipped (sandwiched between the new piece and an existing piece).
-    /// 
+    ///
     /// # Arguments
     /// * `mv` - Coordinates (row, col) to check
-    /// 
+    ///
     /// # Returns
     /// True if the move would flip at least one opponent piece
     fn is_valid_move(&self, mv: (usize, usize)) -> bool {
@@ -203,8 +206,14 @@ impl OthelloState {
 
         let opponent = -self.current_player;
         let directions = [
-            (-1, -1), (-1, 0), (-1, 1), (0, -1),
-            (0, 1), (1, -1), (1, 0), (1, 1),
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
         ];
 
         for (dr, dc) in directions.iter() {
@@ -231,19 +240,25 @@ impl OthelloState {
     }
 
     /// Flips all opponent pieces that are captured by placing a piece at (r, c)
-    /// 
+    ///
     /// This method is called after a move is made to flip all opponent pieces
     /// that are sandwiched between the new piece and existing pieces of the same color.
     /// It searches in all 8 directions and flips pieces in each valid direction.
-    /// 
+    ///
     /// # Arguments
     /// * `r` - Row coordinate of the newly placed piece
     /// * `c` - Column coordinate of the newly placed piece
     fn flip_pieces(&mut self, r: usize, c: usize) {
         let opponent = -self.current_player;
         let directions = [
-            (-1, -1), (-1, 0), (-1, 1), (0, -1),
-            (0, 1), (1, -1), (1, 0), (1, 1),
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
         ];
 
         for (dr, dc) in directions.iter() {
@@ -273,12 +288,12 @@ impl FromStr for OthelloMove {
     type Err = String;
 
     /// Creates an OthelloMove from a string representation
-    /// 
+    ///
     /// Expected format is "row,col" where both are 0-based indices.
-    /// 
+    ///
     /// # Arguments
     /// * `s` - String in format "r,c" (e.g., "3,4")
-    /// 
+    ///
     /// # Returns
     /// Ok(OthelloMove) if parsing succeeds, Err(String) if format is invalid
     fn from_str(s: &str) -> Result<Self, Self::Err> {

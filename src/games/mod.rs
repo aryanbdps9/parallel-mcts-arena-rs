@@ -24,7 +24,7 @@
 //! 3. Display and parsing implementations for moves
 //! 4. Game-specific rules and win conditions
 
-pub mod othello;
-pub mod connect4;
 pub mod blokus;
+pub mod connect4;
 pub mod gomoku;
+pub mod othello;

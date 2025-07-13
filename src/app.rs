@@ -34,16 +34,16 @@
 //! - Node recycling in the MCTS search tree
 
 // Import dependencies for game management and UI coordination
-use crate::game_wrapper::{GameWrapper, MoveWrapper};  // Unified game interface
-use crate::tui::layout::LayoutConfig;                 // Responsive UI layout management  
-use crate::tui::mouse::DragState;                     // Mouse interaction state tracking
-use crate::tui::blokus_ui::BlokusUIConfig;            // Blokus-specific UI configuration
-use mcts::{GameState, MCTS};                          // Monte Carlo Tree Search engine
-use ratatui::widgets::ListState;                      // TUI list widget state management
-use std::sync::mpsc::{self, Receiver, Sender};        // Thread communication channels
-use std::sync::{Arc, atomic::AtomicBool};             // Thread-safe shared state
-use std::thread::{self, JoinHandle};                  // Background thread management
-use std::time::SystemTime;                           // Timestamp tracking for moves
+use crate::game_wrapper::{GameWrapper, MoveWrapper}; // Unified game interface
+use crate::tui::blokus_ui::BlokusUIConfig; // Blokus-specific UI configuration
+use crate::tui::layout::LayoutConfig; // Responsive UI layout management
+use crate::tui::mouse::DragState; // Mouse interaction state tracking
+use mcts::{GameState, MCTS}; // Monte Carlo Tree Search engine
+use ratatui::widgets::ListState; // TUI list widget state management
+use std::sync::mpsc::{self, Receiver, Sender}; // Thread communication channels
+use std::sync::{Arc, atomic::AtomicBool}; // Thread-safe shared state
+use std::thread::{self, JoinHandle}; // Background thread management
+use std::time::SystemTime; // Timestamp tracking for moves
 
 /// Represents a single move in the game's move history
 ///
@@ -68,11 +68,11 @@ pub struct MoveHistoryEntry {
     /// System timestamp when the move was executed
     /// Used for performance analysis and replay timing
     pub timestamp: SystemTime,
-    
+
     /// Player ID who made this move
     /// Uses game-specific numbering (e.g., 1/-1 for two-player games, 1-4 for Blokus)
     pub player: i32,
-    
+
     /// The move that was made, type-erased for storage
     /// Contains game-specific move data wrapped in MoveWrapper enum
     pub a_move: MoveWrapper,
@@ -80,11 +80,11 @@ pub struct MoveHistoryEntry {
 
 impl MoveHistoryEntry {
     /// Creates a new move history entry with the current timestamp
-    /// 
+    ///
     /// # Arguments
     /// * `player` - The player ID who made the move
     /// * `a_move` - The move that was made
-    /// 
+    ///
     /// # Returns
     /// A new MoveHistoryEntry with current system time
     pub fn new(player: i32, a_move: MoveWrapper) -> Self {
@@ -113,27 +113,27 @@ impl MoveHistoryEntry {
 #[derive(Debug)]
 pub enum AIRequest {
     /// Request the AI to search for the best move from a given position
-    /// 
+    ///
     /// # Parameters
     /// - `GameWrapper`: Current game state to search from
     /// - `u64`: Maximum search time in seconds
-    /// 
+    ///
     /// The AI will perform MCTS until either the time limit is reached
     /// or the maximum iteration count is exceeded, whichever comes first.
     Search(GameWrapper, u64),
-    
+
     /// Advance the MCTS tree root to reflect a move that was made
-    /// 
+    ///
     /// # Parameters  
     /// - `MoveWrapper`: The move that was executed in the game
-    /// 
+    ///
     /// This allows the AI to reuse previous search results by updating
     /// the tree structure rather than starting from scratch. This is a
     /// key optimization for maintaining AI strength across moves.
     AdvanceRoot(MoveWrapper),
-    
+
     /// Signal the AI worker to stop processing and exit gracefully
-    /// 
+    ///
     /// The worker will finish its current operation and then terminate.
     /// This is used during application shutdown or when reconfiguring AI settings.
     Stop,
@@ -150,12 +150,12 @@ pub enum AIRequest {
 #[derive(Debug)]
 pub enum AIResponse {
     /// The AI's selected move along with detailed search statistics
-    /// 
+    ///
     /// # Parameters
     /// - `MoveWrapper`: The best move found by the AI
-    /// - `mcts::SearchStatistics`: Detailed analysis including node counts, 
+    /// - `mcts::SearchStatistics`: Detailed analysis including node counts,
     ///   evaluation scores, and top move candidates
-    /// 
+    ///
     /// This provides both the actionable result (the move) and rich
     /// information for debugging and user education about AI reasoning.
     Move(MoveWrapper, mcts::SearchStatistics),
@@ -192,15 +192,15 @@ pub struct AIWorker {
     /// Handle to the background thread for proper cleanup
     /// None after the worker has been stopped and joined
     handle: Option<JoinHandle<()>>,
-    
+
     /// Channel for sending requests to the AI worker
     /// Requests are processed sequentially in the worker thread
     tx_req: Sender<AIRequest>,
-    
+
     /// Channel for receiving responses from the AI worker
     /// Main thread polls this non-blockingly for results
     rx_resp: Receiver<AIResponse>,
-    
+
     /// Atomic flag for signaling the worker to stop current operations
     /// Allows for immediate interruption of long-running searches
     stop_flag: Arc<AtomicBool>,
@@ -208,20 +208,25 @@ pub struct AIWorker {
 
 impl AIWorker {
     /// Creates a new AI worker thread
-    /// 
+    ///
     /// Spawns a background thread that handles MCTS search requests and maintains
     /// a persistent search tree. The worker can be controlled via message passing
     /// and will automatically stop when requested.
-    /// 
+    ///
     /// # Arguments
     /// * `exploration_constant` - C_puct value for MCTS exploration vs exploitation balance
     /// * `num_threads` - Number of parallel threads for MCTS search
     /// * `search_iterations` - Maximum number of MCTS iterations per search
     /// * `max_nodes` - Maximum number of nodes allowed in the search tree
-    /// 
+    ///
     /// # Returns
     /// New AIWorker instance ready to process search requests
-    pub fn new(exploration_constant: f64, num_threads: usize, search_iterations: u32, max_nodes: usize) -> Self {
+    pub fn new(
+        exploration_constant: f64,
+        num_threads: usize,
+        search_iterations: u32,
+        max_nodes: usize,
+    ) -> Self {
         let (tx_req, rx_req) = mpsc::channel();
         let (tx_resp, rx_resp) = mpsc::channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -236,25 +241,24 @@ impl AIWorker {
                         if stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
                             break;
                         }
-                        
+
                         if mcts.is_none() {
-                            mcts = Some(MCTS::new(
-                                exploration_constant,
-                                num_threads,
-                                max_nodes,
-                            ));
+                            mcts = Some(MCTS::new(exploration_constant, num_threads, max_nodes));
                         }
                         let mcts_ref = mcts.as_mut().unwrap();
-                        
+
                         // Use the exact timeout - MCTS now properly respects timeouts
-                        let (best_move, stats) =
-                            mcts_ref.search_with_stop(&state, search_iterations as i32, 1, timeout_secs, Some(stop_flag_clone.clone()));
-                        
+                        let (best_move, stats) = mcts_ref.search_with_stop(
+                            &state,
+                            search_iterations as i32,
+                            1,
+                            timeout_secs,
+                            Some(stop_flag_clone.clone()),
+                        );
+
                         // Only send response if we haven't been stopped
                         if !stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                            tx_resp
-                                .send(AIResponse::Move(best_move, stats))
-                                .ok(); // Ignore send errors if receiver is dropped
+                            tx_resp.send(AIResponse::Move(best_move, stats)).ok(); // Ignore send errors if receiver is dropped
                         }
                     }
                     AIRequest::AdvanceRoot(move_made) => {
@@ -276,10 +280,10 @@ impl AIWorker {
     }
 
     /// Starts an AI search for the given game state
-    /// 
+    ///
     /// Sends a search request to the AI worker thread. The search will run
     /// asynchronously and the result can be retrieved using try_recv().
-    /// 
+    ///
     /// # Arguments
     /// * `state` - Current game state to search from
     /// * `timeout_secs` - Maximum time to spend searching (in seconds)
@@ -292,10 +296,10 @@ impl AIWorker {
     }
 
     /// Attempts to receive a response from the AI worker
-    /// 
+    ///
     /// Non-blocking call that returns None if no response is available yet.
     /// Should be called periodically to check for completed searches.
-    /// 
+    ///
     /// # Returns
     /// Some(AIResponse) if a response is available, None otherwise
     pub fn try_recv(&self) -> Option<AIResponse> {
@@ -303,45 +307,46 @@ impl AIWorker {
     }
 
     /// Explicitly stop the AI worker
-    /// 
+    ///
     /// Interrupts any ongoing search and signals the worker thread to stop.
     /// The worker will finish processing the current request and then exit.
     /// This is automatically called when the AIWorker is dropped.
     pub fn stop(&self) {
         // Set the stop flag first to interrupt any ongoing search
-        self.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stop_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         // Then send the stop message to break the worker loop
         self.tx_req.send(AIRequest::Stop).ok();
     }
 
     /// Advances the AI's search tree root to reflect a move that was made
-    /// 
+    ///
     /// When a move is made in the game, this tells the AI to update its internal
     /// search tree so that future searches start from the new position. This
     /// allows the AI to reuse previous search results.
-    /// 
+    ///
     /// # Arguments
     /// * `move_made` - The move that was made in the game
     pub fn advance_root(&self, move_made: &MoveWrapper) {
-        self.tx_req.send(AIRequest::AdvanceRoot(move_made.clone())).ok();
+        self.tx_req
+            .send(AIRequest::AdvanceRoot(move_made.clone()))
+            .ok();
     }
 }
 
 impl Drop for AIWorker {
     /// Cleanup when AIWorker is dropped
-    /// 
+    ///
     /// Ensures the worker thread is properly stopped and joined to prevent
     /// resource leaks. Gives the thread a reasonable time to finish gracefully.
     fn drop(&mut self) {
         // Stop the worker gracefully
-        self.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stop_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.tx_req.send(AIRequest::Stop).ok();
-        
+
         // Wait for the thread to finish, but with a timeout to avoid hanging
         if let Some(handle) = self.handle.take() {
-            // Give the thread up to 1 second to finish gracefully
-            // If it doesn't finish in time, it will be forcefully terminated
-            // when the process exits
             let _ = handle.join();
         }
     }
@@ -395,65 +400,81 @@ impl ActiveTab {
 /// This struct holds all the state required to run the application,
 /// including the game state, UI state, AI workers, and communication channels.
 pub struct App {
-    pub should_quit: bool,
-    pub mode: AppMode,
-    pub games: Vec<(&'static str, Box<dyn Fn() -> GameWrapper>)>, // (name, factory)
-    pub game_selection_state: ListState,
-    pub settings_state: ListState,
-    pub game_wrapper: GameWrapper,
-    pub game_status: GameStatus,
-    pub player_options: Vec<(i32, Player)>, // (player_id, type)
-    pub selected_player_config_index: usize,
-    pub ai_worker: AIWorker,
-    pub last_search_stats: Option<mcts::SearchStatistics>,
-    pub move_history: Vec<MoveHistoryEntry>,
-    pub show_debug: bool,
-    pub board_cursor: (u16, u16),
-    pub selected_blokus_piece: Option<(usize, usize)>,
-    pub history_scroll: u16,
-    pub debug_scroll: u16,
-    pub active_tab: ActiveTab,
-    // Auto-scroll for move history
-    pub history_auto_scroll: bool,
-    pub history_user_scroll_time: Option<std::time::Instant>,
-    pub history_auto_scroll_reset_duration: std::time::Duration,
-    // Auto-scroll for Blokus piece panel
-    pub piece_panel_auto_scroll: bool,
-    pub piece_panel_user_scroll_time: Option<std::time::Instant>,
-    pub piece_panel_auto_scroll_reset_duration: std::time::Duration,
-    pub last_current_player: i32, // Track when current player changes
-    // AI timing and status
-    pub ai_thinking_start: Option<std::time::Instant>,
-    pub ai_minimum_display_duration: std::time::Duration,
-    pub pending_ai_response: Option<(MoveWrapper, mcts::SearchStatistics)>,
-    // Settings
-    pub settings_board_size: usize,
-    pub settings_line_size: usize,
-    pub settings_ai_threads: usize,
-    pub settings_max_nodes: usize,
-    pub settings_search_iterations: u32,
-    pub settings_exploration_constant: f64,
-    pub selected_settings_index: usize,
+    // Application lifecycle
+    pub should_quit: bool, // Flag to signal application shutdown
+    pub mode: AppMode, // Current screen/menu being displayed
+
+    // Game management
+    pub games: Vec<(&'static str, Box<dyn Fn() -> GameWrapper>)>, // Available games with factory functions
+    pub game_selection_state: ListState, // UI state for game selection menu
+    pub settings_state: ListState, // UI state for settings menu
+    pub game_wrapper: GameWrapper, // Current active game instance
+    pub game_status: GameStatus, // Whether game is in progress, won, or drawn
+
+    // Player configuration
+    pub player_options: Vec<(i32, Player)>, // Player configurations (ID, Human/AI)
+    pub selected_player_config_index: usize, // Currently selected player in config menu
+
+    // AI system
+    pub ai_worker: AIWorker, // Background thread for AI computations
+    pub last_search_stats: Option<mcts::SearchStatistics>, // Most recent AI analysis data
+    pub move_history: Vec<MoveHistoryEntry>, // Complete history of moves made
+
+    // UI state
+    pub show_debug: bool, // Whether to display debug information
+    pub board_cursor: (u16, u16), // Current cursor position on game board (row, col)
+    pub selected_blokus_piece: Option<(usize, usize)>, // Deprecated: use blokus_ui_config instead
+    pub history_scroll: u16, // Current scroll position in move history panel
+    pub debug_scroll: u16, // Current scroll position in debug panel
+    pub active_tab: ActiveTab, // Currently selected tab (Debug/History)
+
+    // Auto-scroll behavior for move history
+    pub history_auto_scroll: bool, // Whether to automatically scroll to latest move
+    pub history_user_scroll_time: Option<std::time::Instant>, // When user last manually scrolled
+    pub history_auto_scroll_reset_duration: std::time::Duration, // How long to wait before re-enabling auto-scroll
+
+    // Auto-scroll behavior for Blokus piece panel
+    pub piece_panel_auto_scroll: bool, // Whether to automatically scroll to current player's pieces
+    pub piece_panel_user_scroll_time: Option<std::time::Instant>, // When user last manually scrolled pieces
+    pub piece_panel_auto_scroll_reset_duration: std::time::Duration, // How long to wait before re-enabling auto-scroll
+    pub last_current_player: i32, // Previous player ID to detect player changes
+
+    // AI timing and status display
+    pub ai_thinking_start: Option<std::time::Instant>, // When AI started thinking about current move
+    pub ai_minimum_display_duration: std::time::Duration, // Minimum time to show "AI thinking" message
+    pub pending_ai_response: Option<(MoveWrapper, mcts::SearchStatistics)>, // AI move waiting for minimum display time
+
+    // Game settings (configurable via settings menu)
+    pub settings_board_size: usize, // Board size for games that support it
+    pub settings_line_size: usize, // Number in a row needed to win
+    pub settings_ai_threads: usize, // Number of threads for AI search
+    pub settings_max_nodes: usize, // Maximum nodes in MCTS search tree
+    pub settings_search_iterations: u32, // Maximum MCTS iterations per search
+    pub settings_exploration_constant: f64, // C_puct value for exploration vs exploitation
+    pub selected_settings_index: usize, // Currently selected setting in menu
+
     // AI behavior settings
-    pub timeout_secs: u64,
-    pub stats_interval_secs: u64,
-    pub ai_only: bool,
-    pub shared_tree: bool,
+    pub timeout_secs: u64, // Maximum time AI can spend per move
+    pub stats_interval_secs: u64, // How often to update AI statistics display
+    pub ai_only: bool, // Whether to run AI vs AI games without human input
+    pub shared_tree: bool, // Whether AI should reuse search trees between moves
+
     // Enhanced UI components
-    pub layout_config: LayoutConfig,
-    pub drag_state: DragState,
-    pub blokus_ui_config: BlokusUIConfig,
+    pub layout_config: LayoutConfig, // Responsive layout configuration
+    pub drag_state: DragState, // Mouse drag interaction state
+    pub blokus_ui_config: BlokusUIConfig, // Blokus-specific UI state and configuration
+
     // Component-based UI system
-    pub component_manager: crate::components::manager::ComponentManager,
+    pub component_manager: crate::components::manager::ComponentManager, // Manages UI component lifecycle
 }
 
 impl App {
     /// Creates a new application instance with the specified configuration
-    /// 
+    ///
     /// Initializes all application state including game options, AI workers, UI components,
     /// and player configurations. The application can start in different modes depending
     /// on the provided parameters.
-    /// 
+    ///
     /// # Arguments
     /// * `exploration_constant` - C_puct value for MCTS exploration vs exploitation balance
     /// * `num_threads` - Number of parallel threads for AI search
@@ -466,7 +487,7 @@ impl App {
     /// * `stats_interval_secs` - How often to update AI statistics (seconds)
     /// * `ai_only` - Whether to run in AI-vs-AI mode (no human players)
     /// * `shared_tree` - Whether the AI should reuse search trees between moves
-    /// 
+    ///
     /// # Returns
     /// New App instance ready to run the game engine
     pub fn new(
@@ -485,14 +506,26 @@ impl App {
         // Set default values if not provided
         let gomoku_board_size = if board_size == 15 { 15 } else { board_size };
         let gomoku_line_size = if line_size == 5 { 5 } else { line_size };
-        
+
         let connect4_width = if board_size == 15 { 7 } else { board_size }; // Default Connect4 width is 7
-        let connect4_height = if board_size == 15 { 6 } else { board_size.saturating_sub(1).max(4) }; // Default Connect4 height is 6
+        let connect4_height = if board_size == 15 {
+            6
+        } else {
+            board_size.saturating_sub(1).max(4)
+        }; // Default Connect4 height is 6
+        // TODO: BUG: The user will never be able to pass line_size = 5. Consider making line_size an Option.
+        // Same for others (e.g. board_size)
         let connect4_line_size = if line_size == 5 { 4 } else { line_size }; // Default Connect4 line is 4
-        
-        let othello_board_size = if board_size == 15 { 8 } else { 
+
+        let othello_board_size = if board_size == 15 {
+            8
+        } else {
             // Ensure even number for Othello
-            if board_size % 2 == 0 { board_size } else { board_size + 1 }
+            if board_size % 2 == 0 {
+                board_size
+            } else {
+                board_size + 1
+            }
         };
 
         let games: Vec<(&'static str, Box<dyn Fn() -> GameWrapper>)> = vec![
@@ -500,7 +533,8 @@ impl App {
                 "gomoku",
                 Box::new(move || {
                     GameWrapper::Gomoku(crate::games::gomoku::GomokuState::new(
-                        gomoku_board_size, gomoku_line_size,
+                        gomoku_board_size,
+                        gomoku_line_size,
                     ))
                 }),
             ),
@@ -517,7 +551,9 @@ impl App {
             (
                 "othello",
                 Box::new(move || {
-                    GameWrapper::Othello(crate::games::othello::OthelloState::new(othello_board_size))
+                    GameWrapper::Othello(crate::games::othello::OthelloState::new(
+                        othello_board_size,
+                    ))
                 }),
             ),
             (
@@ -582,7 +618,7 @@ impl App {
 
         let mut game_selection_state = ListState::default();
         game_selection_state.select(Some(initial_game_index));
-        
+
         let mut settings_state = ListState::default();
         settings_state.select(Some(0));
 
@@ -596,7 +632,12 @@ impl App {
             game_status: GameStatus::InProgress,
             player_options,
             selected_player_config_index: 0,
-            ai_worker: AIWorker::new(exploration_constant, num_threads, search_iterations, max_nodes),
+            ai_worker: AIWorker::new(
+                exploration_constant,
+                num_threads,
+                search_iterations,
+                max_nodes,
+            ),
             last_search_stats: None,
             move_history: Vec::new(),
             show_debug: false,
@@ -646,23 +687,21 @@ impl App {
     }
 
     /// Creates a game instance using current settings values
-    /// 
+    ///
     /// This ensures that when games are started from the menu, they use the
     /// updated settings rather than the original command-line parameters.
-    /// 
+    ///
     /// # Arguments
     /// * `game_name` - Name of the game to create
-    /// 
+    ///
     /// # Returns
     /// GameWrapper instance configured with current settings
     pub fn create_game_with_current_settings(&self, game_name: &str) -> GameWrapper {
         match game_name {
-            "gomoku" => {
-                GameWrapper::Gomoku(crate::games::gomoku::GomokuState::new(
-                    self.settings_board_size, 
-                    self.settings_line_size,
-                ))
-            }
+            "gomoku" => GameWrapper::Gomoku(crate::games::gomoku::GomokuState::new(
+                self.settings_board_size,
+                self.settings_line_size,
+            )),
             "connect4" => {
                 // For Connect4, board_size becomes width, and height is derived
                 let width = self.settings_board_size;
@@ -675,10 +714,10 @@ impl App {
             }
             "othello" => {
                 // Ensure even number for Othello
-                let board_size = if self.settings_board_size % 2 == 0 { 
-                    self.settings_board_size 
-                } else { 
-                    self.settings_board_size + 1 
+                let board_size = if self.settings_board_size % 2 == 0 {
+                    self.settings_board_size
+                } else {
+                    self.settings_board_size + 1
                 };
                 GameWrapper::Othello(crate::games::othello::OthelloState::new(board_size))
             }
@@ -689,7 +728,7 @@ impl App {
             _ => {
                 // Default to Gomoku
                 GameWrapper::Gomoku(crate::games::gomoku::GomokuState::new(
-                    self.settings_board_size, 
+                    self.settings_board_size,
                     self.settings_line_size,
                 ))
             }
@@ -697,71 +736,71 @@ impl App {
     }
 
     /// Updates the application state for one frame
-    /// 
+    ///
     /// This is the main update loop that handles:
     /// - AI move processing and timing
     /// - Game state updates after moves
     /// - Automatic move history scrolling
     /// - Game over detection
     /// - Background AI search coordination
-    /// 
+    ///
     /// Should be called once per frame in the main UI loop.
     pub fn update(&mut self) {
-        if self.mode == AppMode::InGame {
-            if self.game_status == GameStatus::InProgress {
-                if self.is_current_player_ai() {
-                    if self.ai_thinking_start.is_none() {
-                        self.ai_thinking_start = Some(std::time::Instant::now());
-                        self.ai_worker.start_search(self.game_wrapper.clone(), self.timeout_secs);
-                    }
+    if self.mode == AppMode::InGame && self.game_status == GameStatus::InProgress {
+            if self.is_current_player_ai() {
+                if self.ai_thinking_start.is_none() {
+                    self.ai_thinking_start = Some(std::time::Instant::now());
+                    self.ai_worker
+                        .start_search(self.game_wrapper.clone(), self.timeout_secs);
                 }
+            }
 
-                // Check if we have a pending AI response that we're ready to process
-                if let Some((best_move, stats)) = self.pending_ai_response.take() {
-                    // Ensure the AI timer has been displayed for at least the minimum duration
-                    let should_process_move = if let Some(start_time) = self.ai_thinking_start {
-                        start_time.elapsed() >= self.ai_minimum_display_duration
-                    } else {
-                        true // No timer was set, process immediately
-                    };
+            // Check if we have a pending AI response that we're ready to process
+            if let Some((best_move, stats)) = self.pending_ai_response.take() {
+                // Ensure the AI timer has been displayed for at least the minimum duration
+                let should_process_move = if let Some(start_time) = self.ai_thinking_start {
+                    start_time.elapsed() >= self.ai_minimum_display_duration
+                } else {
+                    true // No timer was set, process immediately
+                };
 
-                    if should_process_move {
-                        self.ai_thinking_start = None; // Reset thinking timer
-                        self.move_history.push(MoveHistoryEntry::new(
-                            self.game_wrapper.get_current_player(),
-                            best_move.clone(),
-                        ));
-                        self.on_move_added(); // Auto-scroll to bottom
-                        self.game_wrapper.make_move(&best_move);
-                        self.last_search_stats = Some(stats);
-                        
-                        // Advance the AI worker's MCTS tree root to reflect the move that was just made
-                        self.ai_worker.advance_root(&best_move);
-                        
-                        // Clear selected piece if it becomes unavailable after move
-                        if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
-                            self.clear_selected_piece_if_unavailable();
-                        }
-                        
-                        self.check_game_over();
-                    } else {
-                        // Put the response back until the minimum time has elapsed
+                if should_process_move {
+                    self.ai_thinking_start = None; // Reset thinking timer
+                    self.move_history.push(MoveHistoryEntry::new(
+                        self.game_wrapper.get_current_player(),
+                        best_move.clone(),
+                    ));
+                    self.on_move_added(); // Auto-scroll to bottom
+                    self.game_wrapper.make_move(&best_move);
+                    self.last_search_stats = Some(stats);
+
+                    // Advance the AI worker's MCTS tree root to reflect the move that was just made
+                    self.ai_worker.advance_root(&best_move);
+
+                    // Clear selected piece if it becomes unavailable after move
+                    if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
+                        self.clear_selected_piece_if_unavailable();
+                    }
+
+                    self.check_game_over();
+                } else {
+                    // Put the response back until the minimum time has elapsed
+                    self.pending_ai_response = Some((best_move, stats));
+                }
+            }
+
+            // Check for new AI responses
+            if let Some(response) = self.ai_worker.try_recv() {
+                match response {
+                    AIResponse::Move(best_move, stats) => {
+                        // Store the response for delayed processing
                         self.pending_ai_response = Some((best_move, stats));
                     }
                 }
-
-                // Check for new AI responses
-                if let Some(response) = self.ai_worker.try_recv() {
-                    match response {
-                        AIResponse::Move(best_move, stats) => {
-                            // Store the response for delayed processing
-                            self.pending_ai_response = Some((best_move, stats));
-                        }
-                    }
-                }
             }
+
         }
-        
+
         // Handle auto-scroll reset timer for move history
         self.update_history_auto_scroll();
         // Update auto-scroll for Blokus piece panel based on current player
@@ -769,7 +808,7 @@ impl App {
     }
 
     /// Gets the name of the currently selected game
-    /// 
+    ///
     /// # Returns
     /// Static string reference to the selected game's name
     pub fn get_selected_game_name(&self) -> &'static str {
@@ -777,7 +816,7 @@ impl App {
     }
 
     /// Moves the game selection cursor to the next option
-    /// 
+    ///
     /// Wraps around to the beginning when reaching the end of the list.
     /// Includes settings and quit options in the navigation.
     pub fn select_next_game(&mut self) {
@@ -789,7 +828,7 @@ impl App {
     }
 
     /// Moves the game selection cursor to the previous option
-    /// 
+    ///
     /// Wraps around to the end when reaching the beginning of the list.
     /// Includes settings and quit options in the navigation.
     pub fn select_prev_game(&mut self) {
@@ -801,7 +840,7 @@ impl App {
     }
 
     /// Starts the selected game and transitions to the appropriate next state
-    /// 
+    ///
     /// Creates a new game instance, resets game state, and either goes to
     /// player configuration (normal mode) or directly to gameplay (AI-only mode).
     /// Also handles special options like Settings and Quit.
@@ -819,7 +858,9 @@ impl App {
 
                 // Only reset player options if we don't have the right number of players
                 // or if we don't have any player options configured yet
-                if self.player_options.is_empty() || self.player_options.len() != num_players as usize {
+                if self.player_options.is_empty()
+                    || self.player_options.len() != num_players as usize
+                {
                     self.player_options = (1..=num_players).map(|i| (i, Player::Human)).collect();
                     self.selected_player_config_index = 0;
                 }
@@ -830,7 +871,7 @@ impl App {
                     for (_, player_type) in &mut self.player_options {
                         *player_type = Player::AI;
                     }
-                    
+
                     // Set initial cursor position and go straight to game
                     let (initial_row, initial_col) = match &self.game_wrapper {
                         GameWrapper::Gomoku(_) => {
@@ -850,7 +891,7 @@ impl App {
                         }
                         GameWrapper::Blokus(_) => (10, 10), // Center of Blokus board
                     };
-                    
+
                     self.board_cursor = (initial_row as u16, initial_col as u16);
                     self.mode = AppMode::InGame;
                 } else {
@@ -890,7 +931,7 @@ impl App {
 
     pub fn confirm_player_config(&mut self) {
         self.mode = AppMode::InGame;
-        
+
         // Set initial cursor position based on game type
         let (initial_row, initial_col) = match &self.game_wrapper {
             GameWrapper::Gomoku(_) => {
@@ -910,12 +951,12 @@ impl App {
             }
             GameWrapper::Blokus(_) => (10, 10), // Center of Blokus board
         };
-        
+
         self.board_cursor = (initial_row as u16, initial_col as u16);
     }
 
     /// Resets the current game to its initial state
-    /// 
+    ///
     /// Creates a fresh game instance while preserving player configuration.
     /// Clears move history, resets game status, and positions the cursor
     /// appropriately for the game type.
@@ -949,16 +990,16 @@ impl App {
                     }
                     GameWrapper::Blokus(_) => (10, 10), // Center of Blokus board
                 };
-                
+
                 self.board_cursor = (initial_row as u16, initial_col as u16);
                 self.mode = AppMode::InGame;
-                
+
                 // Clear any Blokus-specific selections
                 if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
                     self.blokus_ui_config.selected_piece_idx = None;
                     self.blokus_ui_config.selected_transformation_idx = 0;
                 }
-                
+
                 // Recreate AI worker to ensure fresh state for new game
                 // This prevents crashes when restarting after a game where AI was the last player
                 self.recreate_ai_worker();
@@ -967,23 +1008,23 @@ impl App {
     }
 
     // Settings navigation methods
-    
+
     /// Moves to the next setting in the settings menu
-    /// 
+    ///
     /// Wraps around to the first setting when reaching the end.
     pub fn select_next_setting(&mut self) {
         self.selected_settings_index = (self.selected_settings_index + 1) % 12; // 10 settings + separator + back
     }
 
     /// Moves to the previous setting in the settings menu
-    /// 
+    ///
     /// Wraps around to the last setting when reaching the beginning.
     pub fn select_prev_setting(&mut self) {
         self.selected_settings_index = (self.selected_settings_index + 11) % 12;
     }
 
     /// Increases the value of the currently selected setting
-    /// 
+    ///
     /// Each setting has its own valid range and increment amount.
     /// Boolean settings get toggled instead of incremented.
     pub fn increase_setting(&mut self) {
@@ -993,21 +1034,27 @@ impl App {
             self.settings_search_iterations,
             self.settings_exploration_constant,
         );
-        
+
         match self.selected_settings_index {
             0 => self.settings_board_size = (self.settings_board_size + 1).min(25),
             1 => self.settings_line_size = (self.settings_line_size + 1).min(10),
             2 => self.settings_ai_threads = (self.settings_ai_threads + 1).min(16),
             3 => self.settings_max_nodes = (self.settings_max_nodes + 100000).min(10000000),
-            4 => self.settings_search_iterations = (self.settings_search_iterations + 10000).min(10000000),
-            5 => self.settings_exploration_constant = (self.settings_exploration_constant + 0.1).min(10.0),
+            4 => {
+                self.settings_search_iterations =
+                    (self.settings_search_iterations + 10000).min(10000000)
+            }
+            5 => {
+                self.settings_exploration_constant =
+                    (self.settings_exploration_constant + 0.1).min(10.0)
+            }
             6 => self.timeout_secs = (self.timeout_secs + 10).min(600), // Max 10 minutes
             7 => self.stats_interval_secs = (self.stats_interval_secs + 5).min(120), // Max 2 minutes
-            8 => self.ai_only = !self.ai_only, // Toggle
-            9 => self.shared_tree = !self.shared_tree, // Toggle
+            8 => self.ai_only = !self.ai_only,                                       // Toggle
+            9 => self.shared_tree = !self.shared_tree,                               // Toggle
             _ => {} // separator or back
         }
-        
+
         // Recreate AI worker if AI-related settings changed
         let new_ai_settings = (
             self.settings_ai_threads,
@@ -1021,7 +1068,7 @@ impl App {
     }
 
     /// Decreases the value of the currently selected setting
-    /// 
+    ///
     /// Each setting has its own valid range and decrement amount.
     /// Boolean settings get toggled instead of decremented.
     /// Values are clamped to their minimum allowed values.
@@ -1032,21 +1079,31 @@ impl App {
             self.settings_search_iterations,
             self.settings_exploration_constant,
         );
-        
+
         match self.selected_settings_index {
             0 => self.settings_board_size = self.settings_board_size.saturating_sub(1).max(3),
             1 => self.settings_line_size = self.settings_line_size.saturating_sub(1).max(3),
             2 => self.settings_ai_threads = self.settings_ai_threads.saturating_sub(1).max(1),
-            3 => self.settings_max_nodes = self.settings_max_nodes.saturating_sub(100000).max(10000),
-            4 => self.settings_search_iterations = self.settings_search_iterations.saturating_sub(10000).max(1000),
-            5 => self.settings_exploration_constant = (self.settings_exploration_constant - 0.1).max(0.1),
+            3 => {
+                self.settings_max_nodes = self.settings_max_nodes.saturating_sub(100000).max(10000)
+            }
+            4 => {
+                self.settings_search_iterations = self
+                    .settings_search_iterations
+                    .saturating_sub(10000)
+                    .max(1000)
+            }
+            5 => {
+                self.settings_exploration_constant =
+                    (self.settings_exploration_constant - 0.1).max(0.1)
+            }
             6 => self.timeout_secs = self.timeout_secs.saturating_sub(10).max(5), // Min 5 seconds
             7 => self.stats_interval_secs = self.stats_interval_secs.saturating_sub(5).max(5), // Min 5 seconds
-            8 => self.ai_only = !self.ai_only, // Toggle
+            8 => self.ai_only = !self.ai_only,         // Toggle
             9 => self.shared_tree = !self.shared_tree, // Toggle
-            _ => {} // separator or back
+            _ => {}                                    // separator or back
         }
-        
+
         // Recreate AI worker if AI-related settings changed
         let new_ai_settings = (
             self.settings_ai_threads,
@@ -1060,27 +1117,27 @@ impl App {
     }
 
     /// Gracefully shut down the application
-    /// 
+    ///
     /// Ensures all threads are properly stopped before exiting.
     /// This is especially important when AI is in the middle of a search.
     /// Gives threads time to complete their current operations cleanly.
     pub fn shutdown(&mut self) {
         // Explicitly stop the AI worker
         self.ai_worker.stop();
-        
+
         // Give threads more time to shut down gracefully
         // This is especially important when AI is in the middle of a search
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
     /// Recreates the AI worker with current settings
-    /// 
+    ///
     /// This is called when AI-related settings are changed in the settings menu
     /// to ensure the AI worker uses the updated configuration.
     pub fn recreate_ai_worker(&mut self) {
         // Stop the old worker first
         self.ai_worker.stop();
-        
+
         // Create a new worker with current settings
         self.ai_worker = AIWorker::new(
             self.settings_exploration_constant,
@@ -1091,7 +1148,7 @@ impl App {
     }
 
     /// Apply current settings to the active game
-    /// 
+    ///
     /// Recreates the current game using updated settings if we're currently in a game.
     /// This ensures that settings changes take effect immediately without requiring manual reset.
     pub fn apply_settings_to_current_game(&mut self) {
@@ -1100,18 +1157,18 @@ impl App {
             if let Some(selected) = self.game_selection_state.selected() {
                 if selected < self.games.len() {
                     let game_name = self.games[selected].0;
-                    
+
                     // Store the current game state
                     let was_in_progress = self.game_status == GameStatus::InProgress;
-                    
+
                     // Recreate the game with current settings
                     self.game_wrapper = self.create_game_with_current_settings(game_name);
-                    
+
                     // Reset game state
                     self.game_status = GameStatus::InProgress;
                     self.last_search_stats = None;
                     self.move_history.clear();
-                    
+
                     // Reset cursor position based on new game type
                     let (initial_row, initial_col) = match &self.game_wrapper {
                         GameWrapper::Gomoku(_) => {
@@ -1131,18 +1188,18 @@ impl App {
                         }
                         GameWrapper::Blokus(_) => (10, 10), // Center of Blokus board
                     };
-                    
+
                     self.board_cursor = (initial_row as u16, initial_col as u16);
-                    
+
                     // Clear any game-specific selections
                     if matches!(self.game_wrapper, GameWrapper::Blokus(_)) {
                         self.blokus_ui_config.selected_piece_idx = None;
                         self.blokus_ui_config.selected_transformation_idx = 0;
                     }
-                    
+
                     // Recreate AI worker to ensure fresh state
                     self.recreate_ai_worker();
-                    
+
                     // If we were in game mode, stay in game mode; if game over, go back to game
                     if was_in_progress || self.mode == AppMode::GameOver {
                         self.mode = AppMode::InGame;
@@ -1163,7 +1220,7 @@ impl App {
     }
 
     /// Scrolls the move history panel up by one line
-    /// 
+    ///
     /// Disables auto-scroll when user manually scrolls.
     pub fn scroll_move_history_up(&mut self) {
         self.history_scroll = self.history_scroll.saturating_sub(1);
@@ -1171,7 +1228,7 @@ impl App {
     }
 
     /// Scrolls the move history panel down by one line
-    /// 
+    ///
     /// Disables auto-scroll when user manually scrolls.
     pub fn scroll_move_history_down(&mut self) {
         self.history_scroll = self.history_scroll.saturating_add(1);
@@ -1179,12 +1236,12 @@ impl App {
     }
 
     // Enhanced Blokus functionality
-    
+
     /// Selects a Blokus piece for placement
-    /// 
+    ///
     /// Only allows selection of pieces that are available to the current player.
     /// Automatically tries to find a valid cursor position for the selected piece.
-    /// 
+    ///
     /// # Arguments
     /// * `piece_idx` - Index of the piece to select
     pub fn blokus_select_piece(&mut self, piece_idx: usize) {
@@ -1201,29 +1258,33 @@ impl App {
     }
 
     /// Check if a Blokus piece would fit within board bounds at the given position
-    /// 
+    ///
     /// Validates that the piece transformation would not extend outside the board.
     /// Used for cursor movement validation and ghost piece display.
-    /// 
+    ///
     /// # Arguments
     /// * `piece_idx` - Index of the piece to check
     /// * `transformation_idx` - Transformation index (rotation/reflection)
-    /// 
+    ///
     /// # Returns
     /// true if the piece fits within bounds, false otherwise
-    fn would_blokus_piece_fit_at_cursor(&self, piece_idx: usize, transformation_idx: usize) -> bool {
+    fn would_blokus_piece_fit_at_cursor(
+        &self,
+        piece_idx: usize,
+        transformation_idx: usize,
+    ) -> bool {
         if let GameWrapper::Blokus(state) = &self.game_wrapper {
             let board = state.get_board();
             let board_height = board.len();
             let board_width = if board_height > 0 { board[0].len() } else { 0 };
-            
+
             // Check if this piece is available for the current player
             let current_player = state.get_current_player();
             let available_pieces = state.get_available_pieces(current_player);
             if !available_pieces.contains(&piece_idx) {
                 return false; // Piece not available
             }
-            
+
             // Get the piece and its transformation
             let pieces = crate::games::blokus::get_blokus_pieces();
             if let Some(piece) = pieces.iter().find(|p| p.id == piece_idx) {
@@ -1231,14 +1292,18 @@ impl App {
                     let shape = &piece.transformations[transformation_idx];
                     let cursor_row = self.board_cursor.0 as i32;
                     let cursor_col = self.board_cursor.1 as i32;
-                    
+
                     // Check if all blocks of the piece would be within bounds
                     for &(dr, dc) in shape {
                         let board_r = cursor_row + dr;
                         let board_c = cursor_col + dc;
-                        
+
                         // If any block would be out of bounds, piece doesn't fit
-                        if board_r < 0 || board_r >= board_height as i32 || board_c < 0 || board_c >= board_width as i32 {
+                        if board_r < 0
+                            || board_r >= board_height as i32
+                            || board_c < 0
+                            || board_c >= board_width as i32
+                        {
                             return false;
                         }
                     }
@@ -1257,29 +1322,39 @@ impl App {
                 if available_pieces.contains(&piece_idx) {
                     let pieces = crate::games::blokus::get_blokus_pieces();
                     if let Some(piece) = pieces.iter().find(|p| p.id == piece_idx) {
-                        let current_transformation = self.blokus_ui_config.selected_transformation_idx;
+                        let current_transformation =
+                            self.blokus_ui_config.selected_transformation_idx;
                         let total_transformations = piece.transformations.len();
-                        
+
                         if total_transformations > 0 {
                             // Calculate the next transformation index
-                            let next_transformation = (current_transformation + 1) % total_transformations;
-                            
+                            let next_transformation =
+                                (current_transformation + 1) % total_transformations;
+
                             // Check if the piece would fit at the current cursor position with the new transformation
-                            if self.would_blokus_piece_fit_at_cursor(piece_idx, next_transformation) {
+                            if self.would_blokus_piece_fit_at_cursor(piece_idx, next_transformation)
+                            {
                                 // Fits at current position, just rotate
-                                self.blokus_ui_config.selected_transformation_idx = next_transformation;
+                                self.blokus_ui_config.selected_transformation_idx =
+                                    next_transformation;
                             } else {
                                 // Doesn't fit at current position, find a new position and then rotate
                                 // Temporarily set the transformation to see if we can find a valid position
-                                let old_transformation = self.blokus_ui_config.selected_transformation_idx;
-                                self.blokus_ui_config.selected_transformation_idx = next_transformation;
-                                
-                                if self.find_valid_cursor_position_for_piece(piece_idx, next_transformation) {
+                                let old_transformation =
+                                    self.blokus_ui_config.selected_transformation_idx;
+                                self.blokus_ui_config.selected_transformation_idx =
+                                    next_transformation;
+
+                                if self.find_valid_cursor_position_for_piece(
+                                    piece_idx,
+                                    next_transformation,
+                                ) {
                                     // Found a valid position, keep the new transformation and position
                                     // (cursor was already moved by find_valid_cursor_position_for_piece)
                                 } else {
                                     // Couldn't find a valid position, revert transformation
-                                    self.blokus_ui_config.selected_transformation_idx = old_transformation;
+                                    self.blokus_ui_config.selected_transformation_idx =
+                                        old_transformation;
                                 }
                             }
                         }
@@ -1296,7 +1371,9 @@ impl App {
 
     // TODO: Find out why we're giving special treatment to Blokus here.
     pub fn blokus_place_piece(&mut self) {
-        if let Some((piece_idx, transformation_idx)) = self.blokus_ui_config.get_selected_piece_info() {
+        if let Some((piece_idx, transformation_idx)) =
+            self.blokus_ui_config.get_selected_piece_info()
+        {
             if let GameWrapper::Blokus(state) = &mut self.game_wrapper {
                 let blokus_move = crate::games::blokus::BlokusMove(
                     piece_idx,
@@ -1315,17 +1392,17 @@ impl App {
                         move_wrapper.clone(),
                     ));
                     self.on_move_added(); // Auto-scroll to bottom
-                    
+
                     // Make the move
                     self.game_wrapper.make_move(&move_wrapper);
-                    
+
                     // Advance the AI worker's MCTS tree root
                     self.ai_worker.advance_root(&move_wrapper);
-                    
+
                     // Clear selection after placing
                     self.blokus_ui_config.selected_piece_idx = None;
                     self.blokus_ui_config.selected_transformation_idx = 0;
-                    
+
                     // Check if game is over
                     self.check_game_over();
                 }
@@ -1338,20 +1415,20 @@ impl App {
             // Create a pass move (usize::MAX is the PASS_MOVE constant)
             let pass_move = crate::games::blokus::BlokusMove(usize::MAX, 0, 0, 0);
             let move_wrapper = crate::game_wrapper::MoveWrapper::Blokus(pass_move);
-            
+
             // Record the move in history
             self.move_history.push(crate::app::MoveHistoryEntry::new(
                 self.game_wrapper.get_current_player(),
                 move_wrapper.clone(),
             ));
             self.on_move_added(); // Auto-scroll to bottom
-            
+
             // Make the pass move
             self.game_wrapper.make_move(&move_wrapper);
-            
+
             // Advance AI tree
             self.ai_worker.advance_root(&move_wrapper);
-            
+
             // Check for game over
             self.check_game_over();
         }
@@ -1422,7 +1499,7 @@ impl App {
                 self.piece_panel_auto_scroll = true;
             }
         }
-        
+
         // Check if we should reset auto-scroll after user interaction
         if let Some(user_scroll_time) = self.piece_panel_user_scroll_time {
             if user_scroll_time.elapsed() >= self.piece_panel_auto_scroll_reset_duration {
@@ -1453,7 +1530,7 @@ impl App {
     }
 
     /// Map game player ID to UI player ID
-    /// 
+    ///
     /// Games like Connect4, Gomoku, and Othello use 1 and -1 for players,
     /// but our UI uses 1 and 2. This method provides the mapping.
     fn map_game_player_to_ui_player(&self, game_player_id: i32) -> i32 {
@@ -1491,7 +1568,7 @@ impl App {
                 None => GameStatus::Draw,
             };
             self.mode = AppMode::GameOver;
-            
+
             // Clear AI state when game ends
             self.ai_thinking_start = None;
             self.pending_ai_response = None;
@@ -1502,7 +1579,9 @@ impl App {
 
     /// Clear selected Blokus piece if it becomes unavailable
     pub fn clear_selected_piece_if_unavailable(&mut self) {
-        if let (Some(piece_idx), GameWrapper::Blokus(state)) = (self.blokus_ui_config.selected_piece_idx, &self.game_wrapper) {
+        if let (Some(piece_idx), GameWrapper::Blokus(state)) =
+            (self.blokus_ui_config.selected_piece_idx, &self.game_wrapper)
+        {
             let available_pieces = state.get_available_pieces(state.get_current_player());
             if !available_pieces.contains(&piece_idx) {
                 self.blokus_ui_config.selected_piece_idx = None;
@@ -1512,38 +1591,49 @@ impl App {
     }
 
     /// Find a valid cursor position for the given Blokus piece and transformation
-    fn find_valid_cursor_position_for_piece(&mut self, piece_idx: usize, transformation_idx: usize) -> bool {
+    fn find_valid_cursor_position_for_piece(
+        &mut self,
+        piece_idx: usize,
+        transformation_idx: usize,
+    ) -> bool {
         if let GameWrapper::Blokus(state) = &self.game_wrapper {
             let board = state.get_board();
             let board_height = board.len();
             let board_width = if board_height > 0 { board[0].len() } else { 0 };
-            
+
             // Try positions starting from current cursor position, then spiral outward
             let start_row = self.board_cursor.0 as usize;
             let start_col = self.board_cursor.1 as usize;
-            
+
             // First try the current position
             if self.would_blokus_piece_fit_at_cursor(piece_idx, transformation_idx) {
                 return true;
             }
-            
+
             // Try positions in expanding squares around the current position
             for radius in 1..=10 {
-                for row in start_row.saturating_sub(radius)..=(start_row + radius).min(board_height - 1) {
-                    for col in start_col.saturating_sub(radius)..=(start_col + radius).min(board_width - 1) {
+                for row in
+                    start_row.saturating_sub(radius)..=(start_row + radius).min(board_height - 1)
+                {
+                    for col in
+                        start_col.saturating_sub(radius)..=(start_col + radius).min(board_width - 1)
+                    {
                         // Only check the border of the current radius
-                        if (row == start_row.saturating_sub(radius) || row == (start_row + radius).min(board_height - 1)) ||
-                           (col == start_col.saturating_sub(radius) || col == (start_col + radius).min(board_width - 1)) {
-                            
+                        if (row == start_row.saturating_sub(radius)
+                            || row == (start_row + radius).min(board_height - 1))
+                            || (col == start_col.saturating_sub(radius)
+                                || col == (start_col + radius).min(board_width - 1))
+                        {
                             self.board_cursor = (row as u16, col as u16);
-                            if self.would_blokus_piece_fit_at_cursor(piece_idx, transformation_idx) {
+                            if self.would_blokus_piece_fit_at_cursor(piece_idx, transformation_idx)
+                            {
                                 return true;
                             }
                         }
                     }
                 }
             }
-            
+
             // If no valid position found, reset cursor to original position
             self.board_cursor = (start_row as u16, start_col as u16);
         }
@@ -1565,11 +1655,15 @@ impl App {
     /// Get the color for a player that matches the board display
     pub fn get_player_color(&self, player_id: i32) -> ratatui::prelude::Color {
         use ratatui::prelude::Color;
-        
+
         match &self.game_wrapper {
             GameWrapper::Connect4(_) => {
                 // Connect4 uses game player IDs 1 and -1, map to UI colors
-                if player_id == 1 { Color::Red } else { Color::Yellow }
+                if player_id == 1 {
+                    Color::Red
+                } else {
+                    Color::Yellow
+                }
             }
             GameWrapper::Othello(_) => {
                 // Othello uses game player IDs 1 and -1, both display as white for contrast
@@ -1585,9 +1679,14 @@ impl App {
                     _ => Color::White,
                 }
             }
-            _ => { // Gomoku and others
+            _ => {
+                // Gomoku and others
                 // Game uses 1 and -1, map to UI colors
-                if player_id == 1 { Color::Red } else { Color::Blue }
+                if player_id == 1 {
+                    Color::Red
+                } else {
+                    Color::Blue
+                }
             }
         }
     }
@@ -1596,10 +1695,18 @@ impl App {
     pub fn get_player_symbol(&self, player_id: i32) -> &'static str {
         match &self.game_wrapper {
             GameWrapper::Connect4(_) => {
-                if player_id == 1 { "🔴" } else { "🟡" }
+                if player_id == 1 {
+                    "🔴"
+                } else {
+                    "🟡"
+                }
             }
             GameWrapper::Othello(_) => {
-                if player_id == 1 { "⚫" } else { "⚪" }
+                if player_id == 1 {
+                    "⚫"
+                } else {
+                    "⚪"
+                }
             }
             GameWrapper::Blokus(_) => {
                 match player_id {
@@ -1610,7 +1717,8 @@ impl App {
                     _ => "⬜",
                 }
             }
-            _ => { // Gomoku and others
+            _ => {
+                // Gomoku and others
                 if player_id == 1 { "❌" } else { "⭕" }
             }
         }
@@ -1622,13 +1730,13 @@ impl App {
         if !self.piece_panel_auto_scroll {
             return None;
         }
-        
+
         if let GameWrapper::Blokus(_blokus_state) = &self.game_wrapper {
             let current_player = self.game_wrapper.get_current_player();
             if current_player < 1 || current_player > 4 {
                 return None;
             }
-            
+
             // Calculate actual line position by simulating the content generation
             // This mirrors the logic in draw_blokus_piece_selection
             let pieces = crate::games::blokus::get_blokus_pieces(); //  TODO: Cache this as get_blokus_pieces() is expensive
@@ -1639,28 +1747,36 @@ impl App {
                 if player == current_player {
                     return Some(line_count);
                 }
-                
+
                 // Player header line
                 line_count += 1;
 
                 // Check if this player is expanded
-                let is_expanded = self.blokus_ui_config.players_expanded.get((player - 1) as usize).unwrap_or(&true);
-                
+                let is_expanded = self
+                    .blokus_ui_config
+                    .players_expanded
+                    .get((player - 1) as usize)
+                    .unwrap_or(&true);
+
                 if *is_expanded {
                     let is_current = player == current_player;
                     let visible_pieces = if is_current { 21 } else { 10 };
-                    let total_pieces_to_show = if is_current { 21 } else { visible_pieces.min(21) };
+                    let total_pieces_to_show = if is_current {
+                        21
+                    } else {
+                        visible_pieces.min(21)
+                    };
                     let pieces_per_row = 5;
-                    
+
                     // Add top border for current player's grid
                     if is_current && total_pieces_to_show > 0 {
                         line_count += 1;
                     }
-                    
+
                     // Calculate piece rows with exact heights
                     for chunk_start in (0..total_pieces_to_show).step_by(pieces_per_row) {
                         let chunk_end = (chunk_start + pieces_per_row).min(total_pieces_to_show);
-                        
+
                         // Get max height for this row by examining all pieces in the row
                         let mut max_height = 1;
                         for display_idx in chunk_start..chunk_end {
@@ -1668,24 +1784,25 @@ impl App {
                             if let Some(piece) = pieces.get(piece_idx) {
                                 if !piece.transformations.is_empty() {
                                     let piece_shape = &piece.transformations[0];
-                                    let piece_height = Self::calculate_visual_piece_height(piece_shape);
+                                    let piece_height =
+                                        Self::calculate_visual_piece_height(piece_shape);
                                     max_height = max_height.max(piece_height);
                                 }
                             }
                         }
-                        
+
                         // Key line: 1 line
                         line_count += 1;
-                        
+
                         // Shape lines: max_height lines
                         line_count += max_height;
-                        
+
                         // Row separator (except for last row): 1 line
                         if chunk_start + pieces_per_row < total_pieces_to_show {
                             line_count += 1;
                         }
                     }
-                    
+
                     // Add bottom border for current player's grid
                     if is_current && total_pieces_to_show > 0 {
                         line_count += 1;
@@ -1694,13 +1811,13 @@ impl App {
                     // Just the summary line when collapsed
                     line_count += 1;
                 }
-                
+
                 // Add separator between players (except after the last one)
                 if player < 4 {
                     line_count += 1;
                 }
             }
-            
+
             // If we get here, current_player was not found (shouldn't happen)
             None
         } else {
@@ -1735,7 +1852,8 @@ impl App {
         }
 
         // Convert to lines (same as create_visual_piece_shape)
-        let mut result: Vec<String> = grid.iter()
+        let mut result: Vec<String> = grid
+            .iter()
             .map(|row| row.iter().collect::<String>())
             .collect();
 

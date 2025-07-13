@@ -24,20 +24,16 @@ use crate::app::App;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::Rect,
-    Terminal,
-};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use std::{io, time::Duration};
 
+pub mod blokus_ui;
 pub mod input;
-pub mod widgets;
 pub mod layout;
 pub mod mouse;
-pub mod blokus_ui;
+pub mod widgets;
 
 /// Main entry point for the terminal user interface
 ///
@@ -64,7 +60,7 @@ pub fn run(app: &mut App) -> io::Result<()> {
         }
 
         app.update();
-        
+
         // Update the component system
         // Temporarily take ownership to avoid borrowing issues
         let mut temp_manager = std::mem::take(&mut app.component_manager);
@@ -75,14 +71,14 @@ pub fn run(app: &mut App) -> io::Result<()> {
             // Use the component system for all modes
             let terminal_size = f.area();
             let mut temp_manager = std::mem::take(&mut app.component_manager);
-            
+
             if temp_manager.get_root_component_id().is_some() {
                 temp_manager.render(f, terminal_size, app);
             } else {
                 // Fallback to legacy if no root component (should not happen)
                 crate::tui::widgets::render(app, f);
             }
-            
+
             app.component_manager = temp_manager;
         })?;
 
@@ -92,14 +88,14 @@ pub fn run(app: &mut App) -> io::Result<()> {
                     if key.kind == KeyEventKind::Press {
                         // Create component event from keyboard input
                         let component_event = crate::components::events::ComponentEvent::Input(
-                            crate::components::events::InputEvent::KeyPress(key.code)
+                            crate::components::events::InputEvent::KeyPress(key.code),
                         );
-                        
+
                         // Try component system first
                         let mut temp_manager = std::mem::take(&mut app.component_manager);
                         let consumed = temp_manager.handle_event(&component_event, app);
                         app.component_manager = temp_manager;
-                        
+
                         if !consumed {
                             // Fallback to legacy input handling if event not consumed
                             crate::tui::input::handle_key_press(app, key.code);
@@ -115,7 +111,7 @@ pub fn run(app: &mut App) -> io::Result<()> {
                                     x: mouse.column,
                                     y: mouse.row,
                                     button: 1, // Left button by default
-                                }
+                                },
                             )
                         }
                         crossterm::event::MouseEventKind::Drag(_) => {
@@ -123,37 +119,58 @@ pub fn run(app: &mut App) -> io::Result<()> {
                                 crate::components::events::InputEvent::MouseMove {
                                     x: mouse.column,
                                     y: mouse.row,
-                                }
+                                },
                             )
                         }
                         _ => {
                             // For other mouse events, use legacy handling
                             let terminal_size = terminal.size()?;
-                            let terminal_rect = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-                            input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal_rect);
+                            let terminal_rect =
+                                Rect::new(0, 0, terminal_size.width, terminal_size.height);
+                            input::handle_mouse_event(
+                                app,
+                                mouse.kind,
+                                mouse.column,
+                                mouse.row,
+                                terminal_rect,
+                            );
                             continue;
                         }
                     };
-                    
+
                     // Try component system first
                     let use_components = true; // Always try components first
-                    
+
                     if use_components {
                         let mut temp_manager = std::mem::take(&mut app.component_manager);
                         let consumed = temp_manager.handle_event(&component_event, app);
                         app.component_manager = temp_manager;
-                        
+
                         if !consumed {
                             // Legacy mouse handling as fallback
                             let terminal_size = terminal.size()?;
-                            let terminal_rect = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-                            input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal_rect);
+                            let terminal_rect =
+                                Rect::new(0, 0, terminal_size.width, terminal_size.height);
+                            input::handle_mouse_event(
+                                app,
+                                mouse.kind,
+                                mouse.column,
+                                mouse.row,
+                                terminal_rect,
+                            );
                         }
                     } else {
                         // Use legacy mouse handling for non-migrated modes
                         let terminal_size = terminal.size()?;
-                        let terminal_rect = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-                        input::handle_mouse_event(app, mouse.kind, mouse.column, mouse.row, terminal_rect);
+                        let terminal_rect =
+                            Rect::new(0, 0, terminal_size.width, terminal_size.height);
+                        input::handle_mouse_event(
+                            app,
+                            mouse.kind,
+                            mouse.column,
+                            mouse.row,
+                            terminal_rect,
+                        );
                     }
                 }
                 _ => {}

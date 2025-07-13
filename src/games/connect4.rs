@@ -15,14 +15,14 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Represents a move in Connect 4
-/// 
+///
 /// Contains the column number where a player wants to drop their piece.
 /// Column numbers are 0-based indices.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Connect4Move(pub usize);
 
 /// Represents the complete state of a Connect 4 game
-/// 
+///
 /// Contains the board state, current player, dimensions, and move history.
 /// The board uses 1 for player 1 pieces, -1 for player 2 pieces, and 0 for empty spaces.
 #[derive(Debug, Clone)]
@@ -74,7 +74,10 @@ impl GameState for Connect4State {
     }
 
     fn get_possible_moves(&self) -> Vec<Self::Move> {
-        (0..self.width).filter(|&c| self.board[0][c] == 0).map(Connect4Move).collect()
+        (0..self.width)
+            .filter(|&c| self.board[0][c] == 0)
+            .map(Connect4Move)
+            .collect()
     }
 
     fn make_move(&mut self, mv: &Self::Move) {
@@ -196,7 +199,7 @@ impl Connect4State {
     }
 
     /// Gets the number of pieces needed in a row to win
-    /// 
+    ///
     /// # Returns
     /// The line size (typically 4 for standard Connect 4)
     pub fn get_line_size(&self) -> usize {
@@ -204,13 +207,13 @@ impl Connect4State {
     }
 
     /// Checks if a move is legal in the current game state
-    /// 
+    ///
     /// A move is legal if the column is within bounds and the top row
     /// of that column is empty (pieces can be dropped).
-    /// 
+    ///
     /// # Arguments
     /// * `mv` - The move to check
-    /// 
+    ///
     /// # Returns
     /// true if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &Connect4Move) -> bool {
@@ -222,15 +225,15 @@ impl FromStr for Connect4Move {
     type Err = String;
 
     /// Creates a Connect4Move from a string representation
-    /// 
+    ///
     /// Expected format is just the column number as a string.
-    /// 
+    ///
     /// # Arguments
     /// * `s` - String containing column number (e.g., "3")
-    /// 
+    ///
     /// # Returns
     /// Ok(Connect4Move) if parsing succeeds, Err(String) if format is invalid
-    /// 
+    ///
     /// # Examples
     /// ```
     /// use std::str::FromStr;

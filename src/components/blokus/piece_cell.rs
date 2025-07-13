@@ -1,11 +1,11 @@
 //! Individual piece cell component for Blokus UI.
 
 use ratatui::{
-    layout::Rect,
     Frame,
-    widgets::Paragraph,
-    style::{Style, Color, Modifier},
+    layout::Rect,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::Paragraph,
 };
 use std::any::Any;
 
@@ -59,8 +59,7 @@ impl PieceCellComponent {
     /// Check if a point is within this component's area
     pub fn contains_point(&self, x: u16, y: u16) -> bool {
         if let Some(area) = self.area {
-            x >= area.x && x < area.x + area.width &&
-            y >= area.y && y < area.y + area.height
+            x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
         } else {
             false
         }
@@ -113,12 +112,9 @@ impl Component for PieceCellComponent {
                 .bg(color)
                 .add_modifier(Modifier::BOLD)
         } else if self.is_available {
-            Style::default()
-                .fg(color)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(color).add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
-                .fg(Color::DarkGray)
+            Style::default().fg(Color::DarkGray)
         };
 
         let text = format!("{}", piece_char);

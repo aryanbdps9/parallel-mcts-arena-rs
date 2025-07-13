@@ -1,11 +1,11 @@
 //! Component for rendering individual Blokus piece shapes with clean visuals.
 
 use ratatui::{
-    layout::Rect,
     Frame,
-    widgets::{Paragraph, Block, Borders},
-    style::{Style, Color, Modifier},
+    layout::Rect,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
 };
 use std::any::Any;
 
@@ -100,9 +100,12 @@ impl PieceShapeComponent {
         }
 
         // Convert to vector of strings with checkerboard background
-        let result: Vec<String> = grid.iter().enumerate()
+        let result: Vec<String> = grid
+            .iter()
+            .enumerate()
             .map(|(row_idx, row)| {
-                row.iter().enumerate()
+                row.iter()
+                    .enumerate()
                     .map(|(col_idx, cell)| {
                         if *cell == "██" {
                             "██".to_string()
@@ -196,16 +199,16 @@ impl Component for PieceShapeComponent {
             };
             let label_line = Line::from(Span::styled(
                 format!("{:^width$}", label, width = self.config.width as usize),
-                style
+                style,
             ));
             content_lines.push(label_line);
         }
 
         // Add piece visual centered in area
-        let available_height = if self.config.show_label { 
+        let available_height = if self.config.show_label {
             self.config.height.saturating_sub(1)
-        } else { 
-            self.config.height 
+        } else {
+            self.config.height
         } as usize;
 
         for (i, piece_line) in piece_visual_lines.iter().enumerate() {
@@ -214,7 +217,7 @@ impl Component for PieceShapeComponent {
                 let mut line_spans = Vec::new();
                 let chars: Vec<char> = piece_line.chars().collect();
                 let mut j = 0;
-                
+
                 while j < chars.len() {
                     if j + 1 < chars.len() {
                         let two_char = format!("{}{}", chars[j], chars[j + 1]);
@@ -225,11 +228,17 @@ impl Component for PieceShapeComponent {
                             }
                             "░░" => {
                                 // Light checkerboard cell
-                                line_spans.push(Span::styled("░░", Style::default().fg(self.config.empty_cell_light)));
+                                line_spans.push(Span::styled(
+                                    "░░",
+                                    Style::default().fg(self.config.empty_cell_light),
+                                ));
                             }
                             "▒▒" => {
                                 // Dark checkerboard cell
-                                line_spans.push(Span::styled("▒▒", Style::default().fg(self.config.empty_cell_dark)));
+                                line_spans.push(Span::styled(
+                                    "▒▒",
+                                    Style::default().fg(self.config.empty_cell_dark),
+                                ));
                             }
                             _ => {
                                 // Fallback for any other characters
@@ -243,23 +252,24 @@ impl Component for PieceShapeComponent {
                         j += 1;
                     }
                 }
-                
+
                 // Center the line
                 let total_width = line_spans.iter().map(|s| s.content.len()).sum::<usize>();
                 let padding = (self.config.width as usize).saturating_sub(total_width) / 2;
-                
+
                 let mut centered_spans = Vec::new();
                 if padding > 0 {
                     centered_spans.push(Span::styled(" ".repeat(padding), style));
                 }
                 centered_spans.extend(line_spans);
                 if padding > 0 {
-                    let remaining_padding = (self.config.width as usize).saturating_sub(total_width + padding);
+                    let remaining_padding =
+                        (self.config.width as usize).saturating_sub(total_width + padding);
                     if remaining_padding > 0 {
                         centered_spans.push(Span::styled(" ".repeat(remaining_padding), style));
                     }
                 }
-                
+
                 content_lines.push(Line::from(centered_spans));
             }
         }
@@ -267,20 +277,16 @@ impl Component for PieceShapeComponent {
         // Fill remaining space
         let needed_lines = self.config.height as usize;
         while content_lines.len() < needed_lines {
-            let empty_line = Line::from(Span::styled(
-                " ".repeat(self.config.width as usize),
-                style
-            ));
+            let empty_line =
+                Line::from(Span::styled(" ".repeat(self.config.width as usize), style));
             content_lines.push(empty_line);
         }
 
         // Render with or without border
         if self.config.show_border && self.is_selected {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(style);
+            let block = Block::default().borders(Borders::ALL).border_style(style);
             frame.render_widget(block, area);
-            
+
             // Render content inside border
             let inner_area = Rect::new(
                 area.x + 1,

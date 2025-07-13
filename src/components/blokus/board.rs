@@ -1,22 +1,22 @@
 //! Blokus board component.
 
+use mcts::GameState;
 use ratatui::{
-    layout::Rect,
     Frame,
-    widgets::{Block, Borders, Paragraph},
+    layout::Rect,
     style::Color,
     text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
 };
-use std::collections::HashSet;
 use std::any::Any;
-use mcts::GameState;
+use std::collections::HashSet;
 
 use crate::app::App;
-use crate::game_wrapper::GameWrapper;
-use crate::games::blokus::BlokusState;
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::{ComponentEvent, InputEvent};
 use crate::components::ui::UITheme;
+use crate::game_wrapper::GameWrapper;
+use crate::games::blokus::BlokusState;
 
 /// Direction for cursor movement
 #[derive(Debug, Clone, Copy)]
@@ -58,8 +58,7 @@ impl BlokusBoardComponent {
     /// Check if a point is within this component's area
     pub fn contains_point(&self, x: u16, y: u16) -> bool {
         if let Some(area) = self.area {
-            x >= area.x && x < area.x + area.width &&
-            y >= area.y && y < area.y + area.height
+            x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
         } else {
             false
         }
@@ -71,7 +70,9 @@ impl BlokusBoardComponent {
             return false;
         }
 
-        let Some(area) = self.area else { return false; };
+        let Some(area) = self.area else {
+            return false;
+        };
 
         // Calculate content area (inside borders)
         let content_area = Rect::new(
@@ -81,8 +82,11 @@ impl BlokusBoardComponent {
             area.height.saturating_sub(2),
         );
 
-        if x < content_area.x || x >= content_area.x + content_area.width ||
-           y < content_area.y || y >= content_area.y + content_area.height {
+        if x < content_area.x
+            || x >= content_area.x + content_area.width
+            || y < content_area.y
+            || y >= content_area.y + content_area.height
+        {
             return false;
         }
 
@@ -116,29 +120,47 @@ impl BlokusBoardComponent {
 
     /// Attempt to make a move at the current cursor position, only if legal
     fn try_make_move(&self, app: &mut App) {
-        let (row, col) = (self.cursor_position.0 as usize, self.cursor_position.1 as usize);
-        
+        let (row, col) = (
+            self.cursor_position.0 as usize,
+            self.cursor_position.1 as usize,
+        );
+
         // Get selected piece from app's blokus_ui_config
-        let player_move = if let Some((piece_idx, transformation_idx)) = app.blokus_ui_config.get_selected_piece_info() {
-            crate::game_wrapper::MoveWrapper::Blokus(crate::games::blokus::BlokusMove(piece_idx, transformation_idx, row, col))
+        let player_move = if let Some((piece_idx, transformation_idx)) =
+            app.blokus_ui_config.get_selected_piece_info()
+        {
+            crate::game_wrapper::MoveWrapper::Blokus(crate::games::blokus::BlokusMove(
+                piece_idx,
+                transformation_idx,
+                row,
+                col,
+            ))
         } else {
             // No piece selected, use pass move
-            crate::game_wrapper::MoveWrapper::Blokus(crate::games::blokus::BlokusMove(usize::MAX, 0, 0, 0))
+            crate::game_wrapper::MoveWrapper::Blokus(crate::games::blokus::BlokusMove(
+                usize::MAX,
+                0,
+                0,
+                0,
+            ))
         };
 
         // Only make the move if it's legal
         if app.game_wrapper.is_legal(&player_move) {
             let current_player = app.game_wrapper.get_current_player();
-            app.move_history.push(crate::app::MoveHistoryEntry::new(current_player, player_move.clone()));
+            app.move_history.push(crate::app::MoveHistoryEntry::new(
+                current_player,
+                player_move.clone(),
+            ));
             app.on_move_added(); // Auto-scroll to bottom
             app.game_wrapper.make_move(&player_move);
-            
+
             // Advance the AI worker's MCTS tree root to reflect the move that was just made
             app.ai_worker.advance_root(&player_move);
-            
+
             // Clear selected piece if it becomes unavailable after move
             // TODO: Implement piece availability check in component
-            
+
             // Check for game over
             if app.game_wrapper.is_terminal() {
                 app.game_status = match app.game_wrapper.get_winner() {
@@ -153,21 +175,31 @@ impl BlokusBoardComponent {
     }
 
     /// Render the Blokus board with ghost piece preview
-    fn render_board_content(&self, frame: &mut Frame, area: Rect, state: &BlokusState, selected_piece: Option<(usize, usize, usize, usize)>, show_cursor: bool) -> ComponentResult<()> {
+    fn render_board_content(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &BlokusState,
+        selected_piece: Option<(usize, usize, usize, usize)>,
+        show_cursor: bool,
+    ) -> ComponentResult<()> {
         let board = state.get_board();
         let current_player = state.get_current_player() as u8;
-        
+
         // Calculate ghost piece positions if a piece is selected
         let mut ghost_positions = HashSet::new();
         if let Some((piece_idx, transformation_idx, ghost_row, ghost_col)) = selected_piece {
             if piece_idx < 21 {
                 let pieces = crate::games::blokus::get_blokus_pieces();
                 if let Some(piece_transformations) = pieces.get(piece_idx) {
-                    if let Some(transformation) = piece_transformations.transformations.get(transformation_idx) {
+                    if let Some(transformation) = piece_transformations
+                        .transformations
+                        .get(transformation_idx)
+                    {
                         for &(dr, dc) in transformation {
                             let new_row = ghost_row as i32 + dr;
                             let new_col = ghost_col as i32 + dc;
-                            
+
                             if new_row >= 0 && new_row < 20 && new_col >= 0 && new_col < 20 {
                                 ghost_positions.insert((new_row as usize, new_col as usize));
                             }
@@ -180,17 +212,23 @@ impl BlokusBoardComponent {
         // Render the board
         for row in 0..std::cmp::min(board.len(), area.height as usize) {
             let mut line_spans = Vec::new();
-            
-            for col in 0..std::cmp::min(board[row].len(), (area.width / 2) as usize) { // Divide by 2 for double-char width
+
+            for col in 0..std::cmp::min(board[row].len(), (area.width / 2) as usize) {
+                // Divide by 2 for double-char width
                 let cell_value = board[row][col];
-                let is_cursor = show_cursor && self.cursor_position.0 == row as u16 && self.cursor_position.1 == col as u16;
+                let is_cursor = show_cursor
+                    && self.cursor_position.0 == row as u16
+                    && self.cursor_position.1 == col as u16;
                 let is_ghost = ghost_positions.contains(&(row, col));
-                
+
                 // Check if this is a legal ghost position
                 let is_legal_ghost = if is_ghost {
-                    if let Some((piece_idx, transformation_idx, ghost_row, ghost_col)) = selected_piece {
+                    if let Some((piece_idx, transformation_idx, ghost_row, ghost_col)) =
+                        selected_piece
+                    {
                         use crate::games::blokus::BlokusMove;
-                        let test_move = BlokusMove(piece_idx, transformation_idx, ghost_row, ghost_col);
+                        let test_move =
+                            BlokusMove(piece_idx, transformation_idx, ghost_row, ghost_col);
                         state.is_legal(&test_move)
                     } else {
                         false
@@ -201,15 +239,18 @@ impl BlokusBoardComponent {
 
                 let (symbol, style) = if is_ghost {
                     // Ghost piece preview with legality check and current player color
-                    self.theme.blokus_ghost_style(is_legal_ghost, current_player)
+                    self.theme
+                        .blokus_ghost_style(is_legal_ghost, current_player)
                 } else {
                     // Get last move positions for highlighting
-                    let last_move_positions: std::collections::HashSet<(usize, usize)> = state.get_last_move()
+                    let last_move_positions: std::collections::HashSet<(usize, usize)> = state
+                        .get_last_move()
                         .map(|coords| coords.into_iter().collect())
                         .unwrap_or_default();
                     let is_last_move = last_move_positions.contains(&(row, col));
-                    
-                    self.theme.blokus_cell_style(cell_value as u8, is_last_move, row, col)
+
+                    self.theme
+                        .blokus_cell_style(cell_value as u8, is_last_move, row, col)
                 };
 
                 let final_style = if is_cursor && cell_value == 0 && show_cursor {
@@ -217,10 +258,10 @@ impl BlokusBoardComponent {
                 } else {
                     style
                 };
-                
+
                 line_spans.push(Span::styled(symbol, final_style));
             }
-            
+
             if !line_spans.is_empty() {
                 let line_area = Rect::new(area.x, area.y + row as u16, area.width, 1);
                 let paragraph = Paragraph::new(Line::from(line_spans));
@@ -251,25 +292,25 @@ impl BlokusBoardComponent {
         let (row, col) = self.cursor_position;
         match direction {
             CursorDirection::Up => {
-                if row > 0 { 
+                if row > 0 {
                     self.cursor_position.0 = row - 1;
                     app.board_cursor.0 = row - 1;
                 }
             }
             CursorDirection::Down => {
-                if row < 19 { 
+                if row < 19 {
                     self.cursor_position.0 = row + 1;
                     app.board_cursor.0 = row + 1;
                 }
             }
             CursorDirection::Left => {
-                if col > 0 { 
+                if col > 0 {
                     self.cursor_position.1 = col - 1;
                     app.board_cursor.1 = col - 1;
                 }
             }
             CursorDirection::Right => {
-                if col < 19 { 
+                if col < 19 {
                     self.cursor_position.1 = col + 1;
                     app.board_cursor.1 = col + 1;
                 }
@@ -298,33 +339,31 @@ impl Component for BlokusBoardComponent {
                     return Ok(true);
                 }
             }
-            ComponentEvent::Input(InputEvent::KeyPress(key)) => {
-                match key {
-                    crossterm::event::KeyCode::Up => {
-                        self.move_cursor(app, CursorDirection::Up);
-                        return Ok(true);
-                    }
-                    crossterm::event::KeyCode::Down => {
-                        self.move_cursor(app, CursorDirection::Down);
-                        return Ok(true);
-                    }
-                    crossterm::event::KeyCode::Left => {
-                        self.move_cursor(app, CursorDirection::Left);
-                        return Ok(true);
-                    }
-                    crossterm::event::KeyCode::Right => {
-                        self.move_cursor(app, CursorDirection::Right);
-                        return Ok(true);
-                    }
-                    crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
-                        if !app.is_current_player_ai() {
-                            self.try_make_move(app);
-                            return Ok(true);
-                        }
-                    }
-                    _ => {}
+            ComponentEvent::Input(InputEvent::KeyPress(key)) => match key {
+                crossterm::event::KeyCode::Up => {
+                    self.move_cursor(app, CursorDirection::Up);
+                    return Ok(true);
                 }
-            }
+                crossterm::event::KeyCode::Down => {
+                    self.move_cursor(app, CursorDirection::Down);
+                    return Ok(true);
+                }
+                crossterm::event::KeyCode::Left => {
+                    self.move_cursor(app, CursorDirection::Left);
+                    return Ok(true);
+                }
+                crossterm::event::KeyCode::Right => {
+                    self.move_cursor(app, CursorDirection::Right);
+                    return Ok(true);
+                }
+                crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
+                    if !app.is_current_player_ai() {
+                        self.try_make_move(app);
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
         Ok(false)
@@ -334,9 +373,7 @@ impl Component for BlokusBoardComponent {
         self.set_area(area);
 
         // Draw border
-        let block = Block::default()
-            .title("Blokus Board")
-            .borders(Borders::ALL);
+        let block = Block::default().title("Blokus Board").borders(Borders::ALL);
         frame.render_widget(block, area);
 
         // Calculate content area
@@ -354,15 +391,22 @@ impl Component for BlokusBoardComponent {
         // Render board content
         if let GameWrapper::Blokus(state) = &app.game_wrapper {
             // Get selected piece info from app's blokus_ui_config instead of component state
-            let selected_piece = if let Some((piece_idx, transformation_idx)) = app.blokus_ui_config.get_selected_piece_info() {
-                Some((piece_idx, transformation_idx, app.board_cursor.0 as usize, app.board_cursor.1 as usize))
+            let selected_piece = if let Some((piece_idx, transformation_idx)) =
+                app.blokus_ui_config.get_selected_piece_info()
+            {
+                Some((
+                    piece_idx,
+                    transformation_idx,
+                    app.board_cursor.0 as usize,
+                    app.board_cursor.1 as usize,
+                ))
             } else {
                 None
             };
-            
+
             // Only show cursor for human turns
             let show_cursor = !app.is_current_player_ai();
-            
+
             self.render_board_content(frame, content_area, state, selected_piece, show_cursor)?;
         }
 

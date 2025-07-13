@@ -1,6 +1,6 @@
 //! Visual theme and styling component for consistent UI appearance.
 
-use ratatui::style::{Style, Color, Modifier};
+use ratatui::style::{Color, Modifier, Style};
 
 /// A centralized theme component that provides consistent styling across all UI elements
 pub struct UITheme {
@@ -84,7 +84,9 @@ impl UITheme {
 
     /// Get style for highlighted text
     pub fn highlighted_text_style(&self) -> Style {
-        Style::default().fg(self.highlight_color).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.highlight_color)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Get style for borders
@@ -94,7 +96,9 @@ impl UITheme {
 
     /// Get style for player text
     pub fn player_text_style(&self, player: u8) -> Style {
-        Style::default().fg(self.player_color(player)).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.player_color(player))
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Get style for current player (with background)
@@ -107,17 +111,23 @@ impl UITheme {
 
     /// Get style for error messages
     pub fn error_style(&self) -> Style {
-        Style::default().fg(self.error_color).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.error_color)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Get style for success messages
     pub fn success_style(&self) -> Style {
-        Style::default().fg(self.success_color).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.success_color)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Get style for warning messages
     pub fn warning_style(&self) -> Style {
-        Style::default().fg(self.warning_color).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.warning_color)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Get cursor style
@@ -136,7 +146,13 @@ impl UITheme {
     }
 
     /// Get board cell style for Blokus
-    pub fn blokus_cell_style(&self, player: u8, is_highlighted: bool, row: usize, col: usize) -> (&'static str, Style) {
+    pub fn blokus_cell_style(
+        &self,
+        player: u8,
+        is_highlighted: bool,
+        row: usize,
+        col: usize,
+    ) -> (&'static str, Style) {
         match player {
             1..=4 => {
                 let color = if is_highlighted {
@@ -144,13 +160,21 @@ impl UITheme {
                 } else {
                     self.player_color(player)
                 };
-                let modifier = if is_highlighted { Modifier::BOLD } else { Modifier::empty() };
+                let modifier = if is_highlighted {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                };
                 ("██", Style::default().fg(color).add_modifier(modifier))
             }
             _ => {
                 // Empty cell with checkerboard pattern
                 let is_light_square = (row + col) % 2 == 0;
-                let color = if is_light_square { self.empty_cell_light } else { self.empty_cell_dark };
+                let color = if is_light_square {
+                    self.empty_cell_light
+                } else {
+                    self.empty_cell_dark
+                };
                 ("░░", Style::default().fg(color))
             }
         }
@@ -160,19 +184,37 @@ impl UITheme {
     pub fn blokus_ghost_style(&self, is_legal: bool, current_player: u8) -> (&'static str, Style) {
         let player_color = self.player_color(current_player);
         let ghost_color = self.darken_color(player_color);
-        
+
         if is_legal {
-            ("▓▓", Style::default().fg(ghost_color).add_modifier(Modifier::BOLD))
+            (
+                "▓▓",
+                Style::default()
+                    .fg(ghost_color)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            ("▓▓", Style::default().fg(ghost_color).add_modifier(Modifier::DIM))
+            (
+                "▓▓",
+                Style::default().fg(ghost_color).add_modifier(Modifier::DIM),
+            )
         }
     }
 
     /// Get board cell style for Othello
     pub fn othello_cell_style(&self, player: u8) -> (&'static str, Style) {
         match player {
-            1 => ("●●", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            2 => ("●●", Style::default().fg(Color::Black).add_modifier(Modifier::BOLD)),
+            1 => (
+                "●●",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            2 => (
+                "●●",
+                Style::default()
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
             _ => ("··", Style::default().fg(Color::DarkGray)),
         }
     }
@@ -180,8 +222,16 @@ impl UITheme {
     /// Get board cell style for Connect4
     pub fn connect4_cell_style(&self, player: u8) -> (&'static str, Style) {
         match player {
-            1 => ("●●", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            2 => ("●●", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            1 => (
+                "●●",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            2 => (
+                "●●",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             _ => ("··", Style::default().fg(Color::DarkGray)),
         }
     }
@@ -189,14 +239,29 @@ impl UITheme {
     /// Get board cell style for Gomoku
     pub fn gomoku_cell_style(&self, player: u8) -> (&'static str, Style) {
         match player {
-            1 => ("●●", Style::default().fg(Color::Black).add_modifier(Modifier::BOLD)),
-            2 => ("○○", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            1 => (
+                "●●",
+                Style::default()
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            2 => (
+                "○○",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             _ => ("++", Style::default().fg(Color::DarkGray)),
         }
     }
 
     /// Get piece availability style (for piece selectors)
-    pub fn piece_availability_style(&self, is_available: bool, is_selected: bool, player_color: Color) -> Style {
+    pub fn piece_availability_style(
+        &self,
+        is_available: bool,
+        is_selected: bool,
+        player_color: Color,
+    ) -> Style {
         if is_selected {
             Style::default()
                 .fg(Color::Black)

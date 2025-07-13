@@ -1,10 +1,10 @@
 //! Settings component.
 
 use ratatui::{
-    layout::Rect,
     Frame,
+    layout::Rect,
+    style::{Modifier, Style},
     widgets::{Block, Borders, List, ListItem},
-    style::{Style, Modifier},
 };
 
 use crate::app::{App, AppMode};
@@ -29,7 +29,7 @@ impl Component for SettingsComponent {
     fn id(&self) -> ComponentId {
         self.id
     }
-    
+
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
         let settings_items = vec![
             format!("Board Size: {}", app.settings_board_size),
@@ -37,11 +37,17 @@ impl Component for SettingsComponent {
             format!("AI Threads: {}", app.settings_ai_threads),
             format!("Max Nodes: {}", app.settings_max_nodes),
             format!("Search Iterations: {}", app.settings_search_iterations),
-            format!("Exploration Constant: {:.2}", app.settings_exploration_constant),
+            format!(
+                "Exploration Constant: {:.2}",
+                app.settings_exploration_constant
+            ),
             format!("Timeout (secs): {}", app.timeout_secs),
             format!("Stats Interval (secs): {}", app.stats_interval_secs),
             format!("AI Only Mode: {}", if app.ai_only { "Yes" } else { "No" }),
-            format!("Shared Tree: {}", if app.shared_tree { "Yes" } else { "No" }),
+            format!(
+                "Shared Tree: {}",
+                if app.shared_tree { "Yes" } else { "No" }
+            ),
             "".to_string(), // Separator
             "Back".to_string(),
         ];
@@ -66,10 +72,14 @@ impl Component for SettingsComponent {
         frame.render_widget(list, area);
         Ok(())
     }
-    
+
     fn handle_event(&mut self, event: &ComponentEvent, app: &mut App) -> EventResult {
         match event {
-            ComponentEvent::Input(InputEvent::MouseClick { x: _, y: _, button: _ }) => {
+            ComponentEvent::Input(InputEvent::MouseClick {
+                x: _,
+                y: _,
+                button: _,
+            }) => {
                 // Calculate which setting was clicked based on mouse position
                 // For now, just handle it as basic click without precise position mapping
                 Ok(false) // TODO: Add precise mouse click handling for settings
@@ -97,7 +107,8 @@ impl Component for SettingsComponent {
                         Ok(true)
                     }
                     KeyCode::Enter => {
-                        if app.selected_settings_index == 11 { // "Back" option
+                        if app.selected_settings_index == 11 {
+                            // "Back" option
                             app.mode = AppMode::GameSelection;
                             app.apply_settings_to_current_game();
                         }
@@ -108,7 +119,7 @@ impl Component for SettingsComponent {
                         app.apply_settings_to_current_game();
                         Ok(true)
                     }
-                    _ => Ok(false)
+                    _ => Ok(false),
                 }
             }
             _ => Ok(false),

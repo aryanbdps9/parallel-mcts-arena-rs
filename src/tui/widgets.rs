@@ -16,13 +16,16 @@
 //! - **Standard View**: Layout for 2-player games (Othello, Connect4, Gomoku)
 //! - **Blokus View**: Specialized 4-player layout with piece selection panels
 
-use crate::app::{App, AppMode, GameStatus, Player, ActiveTab};
+use crate::app::{ActiveTab, App, AppMode, GameStatus, Player};
 use crate::game_wrapper::GameWrapper;
 use crate::games::blokus::BlokusState;
 use crate::tui::blokus_ui;
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs};
 use mcts::GameState;
+use ratatui::prelude::*;
+use ratatui::widgets::{
+    Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Tabs,
+};
 
 /// Main rendering function that dispatches to appropriate view based on application mode
 ///
@@ -42,9 +45,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         AppMode::GameSelection => draw_game_selection_menu(frame, app, main_layout[0]),
         AppMode::Settings => draw_settings_menu(frame, app, main_layout[0]),
         AppMode::PlayerConfig => draw_player_config_menu(frame, app, main_layout[0]),
-        AppMode::InGame | AppMode::GameOver => {
-            draw_game_view(frame, app, main_layout[0])
-        }
+        AppMode::InGame | AppMode::GameOver => draw_game_view(frame, app, main_layout[0]),
     }
 }
 
@@ -106,11 +107,17 @@ fn draw_settings_menu(f: &mut Frame, app: &App, area: Rect) {
         format!("AI Threads: {}", app.settings_ai_threads),
         format!("Max Nodes: {}", app.settings_max_nodes),
         format!("Search Iterations: {}", app.settings_search_iterations),
-        format!("Exploration Constant: {:.2}", app.settings_exploration_constant),
+        format!(
+            "Exploration Constant: {:.2}",
+            app.settings_exploration_constant
+        ),
         format!("Timeout (secs): {}", app.timeout_secs),
         format!("Stats Interval (secs): {}", app.stats_interval_secs),
         format!("AI Only Mode: {}", if app.ai_only { "Yes" } else { "No" }),
-        format!("Shared Tree: {}", if app.shared_tree { "Yes" } else { "No" }),
+        format!(
+            "Shared Tree: {}",
+            if app.shared_tree { "Yes" } else { "No" }
+        ),
         "".to_string(), // Separator
         "Back".to_string(),
     ];
@@ -135,8 +142,10 @@ fn draw_settings_menu(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, chunks[0]);
 
     // Instructions
-    let instructions = Paragraph::new("Use Up/Down to navigate, Left/Right to adjust values, Enter to confirm, Esc to go back")
-        .block(Block::default().borders(Borders::ALL).title("Instructions"));
+    let instructions = Paragraph::new(
+        "Use Up/Down to navigate, Left/Right to adjust values, Enter to confirm, Esc to go back",
+    )
+    .block(Block::default().borders(Borders::ALL).title("Instructions"));
     f.render_widget(instructions, chunks[1]);
 }
 
@@ -176,14 +185,19 @@ fn draw_player_config_menu(f: &mut Frame, app: &App, area: Rect) {
 
     // Add "Start Game" option
     let start_style = if app.selected_player_config_index >= app.player_options.len() {
-        Style::default().add_modifier(Modifier::REVERSED).fg(Color::Green)
+        Style::default()
+            .add_modifier(Modifier::REVERSED)
+            .fg(Color::Green)
     } else {
         Style::default().fg(Color::Green)
     };
     items.push(ListItem::new("Start Game").style(start_style));
 
     let title = if app.ai_only {
-        format!("{} - Player Configuration (AI Only Mode)", app.get_selected_game_name())
+        format!(
+            "{} - Player Configuration (AI Only Mode)",
+            app.get_selected_game_name()
+        )
     } else {
         format!("{} - Player Configuration", app.get_selected_game_name())
     };
@@ -200,7 +214,7 @@ fn draw_player_config_menu(f: &mut Frame, app: &App, area: Rect) {
     } else {
         "Use Up/Down to navigate, Left/Right/Space to toggle player type, Enter to confirm, Esc to go back"
     };
-    
+
     let instructions = Paragraph::new(instructions_text)
         .block(Block::default().borders(Borders::ALL).title("Instructions"));
     f.render_widget(instructions, chunks[1]);
@@ -238,24 +252,26 @@ fn draw_standard_game_view(f: &mut Frame, app: &App, area: Rect) {
     let board = app.game_wrapper.get_board();
     let board_height = board.len();
     let board_width = if board_height > 0 { board[0].len() } else { 0 };
-    
+
     // Determine game type string for layout calculations
     let game_type = match &app.game_wrapper {
         GameWrapper::Connect4(_) => "connect4",
-        GameWrapper::Othello(_) => "othello", 
+        GameWrapper::Othello(_) => "othello",
         GameWrapper::Gomoku(_) => "gomoku",
         GameWrapper::Blokus(_) => "blokus", // shouldn't happen in this function
     };
-    
+
     // Use the dynamic layout that responds to actual board size
-    let (board_area, bottom_area) = app.layout_config.get_main_layout_dynamic(area, board_height, board_width, game_type);
-    
+    let (board_area, bottom_area) =
+        app.layout_config
+            .get_main_layout_dynamic(area, board_height, board_width, game_type);
+
     // Split the bottom area to have game info directly under board and maximize debug space
     let bottom_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),  // Game info area (minimum height for all elements: ~6 lines + 2 for borders)
-            Constraint::Min(10),    // Debug/History area (maximize remaining space)
+            Constraint::Length(8), // Game info area (minimum height for all elements: ~6 lines + 2 for borders)
+            Constraint::Min(10),   // Debug/History area (maximize remaining space)
         ])
         .split(bottom_area);
 
@@ -264,10 +280,10 @@ fn draw_standard_game_view(f: &mut Frame, app: &App, area: Rect) {
 
     // Draw the game board
     draw_board(f, app, board_area);
-    
-    // Draw game info/instructions 
+
+    // Draw game info/instructions
     draw_game_info(f, app, game_info_area);
-    
+
     // Draw the combined stats and history pane with tabs
     draw_stats_history_tabs(f, app, debug_area);
 }
@@ -298,14 +314,28 @@ fn draw_blokus_game_view(f: &mut Frame, app: &App, area: Rect) {
     // Draw the Blokus board with ghost pieces
     if let GameWrapper::Blokus(state) = &app.game_wrapper {
         // Get selected piece info from app state
-        let selected_piece = if let Some((piece_idx, transformation_idx)) = app.blokus_ui_config.get_selected_piece_info() {
-            Some((piece_idx, transformation_idx, app.board_cursor.0 as usize, app.board_cursor.1 as usize))
+        let selected_piece = if let Some((piece_idx, transformation_idx)) =
+            app.blokus_ui_config.get_selected_piece_info()
+        {
+            Some((
+                piece_idx,
+                transformation_idx,
+                app.board_cursor.0 as usize,
+                app.board_cursor.1 as usize,
+            ))
         } else {
             None
         };
         // Only show cursor for human turns
         let show_cursor = !app.is_current_player_ai();
-        blokus_ui::draw_blokus_board(f, state, board_area, selected_piece, app.board_cursor, show_cursor);
+        blokus_ui::draw_blokus_board(
+            f,
+            state,
+            board_area,
+            selected_piece,
+            app.board_cursor,
+            show_cursor,
+        );
     }
 
     // Draw piece selection panel
@@ -345,7 +375,7 @@ fn draw_stats_history_tabs(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Debug Stats / Move History");
-    
+
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -357,9 +387,9 @@ fn draw_stats_history_tabs(f: &mut Frame, app: &App, area: Rect) {
 
     // Position tabs on the bottom border line
     let tabs_area = Rect {
-        x: area.x + 1, // Start after left border
+        x: area.x + 1,                             // Start after left border
         y: area.y + area.height.saturating_sub(1), // Bottom border line
-        width: area.width.saturating_sub(2), // Account for left and right borders
+        width: area.width.saturating_sub(2),       // Account for left and right borders
         height: 1,
     };
 
@@ -368,10 +398,12 @@ fn draw_stats_history_tabs(f: &mut Frame, app: &App, area: Rect) {
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::NONE))
         .select(app.active_tab as usize)
-        .style(Style::default()
-            .fg(Color::White)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -407,7 +439,7 @@ fn draw_debug_stats_content(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let mut text = vec![Line::from("Debug Statistics")];
-    
+
     if let Some(stats) = &app.last_search_stats {
         text.push(Line::from(""));
         text.push(Line::from(format!("AI Status: Active")));
@@ -415,12 +447,12 @@ fn draw_debug_stats_content(f: &mut Frame, app: &App, area: Rect) {
         text.push(Line::from(format!("Root Visits: {}", stats.root_visits)));
         text.push(Line::from(format!("Root Value: {:.3}", stats.root_value)));
         text.push(Line::from(""));
-        
+
         // Show top moves with their statistics
         let mut sorted_children: Vec<_> = stats.children_stats.iter().collect();
         sorted_children.sort_by_key(|(_, (_, visits))| *visits);
         sorted_children.reverse();
-        
+
         text.push(Line::from("Top AI Moves:"));
         for (i, (move_str, (value, visits))) in sorted_children.iter().take(10).enumerate() {
             let line = format!("{}. {}: {:.3} ({})", i + 1, move_str, value, visits);
@@ -453,12 +485,12 @@ fn draw_debug_stats_content(f: &mut Frame, app: &App, area: Rect) {
             .content_length(content_height)
             .viewport_content_length(visible_height)
             .position(scroll_offset);
-            
+
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
-            
+
         f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
     }
 }
@@ -487,24 +519,28 @@ fn draw_move_history_content(f: &mut Frame, app: &App, area: Rect) {
             .constraints([Constraint::Percentage(100)])
             .split(area)
     };
-    
+
     // Group moves side-by-side based on game type
     let formatted_lines = match &app.game_wrapper {
         GameWrapper::Blokus(_) => {
             // For Blokus (4 players), group moves in sets of 4 per line
             format_blokus_moves_sidebyside_colored(&app.move_history, chunks[0].width as usize, app)
-        },
+        }
         _ => {
             // For 2-player games, group moves in pairs per line
-            format_two_player_moves_sidebyside_colored(&app.move_history, chunks[0].width as usize, app)
+            format_two_player_moves_sidebyside_colored(
+                &app.move_history,
+                chunks[0].width as usize,
+                app,
+            )
         }
     };
-    
+
     // Calculate scrolling for text content using auto-scroll logic
     let content_height = formatted_lines.len();
     let visible_height = chunks[0].height as usize; // No border adjustment needed
     let scroll_offset = app.get_history_scroll_offset(content_height, visible_height);
-    
+
     // Take visible lines for display
     let visible_lines = formatted_lines
         .into_iter()
@@ -512,8 +548,7 @@ fn draw_move_history_content(f: &mut Frame, app: &App, area: Rect) {
         .take(visible_height)
         .collect::<Vec<Line>>();
 
-    let paragraph = Paragraph::new(visible_lines)
-        .wrap(ratatui::widgets::Wrap { trim: true }); // Enable word wrap
+    let paragraph = Paragraph::new(visible_lines).wrap(ratatui::widgets::Wrap { trim: true }); // Enable word wrap
     f.render_widget(paragraph, chunks[0]);
 
     // Render scrollbar if content is scrollable and we have space for it
@@ -523,12 +558,12 @@ fn draw_move_history_content(f: &mut Frame, app: &App, area: Rect) {
             .content_length(content_height)
             .viewport_content_length(visible_height)
             .position(scroll_offset);
-            
+
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
-            
+
         f.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
     }
 }
@@ -554,9 +589,11 @@ fn draw_move_history_content(f: &mut Frame, app: &App, area: Rect) {
 /// * `app` - Application state containing game and player information
 /// * `area` - Screen area to render within
 fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
-    let mut text = vec![
-        Line::from(format!("Game: {}  |  Status: {:?}", app.get_selected_game_name(), app.game_status)),
-    ];
+    let mut text = vec![Line::from(format!(
+        "Game: {}  |  Status: {:?}",
+        app.get_selected_game_name(),
+        app.game_status
+    ))];
 
     // Only show current player info when game is in progress
     if app.game_status == GameStatus::InProgress {
@@ -575,7 +612,8 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
                 }
             }
         };
-        let player_type = app.player_options
+        let player_type = app
+            .player_options
             .iter()
             .find(|(id, _)| *id == ui_player_id)
             .map(|(_, p_type)| p_type)
@@ -592,43 +630,63 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
         // Get player color to match board display
         let player_color = match &app.game_wrapper {
             GameWrapper::Connect4(_) => {
-                if ui_player_id == 1 { Color::Red } else { Color::Yellow }
-            }
-            GameWrapper::Othello(_) => {
-                if ui_player_id == 1 { Color::White } else { Color::White } // Both use white for contrast
-            }
-            GameWrapper::Blokus(_) => {
-                match ui_player_id {
-                    1 => Color::Red,
-                    2 => Color::Blue, 
-                    3 => Color::Green,
-                    4 => Color::Yellow,
-                    _ => Color::White,
+                if ui_player_id == 1 {
+                    Color::Red
+                } else {
+                    Color::Yellow
                 }
             }
-            _ => { // Gomoku and others
-                if ui_player_id == 1 { Color::Red } else { Color::Blue }
+            GameWrapper::Othello(_) => {
+                if ui_player_id == 1 {
+                    Color::White
+                } else {
+                    Color::White
+                } // Both use white for contrast
+            }
+            GameWrapper::Blokus(_) => match ui_player_id {
+                1 => Color::Red,
+                2 => Color::Blue,
+                3 => Color::Green,
+                4 => Color::Yellow,
+                _ => Color::White,
+            },
+            _ => {
+                // Gomoku and others
+                if ui_player_id == 1 {
+                    Color::Red
+                } else {
+                    Color::Blue
+                }
             }
         };
 
         // Add current player indicator with color-coded marker
         let player_marker = match &app.game_wrapper {
             GameWrapper::Connect4(_) => {
-                if ui_player_id == 1 { "🔴" } else { "🟡" }
+                if ui_player_id == 1 {
+                    "🔴"
+                } else {
+                    "🟡"
+                }
             }
             GameWrapper::Othello(_) => {
-                if ui_player_id == 1 { "⚫" } else { "⚪" }
+                if ui_player_id == 1 {
+                    "⚫"
+                } else {
+                    "⚪"
+                }
             }
             GameWrapper::Blokus(_) => {
                 match ui_player_id {
                     1 => "🟥", // Red square
                     2 => "🟦", // Blue square
-                    3 => "🟩", // Green square  
+                    3 => "🟩", // Green square
                     4 => "🟨", // Yellow square
                     _ => "⬜",
                 }
             }
-            _ => { // Gomoku and others
+            _ => {
+                // Gomoku and others
                 if ui_player_id == 1 { "❌" } else { "⭕" }
             }
         };
@@ -637,66 +695,115 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Current: ", Style::default().fg(Color::White)),
             Span::styled(player_marker, Style::default()),
             Span::styled(" ", Style::default()),
-            Span::styled(current_player_text, Style::default().fg(player_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                current_player_text,
+                Style::default()
+                    .fg(player_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
 
         // Show AI status - display horizontally to save vertical space
         if app.is_current_player_ai() {
-        if let Some(start_time) = app.ai_thinking_start {
-            let elapsed = start_time.elapsed();
-            let elapsed_secs = elapsed.as_secs();
-            let elapsed_millis = elapsed.as_millis() % 1000;
-            let remaining = app.timeout_secs.saturating_sub(elapsed_secs);
-            
-            // Create a compact progress bar
-            let progress = if app.timeout_secs > 0 {
-                (elapsed_secs as f64 / app.timeout_secs as f64 * 10.0) as usize
+            if let Some(start_time) = app.ai_thinking_start {
+                let elapsed = start_time.elapsed();
+                let elapsed_secs = elapsed.as_secs();
+                let elapsed_millis = elapsed.as_millis() % 1000;
+                let remaining = app.timeout_secs.saturating_sub(elapsed_secs);
+
+                // Create a compact progress bar
+                let progress = if app.timeout_secs > 0 {
+                    (elapsed_secs as f64 / app.timeout_secs as f64 * 10.0) as usize
+                } else {
+                    0
+                };
+                let progress_bar =
+                    "█".repeat(progress.min(10)) + &"░".repeat(10 - progress.min(10));
+
+                // Display AI status and timer info on one line
+                let mut line_spans = vec![
+                    Span::styled(
+                        "� AI: ",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("🤔 Thinking ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("{}.{}s", elapsed_secs, elapsed_millis / 100),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" / {}s", app.timeout_secs),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::styled("  ⏰ ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("{}s left", remaining),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+
+                // Add pending response indicator if applicable
+                if app.pending_ai_response.is_some() {
+                    line_spans.push(Span::styled(
+                        "  📥 Ready",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
+
+                text.push(Line::from(line_spans));
+
+                // Progress bar on second line
+                text.push(Line::from(vec![
+                    Span::styled("Progress: [", Style::default().fg(Color::Cyan)),
+                    Span::styled(progress_bar, Style::default().fg(Color::Cyan)),
+                    Span::styled("]", Style::default().fg(Color::Cyan)),
+                    // Add debug info about minimum display time
+                    Span::styled(
+                        format!(
+                            "  ⏳ Min: {:.1}s",
+                            app.ai_minimum_display_duration.as_secs_f64()
+                        ),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::styled(
+                        if elapsed.as_secs_f64() >= app.ai_minimum_display_duration.as_secs_f64() {
+                            " ✓"
+                        } else {
+                            " ⏱️"
+                        },
+                        Style::default().fg(
+                            if elapsed.as_secs_f64()
+                                >= app.ai_minimum_display_duration.as_secs_f64()
+                            {
+                                Color::Green
+                            } else {
+                                Color::Yellow
+                            },
+                        ),
+                    ),
+                ]));
             } else {
-                0
-            };
-            let progress_bar = "█".repeat(progress.min(10)) + &"░".repeat(10 - progress.min(10));
-            
-            // Display AI status and timer info on one line
-            let mut line_spans = vec![
-                Span::styled("� AI: ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                Span::styled("🤔 Thinking ", Style::default().fg(Color::Yellow)),
-                Span::styled(format!("{}.{}s", elapsed_secs, elapsed_millis / 100), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" / {}s", app.timeout_secs), Style::default().fg(Color::Gray)),
-                Span::styled("  ⏰ ", Style::default().fg(Color::Yellow)),
-                Span::styled(format!("{}s left", remaining), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ];
-            
-            // Add pending response indicator if applicable
-            if app.pending_ai_response.is_some() {
-                line_spans.push(Span::styled("  📥 Ready", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+                // AI starting search
+                text.push(Line::from(vec![Span::styled(
+                    "🤖🤔 AI Starting search...",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )]));
             }
-            
-            text.push(Line::from(line_spans));
-            
-            // Progress bar on second line
-            text.push(Line::from(vec![
-                Span::styled("Progress: [", Style::default().fg(Color::Cyan)),
-                Span::styled(progress_bar, Style::default().fg(Color::Cyan)),
-                Span::styled("]", Style::default().fg(Color::Cyan)),
-                // Add debug info about minimum display time
-                Span::styled(format!("  ⏳ Min: {:.1}s", app.ai_minimum_display_duration.as_secs_f64()), Style::default().fg(Color::Gray)),
-                Span::styled(
-                    if elapsed.as_secs_f64() >= app.ai_minimum_display_duration.as_secs_f64() { " ✓" } else { " ⏱️" },
-                    Style::default().fg(if elapsed.as_secs_f64() >= app.ai_minimum_display_duration.as_secs_f64() { Color::Green } else { Color::Yellow })
-                ),
-            ]));
-        } else {
-            // AI starting search
-            text.push(Line::from(vec![
-                Span::styled("🤖🤔 AI Starting search...", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            ]));
-        }
         }
     }
 
     // Show basic statistics if available - compact format
     if let Some(stats) = &app.last_search_stats {
-        text.push(Line::from(format!("Nodes: {} | Root Value: {:.3}", stats.total_nodes, stats.root_value)));
+        text.push(Line::from(format!(
+            "Nodes: {} | Root Value: {:.3}",
+            stats.total_nodes, stats.root_value
+        )));
     }
 
     // Game-specific instructions - compact
@@ -720,8 +827,8 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
         text.push(Line::from(instructions));
     }
 
-    let paragraph = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title("Game Info"));
+    let paragraph =
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Game Info"));
     f.render_widget(paragraph, area);
 }
 
@@ -748,42 +855,67 @@ fn draw_game_info(f: &mut Frame, app: &App, area: Rect) {
 ///
 /// # Returns
 /// Vector of styled text lines ready for display
-fn format_two_player_moves_sidebyside_colored<'a>(move_history: &'a [crate::app::MoveHistoryEntry], max_width: usize, app: &'a App) -> Vec<Line<'a>> {
+fn format_two_player_moves_sidebyside_colored<'a>(
+    move_history: &'a [crate::app::MoveHistoryEntry],
+    max_width: usize,
+    app: &'a App,
+) -> Vec<Line<'a>> {
     use ratatui::prelude::*;
     let mut result = Vec::new();
     let mut moves_iter = move_history.iter().enumerate();
-    
+
     while let Some((i, first_move)) = moves_iter.next() {
         let move_number = (i / 2) + 1;
-        
+
         // Get player color and symbol
         let first_player_color = app.get_player_color(first_move.player);
         let first_player_symbol = app.get_player_symbol(first_move.player);
-        
+
         // Format first player's move with color
         let first_player_spans = vec![
-            Span::styled(format!("{}. ", move_number), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}. ", move_number),
+                Style::default().fg(Color::Gray),
+            ),
             Span::styled(first_player_symbol, Style::default()),
-            Span::styled(format!(" {}", first_move.a_move), Style::default().fg(first_player_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {}", first_move.a_move),
+                Style::default()
+                    .fg(first_player_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ];
-        
+
         // Check if there's a second move for this round
         if let Some((_, second_move)) = moves_iter.next() {
             let second_player_color = app.get_player_color(second_move.player);
             let second_player_symbol = app.get_player_symbol(second_move.player);
-            
+
             // Calculate approximate text length for spacing
-            let first_text_len = format!("{}. {} {}", move_number, first_player_symbol, first_move.a_move).len();
+            let first_text_len = format!(
+                "{}. {} {}",
+                move_number, first_player_symbol, first_move.a_move
+            )
+            .len();
             let second_text_len = format!("{} {}", second_player_symbol, second_move.a_move).len();
             let combined_length = first_text_len + second_text_len + 3; // 3 spaces minimum
-            
+
             if combined_length <= max_width {
                 // Fit on one line with spacing
-                let spacing = " ".repeat((max_width - first_text_len - second_text_len).max(3).min(10));
+                let spacing = " ".repeat(
+                    (max_width - first_text_len - second_text_len)
+                        .max(3)
+                        .min(10),
+                );
                 let mut line_spans = first_player_spans;
                 line_spans.push(Span::styled(spacing, Style::default()));
                 line_spans.push(Span::styled(second_player_symbol, Style::default()));
-                line_spans.push(Span::styled(format!(" {}", second_move.a_move), Style::default().fg(second_player_color).add_modifier(Modifier::BOLD)));
+                line_spans.push(Span::styled(
+                    format!(" {}", second_move.a_move),
+                    Style::default()
+                        .fg(second_player_color)
+                        .add_modifier(Modifier::BOLD),
+                ));
                 result.push(Line::from(line_spans));
             } else {
                 // Too long, put second move on new line with indentation
@@ -791,7 +923,12 @@ fn format_two_player_moves_sidebyside_colored<'a>(move_history: &'a [crate::app:
                 let second_player_spans = vec![
                     Span::styled("    ", Style::default()),
                     Span::styled(second_player_symbol, Style::default()),
-                    Span::styled(format!(" {}", second_move.a_move), Style::default().fg(second_player_color).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!(" {}", second_move.a_move),
+                        Style::default()
+                            .fg(second_player_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ];
                 result.push(Line::from(second_player_spans));
             }
@@ -800,7 +937,7 @@ fn format_two_player_moves_sidebyside_colored<'a>(move_history: &'a [crate::app:
             result.push(Line::from(first_player_spans));
         }
     }
-    
+
     result
 }
 
@@ -816,30 +953,51 @@ fn format_two_player_moves_sidebyside_colored<'a>(move_history: &'a [crate::app:
 ///
 /// # Returns
 /// Vector of styled text lines ready for display
-fn format_blokus_moves_sidebyside_colored<'a>(move_history: &'a [crate::app::MoveHistoryEntry], max_width: usize, app: &'a App) -> Vec<Line<'a>> {
+fn format_blokus_moves_sidebyside_colored<'a>(
+    move_history: &'a [crate::app::MoveHistoryEntry],
+    max_width: usize,
+    app: &'a App,
+) -> Vec<Line<'a>> {
     use ratatui::prelude::*;
     let mut result = Vec::new();
     let mut moves_iter = move_history.chunks(4).enumerate();
-    
+
     while let Some((round, round_moves)) = moves_iter.next() {
         let move_number = round + 1;
-        result.push(Line::from(Span::styled(format!("Round {}:", move_number), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
-        
+        result.push(Line::from(Span::styled(
+            format!("Round {}:", move_number),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+
         // Collect all moves for this round with their colors
         let mut move_spans = Vec::new();
         for (i, move_entry) in round_moves.iter().enumerate() {
             let player_color = app.get_player_color(move_entry.player);
             let player_symbol = app.get_player_symbol(move_entry.player);
-            
+
             if i > 0 {
                 move_spans.push(Span::styled(" | ", Style::default().fg(Color::Gray)));
             }
             move_spans.push(Span::styled(player_symbol, Style::default()));
-            move_spans.push(Span::styled(format!(" {}", move_entry.a_move), Style::default().fg(player_color).add_modifier(Modifier::BOLD)));
+            move_spans.push(Span::styled(
+                format!(" {}", move_entry.a_move),
+                Style::default()
+                    .fg(player_color)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
-        
+
         // Check if the line fits
-        let line_text = format!("  {}", round_moves.iter().map(|m| format!("{} {}", app.get_player_symbol(m.player), m.a_move)).collect::<Vec<_>>().join(" | "));
+        let line_text = format!(
+            "  {}",
+            round_moves
+                .iter()
+                .map(|m| format!("{} {}", app.get_player_symbol(m.player), m.a_move))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
         if line_text.len() <= max_width {
             // Fit on one line
             let mut line_content = vec![Span::styled("  ", Style::default())];
@@ -853,18 +1011,23 @@ fn format_blokus_moves_sidebyside_colored<'a>(move_history: &'a [crate::app::Mov
                 for (i, move_entry) in pair.iter().enumerate() {
                     let player_color = app.get_player_color(move_entry.player);
                     let player_symbol = app.get_player_symbol(move_entry.player);
-                    
+
                     if i > 0 {
                         pair_spans.push(Span::styled(" | ", Style::default().fg(Color::Gray)));
                     }
                     pair_spans.push(Span::styled(player_symbol, Style::default()));
-                    pair_spans.push(Span::styled(format!(" {}", move_entry.a_move), Style::default().fg(player_color).add_modifier(Modifier::BOLD)));
+                    pair_spans.push(Span::styled(
+                        format!(" {}", move_entry.a_move),
+                        Style::default()
+                            .fg(player_color)
+                            .add_modifier(Modifier::BOLD),
+                    ));
                 }
                 result.push(Line::from(pair_spans));
             }
         }
     }
-    
+
     result
 }
 
@@ -913,7 +1076,7 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
     let col_width = match &app.game_wrapper {
         GameWrapper::Connect4(_) => 2, // Reduced for better aspect ratio
         GameWrapper::Othello(_) => 2,  // Reduced for better aspect ratio
-        _ => 2, // Standard width for X/O
+        _ => 2,                        // Standard width for X/O
     };
 
     // Determine if we need row labels (not for Connect4)
@@ -922,15 +1085,15 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
 
     // Create layout with space for labels
     let mut layout_constraints = Vec::new();
-    
+
     // Column header row
     layout_constraints.push(Constraint::Length(1));
-    
+
     // Board rows
     for _ in 0..board_height {
         layout_constraints.push(Constraint::Length(1));
     }
-    
+
     let rows_layout = Layout::default()
         .constraints(layout_constraints)
         .split(area);
@@ -953,16 +1116,21 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
     let col_start_idx = if needs_row_labels { 1 } else { 0 };
     for c in 0..board_width {
         let col_number = (c + 1).to_string(); // Column numbers start from 1
-        let is_cursor_col = matches!(app.game_wrapper, GameWrapper::Connect4(_)) && 
-                           (c as u16) == app.board_cursor.1 && 
-                           !app.is_current_player_ai();
-        
+        let is_cursor_col = matches!(app.game_wrapper, GameWrapper::Connect4(_))
+            && (c as u16) == app.board_cursor.1
+            && !app.is_current_player_ai();
+
         let style = if is_cursor_col {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD).bg(Color::Blue)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+                .bg(Color::Blue)
         } else {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
         };
-        
+
         let paragraph = Paragraph::new(col_number)
             .style(style)
             .alignment(Alignment::Center);
@@ -972,7 +1140,7 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
     // Draw board rows with row labels
     for (r, row) in board.iter().enumerate() {
         let row_area = rows_layout[r + 1]; // +1 because first row is column labels
-        
+
         let row_constraints = if needs_row_labels {
             let mut constraints = vec![Constraint::Length(row_label_width)]; // Space for row label
             constraints.extend(vec![Constraint::Length(col_width); board_width]);
@@ -990,7 +1158,11 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
         if needs_row_labels {
             let row_number = (r + 1).to_string();
             let paragraph = Paragraph::new(row_number)
-                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+                .style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .alignment(Alignment::Center);
             f.render_widget(paragraph, cell_areas[0]);
         }
@@ -998,37 +1170,44 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
         // Draw board cells
         let cell_start_idx = if needs_row_labels { 1 } else { 0 };
         for (c, &cell) in row.iter().enumerate() {
-            let is_cursor = matches!(app.game_wrapper, GameWrapper::Connect4(_)) == false && 
-                           (r as u16, c as u16) == app.board_cursor;
-            
+            let is_cursor = matches!(app.game_wrapper, GameWrapper::Connect4(_)) == false
+                && (r as u16, c as u16) == app.board_cursor;
+
             let (symbol, style) = match &app.game_wrapper {
-                GameWrapper::Connect4(_) => {
-                    match cell {
-                        1 => ("🔴", Style::default().fg(Color::Red)),
-                        -1 => ("🟡", Style::default().fg(Color::Yellow)),
-                        _ => ("·", Style::default().fg(Color::DarkGray))
-                    }
-                }
-                GameWrapper::Othello(_) => {
-                    match cell {
-                        1 => ("⚫", Style::default().fg(Color::White)),
-                        -1 => ("⚪", Style::default().fg(Color::White)),
-                        _ => {
-                            if is_cursor && !app.is_current_player_ai() {
-                                ("▓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                            } else {
-                                ("·", Style::default().fg(Color::DarkGray))
-                            }
+                GameWrapper::Connect4(_) => match cell {
+                    1 => ("🔴", Style::default().fg(Color::Red)),
+                    -1 => ("🟡", Style::default().fg(Color::Yellow)),
+                    _ => ("·", Style::default().fg(Color::DarkGray)),
+                },
+                GameWrapper::Othello(_) => match cell {
+                    1 => ("⚫", Style::default().fg(Color::White)),
+                    -1 => ("⚪", Style::default().fg(Color::White)),
+                    _ => {
+                        if is_cursor && !app.is_current_player_ai() {
+                            (
+                                "▓",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                        } else {
+                            ("·", Style::default().fg(Color::DarkGray))
                         }
                     }
-                }
-                _ => { // Gomoku and others
+                },
+                _ => {
+                    // Gomoku and others
                     match cell {
                         1 => ("X", Style::default().fg(Color::Red)),
                         -1 => ("O", Style::default().fg(Color::Blue)),
                         _ => {
                             if is_cursor && !app.is_current_player_ai() {
-                                ("▓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                                (
+                                    "▓",
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD),
+                                )
                             } else {
                                 ("·", Style::default().fg(Color::DarkGray))
                             }
@@ -1037,7 +1216,7 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
                 }
             };
 
-            let final_style = if is_cursor && cell != 0 && !app.is_current_player_ai() {  
+            let final_style = if is_cursor && cell != 0 && !app.is_current_player_ai() {
                 style.bg(Color::Yellow)
             } else {
                 style
@@ -1073,34 +1252,79 @@ fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect) {
     }
 
     // Get last move positions for highlighting
-    let last_move_positions: std::collections::HashSet<(usize, usize)> = state.get_last_move()
+    let last_move_positions: std::collections::HashSet<(usize, usize)> = state
+        .get_last_move()
         .map(|coords| coords.into_iter().collect())
         .unwrap_or_default();
 
     // For Blokus, create a symmetrical grid with touching squares
     let mut board_lines = Vec::new();
-    
+
     for (r, row) in board.iter().enumerate() {
         let mut line_spans = Vec::new();
         for (c, &cell) in row.iter().enumerate() {
             let is_last_move = last_move_positions.contains(&(r, c));
-            
+
             let (symbol, style) = match cell {
                 1 => {
-                    let color = if is_last_move { Color::LightRed } else { Color::Red };
-                    ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                    let color = if is_last_move {
+                        Color::LightRed
+                    } else {
+                        Color::Red
+                    };
+                    (
+                        "██",
+                        Style::default().fg(color).add_modifier(if is_last_move {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                    )
                 }
                 2 => {
-                    let color = if is_last_move { Color::LightBlue } else { Color::Blue };
-                    ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                    let color = if is_last_move {
+                        Color::LightBlue
+                    } else {
+                        Color::Blue
+                    };
+                    (
+                        "██",
+                        Style::default().fg(color).add_modifier(if is_last_move {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                    )
                 }
                 3 => {
-                    let color = if is_last_move { Color::LightGreen } else { Color::Green };
-                    ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                    let color = if is_last_move {
+                        Color::LightGreen
+                    } else {
+                        Color::Green
+                    };
+                    (
+                        "██",
+                        Style::default().fg(color).add_modifier(if is_last_move {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                    )
                 }
                 4 => {
-                    let color = if is_last_move { Color::LightYellow } else { Color::Yellow };
-                    ("██", Style::default().fg(color).add_modifier(if is_last_move { Modifier::BOLD } else { Modifier::empty() }))
+                    let color = if is_last_move {
+                        Color::LightYellow
+                    } else {
+                        Color::Yellow
+                    };
+                    (
+                        "██",
+                        Style::default().fg(color).add_modifier(if is_last_move {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                    )
                 }
                 _ => {
                     // Chess-like pattern for empty squares - alternating light and dark

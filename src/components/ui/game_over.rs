@@ -1,11 +1,11 @@
 //! Game over component.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
     Frame,
-    widgets::{Block, Borders, Paragraph, Wrap},
-    style::{Style, Color, Modifier},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 use crate::app::{App, AppMode, GameStatus};
@@ -30,7 +30,7 @@ impl Component for GameOverComponent {
     fn id(&self) -> ComponentId {
         self.id
     }
-    
+
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -43,18 +43,9 @@ impl Component for GameOverComponent {
 
         // Game result
         let (result_text, result_color) = match app.game_status {
-            GameStatus::Win(winner) => (
-                format!("🎉 Player {} Wins! 🎉", winner),
-                Color::Green
-            ),
-            GameStatus::Draw => (
-                "🤝 It's a Draw! 🤝".to_string(),
-                Color::Yellow
-            ),
-            GameStatus::InProgress => (
-                "Game in Progress".to_string(),
-                Color::White
-            ),
+            GameStatus::Win(winner) => (format!("🎉 Player {} Wins! 🎉", winner), Color::Green),
+            GameStatus::Draw => ("🤝 It's a Draw! 🤝".to_string(), Color::Yellow),
+            GameStatus::InProgress => ("Game in Progress".to_string(), Color::White),
         };
 
         let result_lines = vec![
@@ -63,7 +54,7 @@ impl Component for GameOverComponent {
                 result_text,
                 Style::default()
                     .fg(result_color)
-                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
         ];
@@ -87,16 +78,29 @@ impl Component for GameOverComponent {
         frame.render_widget(summary, chunks[1]);
 
         // Instructions
-        let instructions = vec![
-            Line::from(vec![
-                Span::styled("R", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" - Restart game  "),
-                Span::styled("ESC", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" - Game selection  "),
-                Span::styled("Q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" - Quit"),
-            ]),
-        ];
+        let instructions = vec![Line::from(vec![
+            Span::styled(
+                "R",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" - Restart game  "),
+            Span::styled(
+                "ESC",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" - Game selection  "),
+            Span::styled(
+                "Q",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" - Quit"),
+        ])];
 
         let instructions_widget = Paragraph::new(instructions)
             .block(Block::default().borders(Borders::ALL).title("Controls"));
@@ -104,26 +108,24 @@ impl Component for GameOverComponent {
 
         Ok(())
     }
-    
+
     fn handle_event(&mut self, event: &ComponentEvent, app: &mut App) -> EventResult {
         match event {
-            ComponentEvent::Input(InputEvent::KeyPress(key)) => {
-                match key {
-                    KeyCode::Char('q') => {
-                        app.should_quit = true;
-                        Ok(true)
-                    }
-                    KeyCode::Char('r') | KeyCode::Enter => {
-                        app.reset_game();
-                        Ok(true)
-                    }
-                    KeyCode::Esc => {
-                        app.mode = AppMode::GameSelection;
-                        Ok(true)
-                    }
-                    _ => Ok(false)
+            ComponentEvent::Input(InputEvent::KeyPress(key)) => match key {
+                KeyCode::Char('q') => {
+                    app.should_quit = true;
+                    Ok(true)
                 }
-            }
+                KeyCode::Char('r') | KeyCode::Enter => {
+                    app.reset_game();
+                    Ok(true)
+                }
+                KeyCode::Esc => {
+                    app.mode = AppMode::GameSelection;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
             _ => Ok(false),
         }
     }

@@ -13,20 +13,20 @@
 //! ## Example Usage
 //! ```rust
 //! use mcts::{MCTS, GameState};
-//! 
+//!
 //! // Your game must implement GameState
 //! let mut mcts = MCTS::new(1.4, 8, 1000000);
 //! let (best_move, stats) = mcts.search(&game_state, 0, 0, 30); // 30 second timeout
 //! ```
 
+use parking_lot::{Mutex, RwLock};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rand_xoshiro::rand_core::{RngCore, SeedableRng};
-use std::collections::HashMap;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use parking_lot::{RwLock, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 thread_local! {
@@ -50,9 +50,7 @@ fn random_range(min: usize, max: usize) -> usize {
 }
 
 fn random_f64() -> f64 {
-    with_rng(|rng| {
-        (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
-    })
+    with_rng(|rng| (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64))
 }
 
 /// Statistics about the MCTS search
@@ -73,7 +71,7 @@ thread_local! {
 }
 
 /// A pool for recycling nodes to reduce memory allocations
-/// 
+///
 /// Instead of constantly allocating and deallocating nodes, we maintain
 /// a pool of reusable nodes to improve performance and reduce GC pressure.
 struct NodePool<M: Clone + Eq + std::hash::Hash> {
@@ -90,7 +88,7 @@ impl<M: Clone + Eq + std::hash::Hash> NodePool<M> {
     }
 
     /// Return multiple nodes to the pool in batch
-    /// 
+    ///
     /// More efficient than returning nodes one at a time.
     /// Nodes are reset to their initial state before being returned to the pool.
     ///
@@ -114,63 +112,65 @@ impl<M: Clone + Eq + std::hash::Hash> NodePool<M> {
 
 /// The state of the game. Must be cloneable to be used in the MCTS.
 /// `Send` and `Sync` are required for parallel processing.
-/// 
+///
 /// This trait defines the interface that any game must implement to work
 /// with the MCTS engine. The engine will call these methods to:
 /// - Generate possible moves
 /// - Apply moves to create new states
 /// - Check if the game is over
 /// - Determine the winner
-/// 
+///
 /// ## Thread Safety
 /// All methods must be thread-safe since the MCTS engine runs in parallel.
 /// The game state should be immutable during search (only copied, not modified).
 pub trait GameState: Clone + Send + Sync {
     /// The type of a move in the game.
-    /// 
+    ///
     /// Must be cloneable, comparable, hashable, debuggable, and thread-safe.
     /// Used as keys in hash maps and for move generation.
     type Move: Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync;
 
     /// Returns the board state.
-    /// 
+    ///
     /// Used for visualization and analysis. Should return a 2D vector
     /// where each cell contains a player ID (e.g., 1, -1, 0 for empty).
     fn get_board(&self) -> &Vec<Vec<i32>>;
 
     /// Returns the last move made as a set of coordinates, if applicable.
-    /// 
+    ///
     /// Used for UI highlighting and game analysis. Some games may not
     /// have coordinate-based moves, so this can return None.
-    fn get_last_move(&self) -> Option<Vec<(usize, usize)>> { None }
+    fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
+        None
+    }
 
     /// Returns the number of players in the game.
     fn get_num_players(&self) -> i32;
 
     /// Returns a list of all possible moves for the current player.
     fn get_possible_moves(&self) -> Vec<Self::Move>;
-    
+
     /// Applies a move to the state, modifying it.
-    /// 
+    ///
     /// This should update the game state and switch to the next player.
     /// The move is guaranteed to be legal (from get_possible_moves).
     fn make_move(&mut self, mv: &Self::Move);
-    
+
     /// Returns true if the game is over.
-    /// 
+    ///
     /// Called to determine when to stop simulations. Should check for
     /// wins, draws, or any other terminal conditions.
     fn is_terminal(&self) -> bool;
-    
+
     /// Returns the winner of the game, if any.
     /// Should return `Some(player_id)` if a player has won, `None` for a draw or if the game is not over.
-    /// 
+    ///
     /// Used to determine the reward during backpropagation. The reward
     /// is calculated from the perspective of each player in the path.
     fn get_winner(&self) -> Option<i32>;
-    
+
     /// Returns the player whose turn it is to move.
-    /// 
+    ///
     /// Used to determine perspective during reward calculation and
     /// for UI display of current player.
     fn get_current_player(&self) -> i32;
@@ -178,51 +178,51 @@ pub trait GameState: Clone + Send + Sync {
 
 /// A node in the Monte Carlo Search Tree.
 /// It is wrapped in an `Arc` to allow for shared ownership across threads.
-/// 
+///
 /// Each node represents a game state and stores statistics about the outcomes
 /// of all simulations that have passed through this node. The tree is built
 /// incrementally as the search progresses.
-/// 
+///
 /// ## Thread Safety
 /// All fields use atomic operations or locks to ensure thread-safe access
 /// during parallel search. Multiple threads can read and update the same
 /// node simultaneously.
 struct Node<M: Clone + Eq + std::hash::Hash> {
     /// A map from a move to the child node.
-    /// 
+    ///
     /// Protected by RwLock for concurrent access. Multiple threads can read
     /// simultaneously, but only one can write (when expanding the tree).
     children: RwLock<HashMap<M, Arc<Node<M>>>>,
-    
+
     /// The number of times this node has been visited. Atomic for lock-free updates.
-    /// 
+    ///
     /// Incremented each time a simulation passes through this node.
     /// Used in the PUCT formula for move selection.
     visits: AtomicI32,
-    
+
     /// Sum of rewards from the parent's perspective, stored as an integer.
     /// 2 for a win, 1 for a draw, 0 for a loss. Uses atomic operations for lock-free updates.
-    /// 
+    ///
     /// The reward is always from the perspective of the player who made the move
     /// leading to this node. This makes backpropagation easier.
     wins: AtomicI32,
-    
+
     /// Virtual losses applied to this node. Used to reduce thread contention in parallel search.
-    /// 
+    ///
     /// When a thread selects a path, it applies a virtual loss to discourage
     /// other threads from following the same path. The virtual loss is removed
     /// after the simulation completes.
     virtual_losses: AtomicI32,
-    
+
     /// Depth of this node in the tree (0 for root)
-    /// 
+    ///
     /// Used for tree analysis and debugging. Not used in the search algorithm itself.
     depth: u32,
 }
 
 impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     /// Creates a new, empty node.
-    /// 
+    ///
     /// All statistics are initialized to zero. The node has no children initially.
     fn new() -> Self {
         Node {
@@ -235,7 +235,7 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     }
 
     /// Resets the node to its initial state for reuse
-    /// 
+    ///
     /// Clears all statistics and children so the node can be reused
     /// for a different position. This is part of the memory management
     /// system to reduce allocations.
@@ -248,17 +248,17 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     }
 
     /// Collects all descendant nodes for batch recycling
-    /// 
+    ///
     /// Recursively traverses the subtree and collects all nodes
     /// into a vector. Used when pruning parts of the tree or
     /// when the tree is being destroyed.
-    /// 
+    ///
     /// # Returns
     /// Vector of all nodes in the subtree rooted at this node
     fn collect_subtree_nodes(&self) -> Vec<Arc<Node<M>>> {
         let mut nodes = Vec::new();
         let mut stack = Vec::new();
-        
+
         // Start with immediate children
         {
             let children = self.children.read();
@@ -268,31 +268,31 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
         while let Some(current) = stack.pop() {
             // Add the current node to the result
             nodes.push(current.clone());
-            
+
             // Add its children to the stack
             let children = current.children.read();
             stack.extend(children.values().cloned());
         }
-        
+
         nodes
     }
 
     /// Prunes weak children to save memory
     /// Keeps only children with visit count >= threshold
-    /// 
+    ///
     /// Removes children that haven't been visited enough times.
     /// This helps control memory usage in long-running searches.
     /// The pruned nodes are returned so they can be recycled.
-    /// 
+    ///
     /// # Arguments
     /// * `min_visits` - Minimum number of visits required to keep a child
-    /// 
+    ///
     /// # Returns
     /// Vector of pruned nodes that can be recycled
     fn prune_weak_children(&self, min_visits: i32) -> Vec<Arc<Node<M>>> {
         let mut children = self.children.write();
         let mut pruned_nodes = Vec::new();
-        
+
         children.retain(|_, node| {
             let visits = node.visits.load(Ordering::Relaxed);
             if visits < min_visits {
@@ -304,12 +304,12 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
                 true
             }
         });
-        
+
         pruned_nodes
     }
 
     /// Applies virtual loss to this node.
-    /// 
+    ///
     /// Virtual losses are used to coordinate between threads in parallel search.
     /// When a thread selects a path for exploration, it applies a virtual loss
     /// to discourage other threads from selecting the same path.
@@ -334,7 +334,7 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
         let visits = self.visits.load(Ordering::Relaxed);
         let virtual_losses = self.virtual_losses.load(Ordering::Relaxed);
         let effective_visits = visits + virtual_losses;
-        
+
         if effective_visits == 0 {
             // For unvisited nodes, return only the exploration term
             exploration_parameter * prior_probability * (parent_visits as f64).sqrt()
@@ -348,7 +348,9 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
             } else {
                 0.0 // If only virtual losses, assume worst case
             };
-            let exploration_term = exploration_parameter * prior_probability * (parent_visits as f64).sqrt() / (1.0 + effective_visits_f);
+            let exploration_term =
+                exploration_parameter * prior_probability * (parent_visits as f64).sqrt()
+                    / (1.0 + effective_visits_f);
             q_value + exploration_term
         }
     }
@@ -404,7 +406,7 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Gets the exploration parameter used in the UCB1 formula
-    /// 
+    ///
     /// # Returns
     /// The exploration parameter (C_puct value)
     pub fn get_exploration_parameter(&self) -> f64 {
@@ -412,7 +414,7 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Gets the maximum number of nodes allowed in the tree
-    /// 
+    ///
     /// # Returns
     /// Maximum node count before tree pruning occurs
     pub fn get_max_nodes(&self) -> usize {
@@ -420,25 +422,28 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Advances the root of the tree to the node corresponding to the given move.
-    /// 
+    ///
     /// This is used when a move is made in the actual game to reuse the search tree.
     /// The subtree corresponding to the selected move becomes the new root,
     /// and all other subtrees are recycled to save memory.
-    /// 
+    ///
     /// # Arguments
     /// * `mv` - The move that was made in the game
     pub fn advance_root(&mut self, mv: &S::Move) {
         let (new_root, nodes_to_recycle, new_tree_size) = {
             let children = self.root.children.read();
-            let new_root = children.get(mv).map(Arc::clone).unwrap_or_else(|| Arc::new(Node::new()));
-            
+            let new_root = children
+                .get(mv)
+                .map(Arc::clone)
+                .unwrap_or_else(|| Arc::new(Node::new()));
+
             // Calculate the size of the new subtree
             let new_tree_size = if children.contains_key(mv) {
                 1 + self.count_subtree_nodes(&new_root)
             } else {
                 1 // Just the new root node
             };
-            
+
             // Collect all nodes from non-selected subtrees for recycling
             let mut nodes_to_recycle = Vec::new();
             for (other_move, other_node) in children.iter() {
@@ -448,48 +453,49 @@ impl<S: GameState> MCTS<S> {
                     nodes_to_recycle.push(other_node.clone());
                 }
             }
-            
+
             (new_root, nodes_to_recycle, new_tree_size)
         };
-        
+
         // Batch recycle all collected nodes
         if !nodes_to_recycle.is_empty() {
             self.node_pool.return_nodes(nodes_to_recycle);
         }
-        
+
         // Update the node count to reflect the new tree size
-        self.node_count.store(new_tree_size as i32, Ordering::Relaxed);
-        
+        self.node_count
+            .store(new_tree_size as i32, Ordering::Relaxed);
+
         self.root = new_root;
     }
 
     /// Counts the total number of nodes in a subtree (including the root of the subtree)
-    /// 
+    ///
     /// Used for memory management and tree statistics.
-    /// 
+    ///
     /// # Arguments
     /// * `root` - The root node of the subtree to count
-    /// 
+    ///
     /// # Returns
     /// Total number of nodes in the subtree
     fn count_subtree_nodes(&self, root: &Arc<Node<S::Move>>) -> usize {
         let mut count = 0;
         let mut stack = vec![root.clone()];
-        
+
         while let Some(node) = stack.pop() {
             count += 1;
             let children = node.children.read();
             stack.extend(children.values().cloned());
         }
-        
+
         count
     }
 
     /// Prunes weak children from the tree to save memory and computation.
-    /// 
+    ///
     /// Removes nodes with visit counts below the threshold to control memory usage
     /// and focus computation on promising paths. Call this periodically during search.
-    /// 
+    ///
     /// # Arguments
     /// * `min_visits_threshold` - Minimum number of visits required to keep a node
     pub fn prune_tree(&mut self, min_visits_threshold: i32) {
@@ -497,7 +503,7 @@ impl<S: GameState> MCTS<S> {
         if !pruned_nodes.is_empty() {
             self.node_pool.return_nodes(pruned_nodes);
         }
-        
+
         // Recursively prune children that survived the initial pruning
         let children = self.root.children.read();
         for child in children.values() {
@@ -509,7 +515,7 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Automatically prunes the tree based on visit statistics
-    /// 
+    ///
     /// Removes children with less than 1% of the root's visits to keep the tree
     /// focused on the most promising moves. This is a heuristic-based pruning
     /// that doesn't require manual threshold setting.
@@ -520,10 +526,10 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Returns statistics for the children of the root node.
-    /// 
+    ///
     /// Provides detailed statistics about each possible move from the current position.
     /// Used for move analysis and debugging the search behavior.
-    /// 
+    ///
     /// # Returns
     /// HashMap mapping moves to (wins, visits) tuples
     pub fn get_root_children_stats(&self) -> std::collections::HashMap<S::Move, (f64, i32)> {
@@ -539,9 +545,9 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Returns the statistics for the root node.
-    /// 
+    ///
     /// Provides overall statistics about the search from the current position.
-    /// 
+    ///
     /// # Returns
     /// Tuple of (wins, visits) for the root node
     pub fn get_root_stats(&self) -> (f64, i32) {
@@ -551,11 +557,11 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Returns debug information about the current MCTS state
-    /// 
+    ///
     /// Provides a formatted string with detailed information about the search tree,
     /// including root statistics, tree size, configuration, and top moves.
     /// Useful for debugging and monitoring search progress.
-    /// 
+    ///
     /// # Returns
     /// Multi-line debug string with tree statistics and top moves
     pub fn get_debug_info(&self) -> String {
@@ -563,16 +569,28 @@ impl<S: GameState> MCTS<S> {
         let root_wins = self.root.wins.load(Ordering::Relaxed);
         let node_count = self.node_count.load(Ordering::Relaxed);
         let children_count = self.root.children.read().len();
-        
+
         let mut debug_lines = vec![
             "MCTS Debug Info:".to_string(),
-            format!("Root: {} visits, {} wins, {:.3} rate", 
-                   root_visits, root_wins, 
-                   if root_visits > 0 { root_wins as f64 / root_visits as f64 / 2.0 } else { 0.0 } ),
-            format!("Tree: {} nodes ({} children, max {})", 
-                   node_count, children_count, self.max_nodes),
-            format!("Exploration: {:.3}, Threads: {}", 
-                   self.exploration_parameter, self.pool.current_num_threads()),
+            format!(
+                "Root: {} visits, {} wins, {:.3} rate",
+                root_visits,
+                root_wins,
+                if root_visits > 0 {
+                    root_wins as f64 / root_visits as f64 / 2.0
+                } else {
+                    0.0
+                }
+            ),
+            format!(
+                "Tree: {} nodes ({} children, max {})",
+                node_count, children_count, self.max_nodes
+            ),
+            format!(
+                "Exploration: {:.3}, Threads: {}",
+                self.exploration_parameter,
+                self.pool.current_num_threads()
+            ),
         ];
 
         // Add top child statistics (limited to prevent UI overflow)
@@ -581,30 +599,40 @@ impl<S: GameState> MCTS<S> {
             debug_lines.push("Top moves:".to_string());
             let mut sorted_children: Vec<_> = children.iter().collect();
             sorted_children.sort_by_key(|(_, node)| -node.visits.load(Ordering::Relaxed));
-            
+
             for (mv, node) in sorted_children.iter().take(5) {
                 let visits = node.visits.load(Ordering::Relaxed);
                 let wins = node.wins.load(Ordering::Relaxed);
-                let win_rate = if visits > 0 { wins as f64 / visits as f64 / 2.0 } else { 0.0 };
-                debug_lines.push(format!("  {:?}: {} visits, {:.3} rate", mv, visits, win_rate));
+                let win_rate = if visits > 0 {
+                    wins as f64 / visits as f64 / 2.0
+                } else {
+                    0.0
+                };
+                debug_lines.push(format!(
+                    "  {:?}: {} visits, {:.3} rate",
+                    mv, visits, win_rate
+                ));
             }
-            
+
             if sorted_children.len() > 5 {
-                debug_lines.push(format!("  ... and {} more moves", sorted_children.len() - 5));
+                debug_lines.push(format!(
+                    "  ... and {} more moves",
+                    sorted_children.len() - 5
+                ));
             }
         } else {
             debug_lines.push("No moves evaluated yet".to_string());
         }
-        
+
         debug_lines.join("\n")
     }
 
     /// Ensures the root node is fully expanded with all possible moves.
-    /// 
+    ///
     /// This prevents the issue where only one move gets explored due to early exploitation.
     /// By expanding all possible moves at the root, we ensure that the search considers
     /// all options and doesn't get stuck in local optima.
-    /// 
+    ///
     /// # Arguments
     /// * `state` - The current game state to get possible moves from
     fn ensure_root_expanded(&mut self, state: &S) {
@@ -624,9 +652,10 @@ impl<S: GameState> MCTS<S> {
                 children_guard.insert(mv.clone(), new_node);
                 new_nodes_count += 1;
             }
-            
+
             // Update node count
-            self.node_count.fetch_add(new_nodes_count, Ordering::Relaxed);
+            self.node_count
+                .fetch_add(new_nodes_count, Ordering::Relaxed);
         }
     }
 
@@ -639,27 +668,34 @@ impl<S: GameState> MCTS<S> {
     /// * `stats_interval_secs` - Interval in seconds to print statistics (0 = no periodic stats).
     /// * `timeout_secs` - The maximum time in seconds to search for. 0 means no timeout.
     /// * `external_stop` - Optional external stop flag that can interrupt the search.
-    pub fn search_with_stop(&mut self, state: &S, iterations: i32, stats_interval_secs: u64, timeout_secs: u64, external_stop: Option<Arc<AtomicBool>>) -> (S::Move, SearchStatistics) {
+    pub fn search_with_stop(
+        &mut self,
+        state: &S,
+        iterations: i32,
+        stats_interval_secs: u64,
+        timeout_secs: u64,
+        external_stop: Option<Arc<AtomicBool>>,
+    ) -> (S::Move, SearchStatistics) {
         let start_time = Instant::now();
-        
+
         // Get current overhead estimate
         let estimated_overhead_ms = {
             let overhead = self.timeout_overhead_ms.lock();
             *overhead
         };
-        
+
         // Use dynamic overhead estimation with a minimum of 20ms and maximum of 500ms
         let overhead_buffer_ms = estimated_overhead_ms.max(20.0).min(500.0);
-        
-        let effective_timeout_ms = if timeout_secs > 0 { 
+
+        let effective_timeout_ms = if timeout_secs > 0 {
             ((timeout_secs * 1000) as f64 - overhead_buffer_ms).max(100.0) as u64 // Ensure at least 100ms for actual search
-        } else { 
-            0 
+        } else {
+            0
         };
-        let timeout = if effective_timeout_ms > 0 { 
-            Some(Duration::from_millis(effective_timeout_ms)) 
-        } else { 
-            None 
+        let timeout = if effective_timeout_ms > 0 {
+            Some(Duration::from_millis(effective_timeout_ms))
+        } else {
+            None
         };
 
         self.ensure_root_expanded(state);
@@ -668,7 +704,7 @@ impl<S: GameState> MCTS<S> {
         if possible_moves.len() == 1 {
             return (possible_moves[0].clone(), SearchStatistics::default());
         }
-        
+
         if possible_moves.is_empty() {
             // This case should ideally be handled by get_possible_moves returning a pass move.
             // If we get here, it means the game ended, but is_terminal was false.
@@ -678,11 +714,16 @@ impl<S: GameState> MCTS<S> {
             // For now, let's check the root's children. If there's one, it must be the pass move.
             let children = self.root.children.read();
             if children.len() == 1 {
-                return (children.keys().next().unwrap().clone(), SearchStatistics::default());
+                return (
+                    children.keys().next().unwrap().clone(),
+                    SearchStatistics::default(),
+                );
             }
             // If there are no children and no possible moves, we are stuck.
             // This indicates a logic error in the game state implementation.
-            panic!("MCTS search: No possible moves and no children in root node. Game logic may be flawed.");
+            panic!(
+                "MCTS search: No possible moves and no children in root node. Game logic may be flawed."
+            );
         }
 
         let completed_iterations = Arc::new(AtomicUsize::new(0));
@@ -691,7 +732,11 @@ impl<S: GameState> MCTS<S> {
         // Pre-calculate absolute timeout deadline
         let timeout_deadline = timeout.map(|t| start_time + t);
 
-        let stats_interval = if stats_interval_secs > 0 { Some(Duration::from_secs(stats_interval_secs)) } else { None };
+        let stats_interval = if stats_interval_secs > 0 {
+            Some(Duration::from_secs(stats_interval_secs))
+        } else {
+            None
+        };
         let last_stats_time = Arc::new(Mutex::new(Instant::now()));
 
         // Start a dedicated timeout monitoring thread if we have a timeout
@@ -719,38 +764,40 @@ impl<S: GameState> MCTS<S> {
         };
 
         self.pool.install(|| {
-            let _ = (0..iterations).into_par_iter().try_for_each(|_| -> Result<(), ()> {
-                // Double-check stop flag at the very start of each iteration
-                if stop_searching.load(Ordering::Relaxed) {
-                    return Err(()); // Stop this thread immediately
-                }
+            let _ = (0..iterations)
+                .into_par_iter()
+                .try_for_each(|_| -> Result<(), ()> {
+                    // Double-check stop flag at the very start of each iteration
+                    if stop_searching.load(Ordering::Relaxed) {
+                        return Err(()); // Stop this thread immediately
+                    }
 
-                // Check external stop flag at the start of each iteration
-                if let Some(ref ext_stop) = external_stop {
-                    if ext_stop.load(Ordering::Relaxed) {
-                        stop_searching.store(true, Ordering::Relaxed);
+                    // Check external stop flag at the start of each iteration
+                    if let Some(ref ext_stop) = external_stop {
+                        if ext_stop.load(Ordering::Relaxed) {
+                            stop_searching.store(true, Ordering::Relaxed);
+                            return Err(());
+                        }
+                    }
+
+                    self.run_simulation(state, &stop_searching);
+                    completed_iterations.fetch_add(1, Ordering::Relaxed);
+
+                    // Check stop flag again after simulation (set by timeout monitor)
+                    if stop_searching.load(Ordering::Relaxed) {
                         return Err(());
                     }
-                }
 
-                self.run_simulation(state, &stop_searching);
-                completed_iterations.fetch_add(1, Ordering::Relaxed);
-
-                // Check stop flag again after simulation (set by timeout monitor)
-                if stop_searching.load(Ordering::Relaxed) {
-                    return Err(());
-                }
-
-                if let Some(interval) = stats_interval {
-                    let mut last_time = last_stats_time.lock();
-                    if last_time.elapsed() >= interval {
-                        // Stats are now displayed in the TUI debug panel instead of console output
-                        // to prevent interference with the TUI display
-                        *last_time = Instant::now();
+                    if let Some(interval) = stats_interval {
+                        let mut last_time = last_stats_time.lock();
+                        if last_time.elapsed() >= interval {
+                            // Stats are now displayed in the TUI debug panel instead of console output
+                            // to prevent interference with the TUI display
+                            *last_time = Instant::now();
+                        }
                     }
-                }
-                Ok(())
-            });
+                    Ok(())
+                });
         });
 
         // Clean up timeout monitor thread and measure actual overhead (optimized frequency)
@@ -759,38 +806,41 @@ impl<S: GameState> MCTS<S> {
             let cleanup_start = Instant::now();
             let _ = handle.join(); // Wait for timeout monitor to finish
             let cleanup_duration = cleanup_start.elapsed();
-            
+
             // Only measure overhead every 8 searches to reduce performance impact
-            let searches_count = self.searches_since_measurement.fetch_add(1, Ordering::Relaxed);
+            let searches_count = self
+                .searches_since_measurement
+                .fetch_add(1, Ordering::Relaxed);
             let should_measure = searches_count % 8 == 0;
-            
+
             if should_measure {
                 // Update overhead estimation with actual measured overhead
                 if let Some(timeout) = timeout {
                     let total_elapsed = start_time.elapsed();
                     let expected_duration = timeout;
                     if total_elapsed > expected_duration {
-                        let actual_overhead_ms = (total_elapsed - expected_duration).as_millis() as f64;
-                        
+                        let actual_overhead_ms =
+                            (total_elapsed - expected_duration).as_millis() as f64;
+
                         // Only update if the deviation is significant (>10ms difference from estimate)
                         let current_estimate = {
                             let overhead = self.timeout_overhead_ms.lock();
                             *overhead
                         };
-                        
+
                         if (actual_overhead_ms - current_estimate).abs() > 10.0 {
                             self.update_overhead_estimate(actual_overhead_ms);
                         }
                     } else {
                         // Even if we finished early, record the cleanup time as minimum overhead
                         let cleanup_overhead_ms = cleanup_duration.as_millis() as f64;
-                        
+
                         // Only update if cleanup time suggests we need a higher minimum
                         let current_estimate = {
                             let overhead = self.timeout_overhead_ms.lock();
                             *overhead
                         };
-                        
+
                         if cleanup_overhead_ms > current_estimate {
                             self.update_overhead_estimate(cleanup_overhead_ms);
                         }
@@ -823,8 +873,16 @@ impl<S: GameState> MCTS<S> {
             total_nodes: self.node_count.load(Ordering::Relaxed),
             root_visits,
             root_wins,
-            root_value: if root_visits > 0 { root_wins / root_visits as f64 / 2.0 } else { 0.0 },
-            children_stats: self.get_root_children_stats().into_iter().map(|(m, (w, v))| (format!("{:?}", m), (w, v))).collect(),
+            root_value: if root_visits > 0 {
+                root_wins / root_visits as f64 / 2.0
+            } else {
+                0.0
+            },
+            children_stats: self
+                .get_root_children_stats()
+                .into_iter()
+                .map(|(m, (w, v))| (format!("{:?}", m), (w, v)))
+                .collect(),
         };
 
         (best_move, stats)
@@ -838,9 +896,19 @@ impl<S: GameState> MCTS<S> {
     /// * `iterations` - The total number of simulations to run.
     /// * `stats_interval_secs` - Interval in seconds to print statistics (0 = no periodic stats).
     /// * `timeout_secs` - The maximum time in seconds to search for. 0 means no timeout.
-    pub fn search(&mut self, state: &S, iterations: i32, stats_interval_secs: u64, timeout_secs: u64) -> (S::Move, SearchStatistics) {
+    pub fn search(
+        &mut self,
+        state: &S,
+        iterations: i32,
+        stats_interval_secs: u64,
+        timeout_secs: u64,
+    ) -> (S::Move, SearchStatistics) {
         let start_time = Instant::now();
-        let timeout = if timeout_secs > 0 { Some(Duration::from_secs(timeout_secs)) } else { None };
+        let timeout = if timeout_secs > 0 {
+            Some(Duration::from_secs(timeout_secs))
+        } else {
+            None
+        };
 
         self.ensure_root_expanded(state);
 
@@ -848,7 +916,7 @@ impl<S: GameState> MCTS<S> {
         if possible_moves.len() == 1 {
             return (possible_moves[0].clone(), SearchStatistics::default());
         }
-        
+
         if possible_moves.is_empty() {
             // This case should ideally be handled by get_possible_moves returning a pass move.
             // If we get here, it means the game ended, but is_terminal was false.
@@ -858,45 +926,56 @@ impl<S: GameState> MCTS<S> {
             // For now, let's check the root's children. If there's one, it must be the pass move.
             let children = self.root.children.read();
             if children.len() == 1 {
-                return (children.keys().next().unwrap().clone(), SearchStatistics::default());
+                return (
+                    children.keys().next().unwrap().clone(),
+                    SearchStatistics::default(),
+                );
             }
             // If there are no children and no possible moves, we are stuck.
             // This indicates a logic error in the game state implementation.
-            panic!("MCTS search: No possible moves and no children in root node. Game logic may be flawed.");
+            panic!(
+                "MCTS search: No possible moves and no children in root node. Game logic may be flawed."
+            );
         }
 
         let completed_iterations = Arc::new(AtomicUsize::new(0));
         let stop_searching = Arc::new(AtomicBool::new(false));
 
-        let stats_interval = if stats_interval_secs > 0 { Some(Duration::from_secs(stats_interval_secs)) } else { None };
+        let stats_interval = if stats_interval_secs > 0 {
+            Some(Duration::from_secs(stats_interval_secs))
+        } else {
+            None
+        };
         let last_stats_time = Arc::new(Mutex::new(Instant::now()));
 
         self.pool.install(|| {
-            let _ = (0..iterations).into_par_iter().try_for_each(|_| -> Result<(), ()> {
-                if stop_searching.load(Ordering::Relaxed) {
-                    return Err(()); // Stop this thread
-                }
-
-                self.run_simulation(state, &stop_searching);
-                completed_iterations.fetch_add(1, Ordering::Relaxed);
-
-                if let Some(t) = timeout {
-                    if start_time.elapsed() >= t {
-                        stop_searching.store(true, Ordering::Relaxed);
-                        return Err(()); // Stop this thread and signal others
+            let _ = (0..iterations)
+                .into_par_iter()
+                .try_for_each(|_| -> Result<(), ()> {
+                    if stop_searching.load(Ordering::Relaxed) {
+                        return Err(()); // Stop this thread
                     }
-                }
 
-                if let Some(interval) = stats_interval {
-                    let mut last_time = last_stats_time.lock();
-                    if last_time.elapsed() >= interval {
-                        // Stats are now displayed in the TUI debug panel instead of console output
-                        // to prevent interference with the TUI display
-                        *last_time = Instant::now();
+                    self.run_simulation(state, &stop_searching);
+                    completed_iterations.fetch_add(1, Ordering::Relaxed);
+
+                    if let Some(t) = timeout {
+                        if start_time.elapsed() >= t {
+                            stop_searching.store(true, Ordering::Relaxed);
+                            return Err(()); // Stop this thread and signal others
+                        }
                     }
-                }
-                Ok(())
-            });
+
+                    if let Some(interval) = stats_interval {
+                        let mut last_time = last_stats_time.lock();
+                        if last_time.elapsed() >= interval {
+                            // Stats are now displayed in the TUI debug panel instead of console output
+                            // to prevent interference with the TUI display
+                            *last_time = Instant::now();
+                        }
+                    }
+                    Ok(())
+                });
         });
 
         // After all simulations, the best move is the one most visited.
@@ -923,8 +1002,16 @@ impl<S: GameState> MCTS<S> {
             total_nodes: self.node_count.load(Ordering::Relaxed),
             root_visits,
             root_wins,
-            root_value: if root_visits > 0 { root_wins / root_visits as f64 / 2.0 } else { 0.0 },
-            children_stats: self.get_root_children_stats().into_iter().map(|(m, (w, v))| (format!("{:?}", m), (w, v))).collect(),
+            root_value: if root_visits > 0 {
+                root_wins / root_visits as f64 / 2.0
+            } else {
+                0.0
+            },
+            children_stats: self
+                .get_root_children_stats()
+                .into_iter()
+                .map(|(m, (w, v))| (format!("{:?}", m), (w, v)))
+                .collect(),
         };
 
         (best_move, stats)
@@ -937,7 +1024,12 @@ impl<S: GameState> MCTS<S> {
     /// * `state` - The current state of the game.
     /// * `iterations` - The total number of simulations to run.
     /// * `prune_interval` - How often to prune the tree (0 = no pruning during search).
-    pub fn search_with_pruning(&mut self, state: &S, iterations: i32, prune_interval: i32) -> (S::Move, SearchStatistics) {
+    pub fn search_with_pruning(
+        &mut self,
+        state: &S,
+        iterations: i32,
+        prune_interval: i32,
+    ) -> (S::Move, SearchStatistics) {
         // Ensure root node is fully expanded before starting parallel search
         self.ensure_root_expanded(state);
 
@@ -956,13 +1048,13 @@ impl<S: GameState> MCTS<S> {
             // Split search into chunks with pruning
             let chunks = iterations / prune_interval;
             let remainder = iterations % prune_interval;
-            
+
             for _ in 0..chunks {
                 run_iterations(self, prune_interval, &stop_searching);
                 // Prune after each chunk
                 self.auto_prune();
             }
-            
+
             // Run remaining iterations
             if remainder > 0 {
                 run_iterations(self, remainder, &stop_searching);
@@ -998,17 +1090,25 @@ impl<S: GameState> MCTS<S> {
             total_nodes: self.node_count.load(Ordering::Relaxed),
             root_visits,
             root_wins,
-            root_value: if root_visits > 0 { root_wins / root_visits as f64 / 2.0 } else { 0.0 },
-            children_stats: self.get_root_children_stats().into_iter().map(|(m, (w, v))| (format!("{:?}", m), (w, v))).collect(),
+            root_value: if root_visits > 0 {
+                root_wins / root_visits as f64 / 2.0
+            } else {
+                0.0
+            },
+            children_stats: self
+                .get_root_children_stats()
+                .into_iter()
+                .map(|(m, (w, v))| (format!("{:?}", m), (w, v)))
+                .collect(),
         };
 
         (best_move, stats)
     }
 
     /// Gets the current estimated timeout overhead in milliseconds
-    /// 
+    ///
     /// This is useful for debugging and monitoring the adaptive overhead estimation.
-    /// 
+    ///
     /// # Returns
     /// The current estimated overhead in milliseconds
     pub fn get_timeout_overhead_estimate(&self) -> f64 {
@@ -1017,7 +1117,7 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Gets the number of overhead measurements taken so far
-    /// 
+    ///
     /// # Returns
     /// The number of measurements used to calculate the current estimate
     pub fn get_overhead_measurement_count(&self) -> i32 {
@@ -1025,16 +1125,16 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Runs a single MCTS simulation with virtual loss support.
-    /// 
+    ///
     /// This is the core of the MCTS algorithm. It performs:
     /// 1. Selection: Traverse tree using PUCT to select promising paths
     /// 2. Expansion: Add new nodes to the tree when reaching a leaf
     /// 3. Simulation: Play out a random game from the new position
     /// 4. Backpropagation: Update statistics along the path
-    /// 
+    ///
     /// Virtual losses are used to coordinate parallel threads and prevent
     /// multiple threads from exploring the same path simultaneously.
-    /// 
+    ///
     /// # Arguments
     /// * `state` - The current game state to simulate from
     /// * `stop_flag` - Flag to check for early termination
@@ -1043,7 +1143,7 @@ impl<S: GameState> MCTS<S> {
         if stop_flag.load(Ordering::Relaxed) {
             return;
         }
-        
+
         let mut current_state = state.clone();
         let mut path: Vec<Arc<Node<S::Move>>> = Vec::with_capacity(64); // Pre-allocate reasonable capacity
         let mut path_players: Vec<i32> = Vec::with_capacity(64); // Track which player made each move
@@ -1063,7 +1163,7 @@ impl<S: GameState> MCTS<S> {
             if stop_flag.load(Ordering::Relaxed) {
                 return;
             }
-            
+
             let children_guard = current_node.children.read();
             if children_guard.is_empty() || current_state.is_terminal() {
                 drop(children_guard);
@@ -1072,13 +1172,13 @@ impl<S: GameState> MCTS<S> {
 
             moves_cache.clear();
             moves_cache.extend(current_state.get_possible_moves());
-            
+
             // Safety check: if no moves available, something is wrong
             if moves_cache.is_empty() {
                 // This shouldn't happen if game logic is correct, but handle gracefully
                 break;
             }
-            
+
             let parent_visits = current_node.visits.load(Ordering::Relaxed);
             // Use uniform prior probability for all moves since we don't have a neural network
             let prior_probability = 1.0 / moves_cache.len() as f64;
@@ -1089,9 +1189,13 @@ impl<S: GameState> MCTS<S> {
                         .iter()
                         .filter_map(|m| children_guard.get(m).map(|n| (m, n)))
                         .map(|(m, n)| {
-                            let puct = n.puct(parent_visits, self.exploration_parameter, prior_probability);
+                            let puct = n.puct(
+                                parent_visits,
+                                self.exploration_parameter,
+                                prior_probability,
+                            );
                             (m.clone(), n.clone(), puct)
-                        })
+                        }),
                 );
 
                 // If no expanded children exist, we need to break out of selection and go to expansion
@@ -1099,11 +1203,11 @@ impl<S: GameState> MCTS<S> {
                     drop(children_guard);
                     break;
                 }
-                
+
                 // Find the maximum PUCT score and collect best indices in one pass
                 let mut max_puct = f64::NEG_INFINITY;
                 let mut best_indices = Vec::with_capacity(4); // Most common case is 1-4 best moves
-                
+
                 for (i, (_, _, puct)) in candidates.iter().enumerate() {
                     if *puct > max_puct {
                         max_puct = *puct;
@@ -1113,12 +1217,12 @@ impl<S: GameState> MCTS<S> {
                         best_indices.push(i);
                     }
                 }
-                
+
                 // Safety check: best_indices should never be empty at this point
                 if best_indices.is_empty() {
                     panic!("PUCT selection failed: no best indices found");
                 }
-                
+
                 let selected_idx = if best_indices.len() == 1 {
                     best_indices[0]
                 } else {
@@ -1152,18 +1256,18 @@ impl<S: GameState> MCTS<S> {
             if stop_flag.load(Ordering::Relaxed) {
                 return;
             }
-            
+
             let should_expand = {
                 let current_nodes = self.node_count.load(Ordering::Relaxed) as usize;
                 let tree_capacity_available = current_nodes < self.max_nodes;
-                
+
                 if !tree_capacity_available {
                     false // Hard limit: no expansion if tree is full
                 } else {
                     let children_guard = current_node.children.read();
                     let is_leaf = children_guard.is_empty();
                     drop(children_guard);
-                    
+
                     if !is_leaf {
                         false // Already expanded by another thread
                     } else {
@@ -1174,31 +1278,31 @@ impl<S: GameState> MCTS<S> {
                         } else {
                             // Probabilistic expansion based on depth and visits for non-root nodes
                             let visits = current_node.visits.load(Ordering::Relaxed);
-                            
+
                             // Base expansion probability decreases with depth
                             // More visits increase the likelihood of expansion
                             let depth_factor = 1.0 / (1.0 + (depth as f64) * 0.5);
                             let visit_factor = (visits as f64).sqrt() / 10.0; // Encourage expansion for well-visited nodes
                             let expansion_probability = (depth_factor + visit_factor).min(1.0);
-                            
+
                             random_f64() < expansion_probability
                         }
                     }
                 }
             };
-            
+
             if should_expand {
                 let mut children_guard = current_node.children.write();
                 // Double-check it's still empty after acquiring write lock
                 if children_guard.is_empty() {
                     moves_cache.clear();
                     moves_cache.extend(current_state.get_possible_moves());
-                    
+
                     // Only proceed with expansion if we have moves
                     if !moves_cache.is_empty() {
                         let new_depth = current_node.depth + 1;
                         let mut new_nodes_count = 0;
-                        
+
                         for mv in moves_cache.iter() {
                             // Create a new node with the correct depth
                             let new_node = Arc::new(Node {
@@ -1211,9 +1315,10 @@ impl<S: GameState> MCTS<S> {
                             children_guard.insert(mv.clone(), new_node);
                             new_nodes_count += 1;
                         }
-                        
+
                         // Update node count
-                        self.node_count.fetch_add(new_nodes_count, Ordering::Relaxed);
+                        self.node_count
+                            .fetch_add(new_nodes_count, Ordering::Relaxed);
                     }
                 }
             }
@@ -1224,12 +1329,12 @@ impl<S: GameState> MCTS<S> {
         let mut sim_state = current_state.clone();
         let mut simulation_moves = 0;
         const MAX_SIMULATION_MOVES: usize = 1000; // Safeguard against infinite loops
-        
+
         // Track timing for intelligent stop flag checking
         let sim_phase_start = std::time::Instant::now();
         let mut last_stop_check = sim_phase_start;
         const STOP_CHECK_INTERVAL_MS: u64 = 5; // Check every 5ms
-        
+
         while !sim_state.is_terminal() && simulation_moves < MAX_SIMULATION_MOVES {
             // Intelligent stop flag checking: only check periodically based on time, not move count
             let now = std::time::Instant::now();
@@ -1239,7 +1344,7 @@ impl<S: GameState> MCTS<S> {
                 }
                 last_stop_check = now;
             }
-            
+
             moves_cache.clear();
             moves_cache.extend(sim_state.get_possible_moves());
             if moves_cache.is_empty() {
@@ -1247,20 +1352,20 @@ impl<S: GameState> MCTS<S> {
                 // but we break to prevent infinite loops
                 break;
             }
-            
+
             // Extra safety check to prevent empty range panic
             let moves_len = moves_cache.len();
             if moves_len == 0 {
                 // This should be caught by the above check, but being extra safe
                 break;
             }
-            
+
             let move_index = random_range(0, moves_len);
             let mv = &moves_cache[move_index];
             sim_state.make_move(mv);
             simulation_moves += 1;
         }
-        
+
         // If we hit the simulation limit, treat it as a draw
         let winner = if simulation_moves >= MAX_SIMULATION_MOVES {
             None // Treat as draw/timeout
@@ -1272,7 +1377,7 @@ impl<S: GameState> MCTS<S> {
         // Update the visit counts and win statistics for all nodes in the path.
         // Also remove virtual losses that were applied during selection.
         // For multi-player games, reward each node based on whether the player who made that move won
-        
+
         // Check stop flag before backpropagation
         if stop_flag.load(Ordering::Relaxed) {
             // Even if we're stopping, we need to remove virtual losses to keep the tree consistent
@@ -1284,14 +1389,15 @@ impl<S: GameState> MCTS<S> {
             }
             return;
         }
-        
-        for (i, (node, &player_who_moved)) in path.iter().zip(path_players.iter()).rev().enumerate() {
+
+        for (i, (node, &player_who_moved)) in path.iter().zip(path_players.iter()).rev().enumerate()
+        {
             // Remove virtual loss from all nodes except the last one (the leaf/terminal node)
             // which didn't have virtual loss applied during selection
             if i < path.len() - 1 {
                 node.remove_virtual_loss();
             }
-            
+
             node.visits.fetch_add(1, Ordering::Relaxed);
             let reward = match winner {
                 Some(w) if w == player_who_moved => 2, // Win for the player who made this move
@@ -1303,20 +1409,20 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Updates the running average of timeout overhead based on actual measurements
-    /// 
+    ///
     /// Uses an exponential moving average to adapt to changing system conditions
     /// while giving more weight to recent measurements. This method is now called
     /// less frequently (every ~8 searches) to reduce performance overhead.
-    /// 
+    ///
     /// # Arguments
     /// * `measured_overhead_ms` - The measured overhead in milliseconds
     fn update_overhead_estimate(&self, measured_overhead_ms: f64) {
         // Clamp the measured overhead to reasonable bounds to avoid outliers
         let clamped_overhead = measured_overhead_ms.max(5.0).min(1000.0);
-        
+
         let mut current_avg = self.timeout_overhead_ms.lock();
         let measurements = self.timeout_measurements.fetch_add(1, Ordering::Relaxed);
-        
+
         if measurements == 0 {
             // First measurement, just use it directly
             *current_avg = clamped_overhead;
@@ -1328,34 +1434,34 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Prunes children based on visit percentage relative to the best child
-    /// 
+    ///
     /// Removes children with less than the specified percentage of the most visited child's visits.
     /// This is more aggressive than absolute threshold pruning and helps focus on the most
     /// promising moves while preserving exploration diversity.
-    /// 
+    ///
     /// # Arguments
     /// * `min_percentage` - Minimum percentage of the best child's visits required to keep a child (0.0-1.0)
     pub fn prune_children_by_percentage(&mut self, min_percentage: f64) {
         let mut children = self.root.children.write();
-        
+
         if children.len() <= 1 {
             return; // No need to prune if we have 1 or fewer children
         }
-        
+
         // Find the maximum visit count among children
         let max_visits = children
             .values()
             .map(|node| node.visits.load(Ordering::Relaxed))
             .max()
             .unwrap_or(0);
-        
+
         if max_visits == 0 {
             return; // No visits yet, nothing to prune
         }
-        
+
         let min_visits_threshold = ((max_visits as f64) * min_percentage).ceil() as i32;
         let mut pruned_nodes = Vec::new();
-        
+
         children.retain(|_, node| {
             let visits = node.visits.load(Ordering::Relaxed);
             if visits < min_visits_threshold {
@@ -1367,7 +1473,7 @@ impl<S: GameState> MCTS<S> {
                 true
             }
         });
-        
+
         // Batch recycle all pruned nodes
         if !pruned_nodes.is_empty() {
             self.node_pool.return_nodes(pruned_nodes);
@@ -1375,27 +1481,34 @@ impl<S: GameState> MCTS<S> {
     }
 
     /// Returns grid-based statistics for games like Gomoku and Othello
-    /// 
+    ///
     /// Provides spatial analysis of the search tree for coordinate-based games.
     /// Each position on the grid shows how many times that move was considered
     /// and its expected value from the MCTS search.
-    /// 
+    ///
     /// # Arguments
     /// * `board_size` - Size of the game board (NxN)
-    /// 
+    ///
     /// # Returns
     /// Tuple of (visits_grid, values_grid, wins_grid, root_value) where each grid is board_size x board_size
-    pub fn get_grid_stats(&self, board_size: usize) -> (Vec<Vec<i32>>, Vec<Vec<f64>>, Vec<Vec<f64>>, f64) {
+    pub fn get_grid_stats(
+        &self,
+        board_size: usize,
+    ) -> (Vec<Vec<i32>>, Vec<Vec<f64>>, Vec<Vec<f64>>, f64) {
         let mut visits_grid = vec![vec![0; board_size]; board_size];
         let mut values_grid = vec![vec![0.0; board_size]; board_size];
         let mut wins_grid = vec![vec![0.0; board_size]; board_size];
-        
+
         let children = self.root.children.read();
         for (mv, node) in children.iter() {
             let visits = node.visits.load(Ordering::Relaxed);
             let wins = node.wins.load(Ordering::Relaxed) as f64;
-            let value = if visits > 0 { wins / (visits as f64) / 2.0 } else { 0.0 };
-            
+            let value = if visits > 0 {
+                wins / (visits as f64) / 2.0
+            } else {
+                0.0
+            };
+
             // Extract coordinates based on move type
             if let Some((r, c)) = self.extract_move_coordinates(mv, board_size) {
                 if r < board_size && c < board_size {
@@ -1405,30 +1518,34 @@ impl<S: GameState> MCTS<S> {
                 }
             }
         }
-        
+
         let root_visits = self.root.visits.load(Ordering::Relaxed);
         let root_wins = self.root.wins.load(Ordering::Relaxed) as f64;
-        let root_value = if root_visits > 0 { root_wins / (root_visits as f64) / 2.0 } else { 0.0 };
-        
+        let root_value = if root_visits > 0 {
+            root_wins / (root_visits as f64) / 2.0
+        } else {
+            0.0
+        };
+
         (visits_grid, values_grid, wins_grid, root_value)
     }
-    
+
     /// Extract coordinates from a move for grid display (helper function)
-    /// 
+    ///
     /// Attempts to parse row and column coordinates from a move's Debug representation.
     /// This is used for spatial visualization of search statistics on grid-based games.
-    /// 
+    ///
     /// # Arguments
     /// * `mv` - The move to extract coordinates from
     /// * `_board_size` - Board size (unused but kept for future validation)
-    /// 
+    ///
     /// # Returns
     /// Optional tuple of (row, column) coordinates if parsing succeeds
     fn extract_move_coordinates(&self, mv: &S::Move, _board_size: usize) -> Option<(usize, usize)> {
         // This is a trait-based approach that will need to be implemented per game type
         // For now, we'll use std::fmt::Debug to parse coordinates from the move string
         let move_str = format!("{:?}", mv);
-        
+
         // Try to parse coordinates from move string representations
         // Handle MoveWrapper patterns like MoveWrapper::Gomoku(GomokuMove(r, c))
         if move_str.contains("Gomoku(GomokuMove(") || move_str.contains("Othello(OthelloMove(") {
@@ -1438,7 +1555,9 @@ impl<S: GameState> MCTS<S> {
                     let coords_str = &move_str[start + 1..start + end];
                     let coords = coords_str.split(", ").collect::<Vec<_>>();
                     if coords.len() == 2 {
-                        if let (Ok(r), Ok(c)) = (coords[0].parse::<usize>(), coords[1].parse::<usize>()) {
+                        if let (Ok(r), Ok(c)) =
+                            (coords[0].parse::<usize>(), coords[1].parse::<usize>())
+                        {
                             return Some((r, c));
                         }
                     }
@@ -1447,11 +1566,12 @@ impl<S: GameState> MCTS<S> {
         }
         // Also handle direct move patterns for backward compatibility
         else if move_str.starts_with("GomokuMove(") || move_str.starts_with("OthelloMove(") {
-            let coords = move_str.trim_start_matches(|c: char| c != '(')
-                                 .trim_start_matches('(')
-                                 .trim_end_matches(')')
-                                 .split(", ")
-                                 .collect::<Vec<_>>();
+            let coords = move_str
+                .trim_start_matches(|c: char| c != '(')
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .split(", ")
+                .collect::<Vec<_>>();
             if coords.len() == 2 {
                 if let (Ok(r), Ok(c)) = (coords[0].parse::<usize>(), coords[1].parse::<usize>()) {
                     return Some((r, c));
@@ -1463,17 +1583,17 @@ impl<S: GameState> MCTS<S> {
 }
 
 /// ## Optimized Overhead Estimation
-/// 
+///
 /// The MCTS engine uses a dynamic, runtime-estimated buffer to account for thread
-/// coordination overhead when setting timeouts. This optimization reduces the 
+/// coordination overhead when setting timeouts. This optimization reduces the
 /// performance impact of overhead measurements while maintaining accuracy:
-/// 
+///
 /// - **Reduced Frequency**: Measurements are taken every 8 searches instead of every search
 /// - **Significance Threshold**: Only updates the estimate if the deviation is >10ms
 /// - **Outlier Protection**: Clamps measured values between 5ms and 1000ms
 /// - **Adaptive Alpha**: Uses 15% weight for new measurements (vs 10% before) since we measure less often
 /// - **Selective Updates**: Only updates minimum overhead estimate if cleanup time exceeds current estimate
-/// 
+///
 /// This approach reduces overhead measurement costs by ~87% while maintaining reasonable
 /// accuracy for timeout estimation under varying system loads.
 
@@ -1520,7 +1640,7 @@ mod tests {
             if self.is_terminal() {
                 return vec![];
             }
-            
+
             let mut moves = Vec::new();
             for i in 0..3 {
                 for j in 0..3 {
@@ -1547,18 +1667,30 @@ mod tests {
         fn get_winner(&self) -> Option<i32> {
             // Check rows, columns, and diagonals for winner
             for i in 0..3 {
-                if self.board[i][0] != 0 && self.board[i][0] == self.board[i][1] && self.board[i][1] == self.board[i][2] {
+                if self.board[i][0] != 0
+                    && self.board[i][0] == self.board[i][1]
+                    && self.board[i][1] == self.board[i][2]
+                {
                     return Some(self.board[i][0]);
                 }
-                if self.board[0][i] != 0 && self.board[0][i] == self.board[1][i] && self.board[1][i] == self.board[2][i] {
+                if self.board[0][i] != 0
+                    && self.board[0][i] == self.board[1][i]
+                    && self.board[1][i] == self.board[2][i]
+                {
                     return Some(self.board[0][i]);
                 }
             }
             // Diagonals
-            if self.board[0][0] != 0 && self.board[0][0] == self.board[1][1] && self.board[1][1] == self.board[2][2] {
+            if self.board[0][0] != 0
+                && self.board[0][0] == self.board[1][1]
+                && self.board[1][1] == self.board[2][2]
+            {
                 return Some(self.board[0][0]);
             }
-            if self.board[0][2] != 0 && self.board[0][2] == self.board[1][1] && self.board[1][1] == self.board[2][0] {
+            if self.board[0][2] != 0
+                && self.board[0][2] == self.board[1][1]
+                && self.board[1][1] == self.board[2][0]
+            {
                 return Some(self.board[0][2]);
             }
             None
@@ -1573,35 +1705,45 @@ mod tests {
     fn test_overhead_estimation_optimization() {
         let mut mcts = MCTS::<TestGame>::new(1.4, 1, 1000);
         let game = TestGame::new();
-        
+
         // Verify initial overhead estimate
         let initial_estimate = mcts.get_timeout_overhead_estimate();
         assert_eq!(initial_estimate, 50.0); // Should start with 50ms
-        
+
         // Verify initial measurement count
         let initial_count = mcts.get_overhead_measurement_count();
         assert_eq!(initial_count, 0);
-        
+
         // Run multiple searches with timeout to potentially trigger overhead measurement
         // The timeout and measurement triggering depends on actual timing
         for _i in 0..16 {
             // Use a short timeout and many iterations to likely trigger the timeout
             let _ = mcts.search(&game, 100000, 1, 1); // 1 second timeout with many iterations
         }
-        
+
         // Check the results - the optimization should limit measurements
         let final_count = mcts.get_overhead_measurement_count();
         let final_estimate = mcts.get_timeout_overhead_estimate();
-        
+
         // Verify that the estimate is within reasonable bounds
-        assert!(final_estimate >= 5.0 && final_estimate <= 1000.0, 
-               "Estimate should be within reasonable bounds, got {}", final_estimate);
-        
+        assert!(
+            final_estimate >= 5.0 && final_estimate <= 1000.0,
+            "Estimate should be within reasonable bounds, got {}",
+            final_estimate
+        );
+
         // The measurement frequency should be limited by our optimization
         // We did 16 searches, so at most we should see 2-3 measurements (every 8th search)
-        println!("Final measurement count: {}, Final estimate: {}ms", final_count, final_estimate);
-        
+        println!(
+            "Final measurement count: {}, Final estimate: {}ms",
+            final_count, final_estimate
+        );
+
         // Test the frequency optimization - measurements should be less frequent than searches
-        assert!(final_count <= 4, "Should not measure overhead too frequently, got {} measurements for 16 searches", final_count);
+        assert!(
+            final_count <= 4,
+            "Should not measure overhead too frequently, got {} measurements for 16 searches",
+            final_count
+        );
     }
 }

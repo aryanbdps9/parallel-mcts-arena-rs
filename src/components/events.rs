@@ -1,8 +1,8 @@
 //! Event system for component communication.
 
-use std::collections::HashMap;
-use std::any::Any;
 use crossterm::event::KeyCode;
+use std::any::Any;
+use std::collections::HashMap;
 
 /// Input events that can be sent to components
 #[derive(Debug, Clone)]
@@ -22,16 +22,16 @@ pub type CustomEventData = HashMap<String, Box<dyn Any + Send + Sync>>;
 pub enum ComponentEvent {
     /// Input events (keyboard, mouse, etc.)
     Input(InputEvent),
-    
+
     /// Focus events
     Focus(FocusEvent),
-    
+
     /// Custom events with arbitrary data
     Custom {
         event_type: String,
         data: CustomEventData,
     },
-    
+
     /// Update event (sent every frame)
     Update,
 }
@@ -57,12 +57,9 @@ impl ComponentEvent {
             data: HashMap::new(),
         }
     }
-    
+
     /// Create a custom event with data
-    pub fn custom_with_data(
-        event_type: impl Into<String>, 
-        data: CustomEventData
-    ) -> Self {
+    pub fn custom_with_data(event_type: impl Into<String>, data: CustomEventData) -> Self {
         ComponentEvent::Custom {
             event_type: event_type.into(),
             data,

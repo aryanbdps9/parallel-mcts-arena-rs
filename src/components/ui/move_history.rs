@@ -1,10 +1,6 @@
 //! Move history component that displays and manages game move history.
 
-use ratatui::{
-    layout::Rect,
-    Frame,
-    text::Line,
-};
+use ratatui::{Frame, layout::Rect, text::Line};
 use std::any::Any;
 
 use crate::app::{App, MoveHistoryEntry};
@@ -38,7 +34,7 @@ impl MoveHistoryComponent {
     pub fn add_move(&mut self, entry: MoveHistoryEntry) {
         self.move_history.push(entry);
         self.update_scrollable_content();
-        
+
         if self.auto_scroll {
             self.scrollable.scroll_to_bottom();
         }
@@ -62,16 +58,13 @@ impl MoveHistoryComponent {
     }
 
     fn update_scrollable_content(&mut self) {
-        let lines: Vec<Line<'static>> = self.move_history
+        let lines: Vec<Line<'static>> = self
+            .move_history
             .iter()
             .enumerate()
             .map(|(i, entry)| {
                 let player_name = format!("Player {}", entry.player + 1);
-                let move_str = format!("{}. {}: {:?}", 
-                    i + 1, 
-                    player_name,
-                    entry.a_move
-                );
+                let move_str = format!("{}. {}: {:?}", i + 1, player_name, entry.a_move);
                 Line::from(move_str)
             })
             .collect();
@@ -95,7 +88,7 @@ impl Component for MoveHistoryComponent {
 
     fn render(&mut self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
         self.area = Some(area);
-        
+
         // Delegate rendering to the scrollable component
         self.scrollable.render(frame, area, app)
     }

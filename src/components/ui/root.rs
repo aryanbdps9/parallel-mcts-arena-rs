@@ -29,20 +29,14 @@
 //! thread safety considerations. All AI computation happens in background threads
 //! and communicates via message passing handled at the App level.
 
-use ratatui::{
-    layout::Rect,
-    Frame,
-};
+use ratatui::{Frame, layout::Rect};
 
 use crate::app::{App, AppMode};
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::ComponentEvent;
 use crate::components::ui::{
-    game_selection::GameSelectionComponent,
-    settings::SettingsComponent,
-    player_config::PlayerConfigComponent,
-    in_game::InGameComponent,
-    game_over::GameOverComponent,
+    game_over::GameOverComponent, game_selection::GameSelectionComponent, in_game::InGameComponent,
+    player_config::PlayerConfigComponent, settings::SettingsComponent,
 };
 
 /// The root component that serves as the top-level container for the entire application
@@ -71,23 +65,23 @@ pub struct RootComponent {
     /// Unique identifier for this component instance
     /// Used by the component system for event routing and debugging
     id: ComponentId,
-    
+
     /// Main menu component for game selection and application entry point
     /// Active when AppMode::GameSelection
     game_selection: GameSelectionComponent,
-    
+
     /// Settings and configuration component for all application parameters
     /// Active when AppMode::Settings
     settings: SettingsComponent,
-    
+
     /// Player configuration component for setting up human/AI players
     /// Active when AppMode::PlayerConfig
     player_config: PlayerConfigComponent,
-    
+
     /// Main gameplay component handling the active game interface
     /// Active when AppMode::InGame
     in_game: InGameComponent,
-    
+
     /// End-game results and continuation options component
     /// Active when AppMode::GameOver
     game_over: GameOverComponent,
@@ -125,7 +119,7 @@ impl Component for RootComponent {
     fn id(&self) -> ComponentId {
         self.id
     }
-    
+
     /// Renders the currently active child component based on application mode
     ///
     /// This method implements the core delegation pattern of the RootComponent.
@@ -153,7 +147,7 @@ impl Component for RootComponent {
             AppMode::GameOver => self.game_over.render(frame, area, app),
         }
     }
-    
+
     /// Routes events to the currently active child component
     ///
     /// Events are forwarded to the child component corresponding to the current
@@ -202,7 +196,7 @@ impl Component for RootComponent {
             &mut self.game_over,
         ]
     }
-    
+
     /// Provides immutable access to all child components
     ///
     /// This method is used for read-only operations on child components,
@@ -219,7 +213,7 @@ impl Component for RootComponent {
             &self.game_over,
         ]
     }
-    
+
     // Implement default component base functionality using the macro
     // This provides common component methods like focus management, update, etc.
     crate::impl_component_base!(RootComponent);

@@ -1,19 +1,19 @@
 //! Game stats component for Blokus UI.
 
+use mcts::GameState;
 use ratatui::{
-    layout::Rect,
     Frame,
-    widgets::{Block, Borders, Paragraph, Tabs},
-    style::{Style, Color, Modifier},
+    layout::Rect,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Tabs},
 };
 use std::any::Any;
-use mcts::GameState;
 
 use crate::app::App;
-use crate::game_wrapper::GameWrapper;
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::{ComponentEvent, InputEvent};
+use crate::game_wrapper::GameWrapper;
 
 /// Component for displaying game statistics and history
 pub struct BlokusGameStatsComponent {
@@ -42,8 +42,7 @@ impl BlokusGameStatsComponent {
     /// Check if a point is within this component's area
     pub fn contains_point(&self, x: u16, y: u16) -> bool {
         if let Some(area) = self.area {
-            x >= area.x && x < area.x + area.width &&
-            y >= area.y && y < area.y + area.height
+            x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
         } else {
             false
         }
@@ -60,7 +59,12 @@ impl BlokusGameStatsComponent {
     }
 
     /// Render the statistics tab content
-    fn render_stats_content(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
+    fn render_stats_content(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        app: &App,
+    ) -> ComponentResult<()> {
         let mut lines = Vec::new();
 
         if let GameWrapper::Blokus(state) = &app.game_wrapper {
@@ -85,29 +89,26 @@ impl BlokusGameStatsComponent {
             for player in 1..=4 {
                 let available_pieces = state.get_available_pieces(player);
                 let pieces_count = available_pieces.len();
-                
+
                 // For now, use pieces count as a simple score approximation
                 // TODO: Implement proper scoring when available
                 let score = 21 - pieces_count; // Simple approximation
-                
+
                 let color = player_colors[(player - 1) as usize];
                 let is_current = player == current_player;
-                
+
                 let style = if is_current {
-                    Style::default().fg(color).add_modifier(Modifier::BOLD).bg(Color::DarkGray)
+                    Style::default()
+                        .fg(color)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(Color::DarkGray)
                 } else {
                     Style::default().fg(color)
                 };
 
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{}: ", player_names[(player - 1) as usize]),
-                        style,
-                    ),
-                    Span::styled(
-                        format!("{} pieces, ~{} points", pieces_count, score),
-                        style,
-                    ),
+                    Span::styled(format!("{}: ", player_names[(player - 1) as usize]), style),
+                    Span::styled(format!("{} pieces, ~{} points", pieces_count, score), style),
                 ]));
             }
 
@@ -117,10 +118,7 @@ impl BlokusGameStatsComponent {
             let total_moves = app.move_history.len();
             lines.push(Line::from(vec![
                 Span::styled("Moves played: ", Style::default().fg(Color::White)),
-                Span::styled(
-                    total_moves.to_string(),
-                    Style::default().fg(Color::Yellow),
-                ),
+                Span::styled(total_moves.to_string(), Style::default().fg(Color::Yellow)),
             ]));
 
             // AI thinking info
@@ -128,7 +126,9 @@ impl BlokusGameStatsComponent {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "AI is thinking...",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::ITALIC),
                 )));
             }
         }
@@ -146,7 +146,12 @@ impl BlokusGameStatsComponent {
     }
 
     /// Render the history tab content
-    fn render_history_content(&self, frame: &mut Frame, area: Rect, app: &App) -> ComponentResult<()> {
+    fn render_history_content(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        app: &App,
+    ) -> ComponentResult<()> {
         let mut lines = Vec::new();
         let player_colors = [Color::Red, Color::Blue, Color::Green, Color::Yellow];
         let player_names = ["P1", "P2", "P3", "P4"];
@@ -172,7 +177,8 @@ impl BlokusGameStatsComponent {
                     if blokus_move.0 == usize::MAX {
                         "Pass".to_string()
                     } else {
-                        let piece_char = std::char::from_u32(('A' as u32) + (blokus_move.0 as u32)).unwrap_or('?');
+                        let piece_char = std::char::from_u32(('A' as u32) + (blokus_move.0 as u32))
+                            .unwrap_or('?');
                         format!("{}@({},{})", piece_char, blokus_move.2, blokus_move.3)
                     }
                 }
@@ -180,25 +186,24 @@ impl BlokusGameStatsComponent {
             };
 
             lines.push(Line::from(vec![
+                Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{}. ", i + 1),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("{}: ", player_names.get((player - 1) as usize).unwrap_or(&"??")),
+                    format!(
+                        "{}: ",
+                        player_names.get((player - 1) as usize).unwrap_or(&"??")
+                    ),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    move_desc,
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(move_desc, Style::default().fg(Color::White)),
             ]));
         }
 
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "No moves yet",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             )));
         }
 
@@ -230,25 +235,24 @@ impl Component for BlokusGameStatsComponent {
 
     fn handle_event(&mut self, event: &ComponentEvent, _app: &mut App) -> EventResult {
         match event {
-            ComponentEvent::Input(InputEvent::KeyPress(key)) => {
-                match key {
-                    crossterm::event::KeyCode::Tab => {
-                        self.next_tab();
-                        return Ok(true);
-                    }
-                    crossterm::event::KeyCode::BackTab => {
-                        self.prev_tab();
-                        return Ok(true);
-                    }
-                    _ => {}
+            ComponentEvent::Input(InputEvent::KeyPress(key)) => match key {
+                crossterm::event::KeyCode::Tab => {
+                    self.next_tab();
+                    return Ok(true);
                 }
-            }
+                crossterm::event::KeyCode::BackTab => {
+                    self.prev_tab();
+                    return Ok(true);
+                }
+                _ => {}
+            },
             ComponentEvent::Input(InputEvent::MouseClick { x, y, .. }) => {
                 if self.contains_point(*x, *y) {
                     // Handle tab switching via mouse clicks on tab area
                     if let Some(area) = self.area {
                         // Check if click is on the tab area (first line)
-                        if *y == area.y + 1 { // Account for border
+                        if *y == area.y + 1 {
+                            // Account for border
                             // Simple tab switching - click left half for stats, right half for history
                             let mid_x = area.x + area.width / 2;
                             if *x < mid_x {
@@ -274,7 +278,11 @@ impl Component for BlokusGameStatsComponent {
         let tabs = Tabs::new(tab_titles)
             .block(Block::default().borders(Borders::ALL))
             .style(Style::default().fg(Color::White))
-            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
             .select(self.current_tab);
 
         frame.render_widget(tabs, area);

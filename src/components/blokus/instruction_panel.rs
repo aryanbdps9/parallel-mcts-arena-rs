@@ -1,11 +1,11 @@
 //! Instruction panel component for Blokus UI.
 
 use ratatui::{
-    layout::Rect,
     Frame,
-    widgets::{Block, Borders, Paragraph, Wrap},
-    style::{Style, Color, Modifier},
+    layout::Rect,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use std::any::Any;
 
@@ -41,21 +41,37 @@ impl BlokusInstructionPanelComponent {
 
         // Game-specific instructions
         lines.push(Line::from(vec![
-            Span::styled("Blokus: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled("Place pieces to corner-connect with your own pieces", Style::default().fg(Color::White)),
+            Span::styled(
+                "Blokus: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Place pieces to corner-connect with your own pieces",
+                Style::default().fg(Color::White),
+            ),
         ]));
 
         lines.push(Line::from(""));
 
         // Controls
-        lines.push(Line::from(vec![
-            Span::styled("Controls: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "Controls: ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]));
 
         if app.is_current_player_ai() {
             lines.push(Line::from(vec![
                 Span::styled("• ", Style::default().fg(Color::White)),
-                Span::styled("AI is thinking... Please wait", Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC)),
+                Span::styled(
+                    "AI is thinking... Please wait",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::ITALIC),
+                ),
             ]));
         } else {
             lines.push(Line::from(vec![
@@ -91,7 +107,10 @@ impl BlokusInstructionPanelComponent {
             lines.push(Line::from(vec![
                 Span::styled("• ", Style::default().fg(Color::White)),
                 Span::styled("Mouse: ", Style::default().fg(Color::Green)),
-                Span::styled("Click to select pieces/place", Style::default().fg(Color::White)),
+                Span::styled(
+                    "Click to select pieces/place",
+                    Style::default().fg(Color::White),
+                ),
             ]));
 
             lines.push(Line::from(vec![
@@ -113,7 +132,10 @@ impl BlokusInstructionPanelComponent {
         lines.push(Line::from(vec![
             Span::styled("• ", Style::default().fg(Color::White)),
             Span::styled("Tab: ", Style::default().fg(Color::Green)),
-            Span::styled("Switch between Stats/History", Style::default().fg(Color::White)),
+            Span::styled(
+                "Switch between Stats/History",
+                Style::default().fg(Color::White),
+            ),
         ]));
 
         lines.push(Line::from(vec![
@@ -179,8 +201,7 @@ impl Component for BlokusInstructionPanelComponent {
                 content_area.width,
                 1,
             );
-            let paragraph = Paragraph::new(line.clone())
-                .wrap(Wrap { trim: true });
+            let paragraph = Paragraph::new(line.clone()).wrap(Wrap { trim: true });
             frame.render_widget(paragraph, line_area);
         }
 

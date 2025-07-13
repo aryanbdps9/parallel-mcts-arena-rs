@@ -41,15 +41,15 @@
 //! minimal memory overhead compared to using the game types directly.
 
 // Import all game-specific types that will be wrapped
-use crate::games::connect4::{Connect4Move, Connect4State};   // Gravity-based 4-in-a-row game
-use crate::games::gomoku::{GomokuMove, GomokuState};         // Classic 5-in-a-row game
-use crate::games::blokus::{BlokusMove, BlokusState};         // Multi-player territory game
-use crate::games::othello::{OthelloMove, OthelloState};      // Reversi/Othello territory game
-use mcts::GameState;                                         // Core trait for MCTS compatibility
-use std::fmt;                                                // Formatting traits for display
+use crate::games::blokus::{BlokusMove, BlokusState}; // Multi-player territory game
+use crate::games::connect4::{Connect4Move, Connect4State}; // Gravity-based 4-in-a-row game
+use crate::games::gomoku::{GomokuMove, GomokuState}; // Classic 5-in-a-row game
+use crate::games::othello::{OthelloMove, OthelloState}; // Reversi/Othello territory game
+use mcts::GameState; // Core trait for MCTS compatibility
+use std::fmt; // Formatting traits for display
 
 /// Wrapper enum for all supported game types
-/// 
+///
 /// This enum provides a unified interface for all game implementations while
 /// maintaining type safety and zero-cost abstractions. Each variant contains
 /// the complete game state for its respective game type.
@@ -72,34 +72,34 @@ use std::fmt;                                                // Formatting trait
 #[derive(Debug, Clone)]
 pub enum GameWrapper {
     /// Gomoku (Five in a Row) game state
-    /// 
+    ///
     /// Classic board game where players alternate placing stones on a grid,
     /// trying to get five in a row horizontally, vertically, or diagonally.
     /// - Variable board size (typically 15×15 or 19×19)
     /// - Simple rules but deep strategic gameplay
     /// - Good for testing basic MCTS functionality
     Gomoku(GomokuState),
-    
+
     /// Connect 4 game state
-    /// 
+    ///
     /// Gravity-based game where pieces fall to the lowest available position
     /// in each column. Players try to get four in a row.
     /// - Typically 7 wide × 6 tall board
     /// - Fast-paced tactical gameplay
     /// - Constrained move space (only 7 possible moves per turn)
     Connect4(Connect4State),
-    
+
     /// Blokus game state
-    /// 
+    ///
     /// Complex 4-player game where players place polyomino pieces on a board,
     /// trying to maximize territory while blocking opponents.
     /// - Fixed 20×20 board with 4 players
     /// - 21 unique pieces per player with multiple orientations
     /// - Very high complexity and branching factor
     Blokus(BlokusState),
-    
+
     /// Othello (Reversi) game state
-    /// 
+    ///
     /// Territory control game where players place discs and flip opponent
     /// pieces by flanking them. Winner has most pieces at end.
     /// - Fixed 8×8 board
@@ -109,7 +109,7 @@ pub enum GameWrapper {
 }
 
 /// Wrapper enum for all supported move types
-/// 
+///
 /// Provides unified handling of moves across all game types while maintaining
 /// type safety and allowing game-specific move data to be preserved.
 ///
@@ -129,28 +129,28 @@ pub enum GameWrapper {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MoveWrapper {
     /// Gomoku move: simple coordinate placement
-    /// 
+    ///
     /// Contains (row, col) coordinates where the player wants to place their stone.
     /// Move validation ensures the position is empty and within board bounds.
     Gomoku(GomokuMove),
-    
+
     /// Connect4 move: column selection with gravity
-    /// 
+    ///
     /// Contains only the column number where the piece should be dropped.
     /// The actual row is determined by gravity (lowest available position).
     Connect4(Connect4Move),
-    
+
     /// Blokus move: complex piece placement
-    /// 
+    ///
     /// Contains (piece_id, transformation_id, row, col) specifying:
     /// - Which of the 21 pieces to place
     /// - Which transformation (rotation/reflection) to use
     /// - Where to place the piece's anchor point
     /// This is the most complex move type due to piece shape validation.
     Blokus(BlokusMove),
-    
+
     /// Othello move: coordinate placement with captures
-    /// 
+    ///
     /// Contains (row, col) coordinates, but move execution automatically
     /// calculates and performs all necessary piece captures in all directions.
     Othello(OthelloMove),
@@ -158,7 +158,7 @@ pub enum MoveWrapper {
 
 impl fmt::Display for MoveWrapper {
     /// Formats moves for display in UI and logs
-    /// 
+    ///
     /// Each game type gets a compact string representation showing the essential move info.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -172,7 +172,7 @@ impl fmt::Display for MoveWrapper {
 
 impl fmt::Display for GameWrapper {
     /// Formats the game state for display
-    /// 
+    ///
     /// Delegates to the specific game's Display implementation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -270,9 +270,9 @@ impl GameState for GameWrapper {
 
 impl GameWrapper {
     /// Returns the size of the game board
-    /// 
+    ///
     /// For most games this is the board height/width, but for Connect4 it's the height.
-    /// 
+    ///
     /// # Returns
     /// Board size as number of rows
     pub fn get_board_size(&self) -> usize {
@@ -280,7 +280,7 @@ impl GameWrapper {
     }
 
     /// Returns the number of pieces needed in a row to win
-    /// 
+    ///
     /// # Returns
     /// Number of pieces needed for victory (e.g., 5 for Gomoku, 4 for Connect4)
     pub fn get_line_size(&self) -> usize {
@@ -293,7 +293,7 @@ impl GameWrapper {
     }
 
     /// Returns coordinates of the last move made, if any
-    /// 
+    ///
     /// # Returns
     /// Optional vector of (row, col) coordinates for the last move
     pub fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
@@ -306,10 +306,10 @@ impl GameWrapper {
     }
 
     /// Checks if a move is legal in the current game state
-    /// 
+    ///
     /// # Arguments
     /// * `mv` - The move to check
-    /// 
+    ///
     /// # Returns
     /// True if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &MoveWrapper) -> bool {

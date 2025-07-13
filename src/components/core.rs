@@ -36,11 +36,8 @@
 //! - **Event Filtering**: Events are only sent to components that can handle them
 //! - **Component Caching**: Expensive computations are cached when possible
 
+use ratatui::{Frame, layout::Rect};
 use std::any::Any;
-use ratatui::{
-    layout::Rect,
-    Frame,
-};
 
 /// Unique identifier for components in the UI system
 ///
@@ -124,7 +121,7 @@ pub enum ComponentError {
     /// - Resource loading failures
     /// - Invalid rendering state
     RenderError(String),
-    
+
     /// Error occurred during event processing
     ///
     /// This includes failures in:
@@ -133,7 +130,7 @@ pub enum ComponentError {
     /// - State transition errors
     /// - Invalid user input handling
     EventError(String),
-    
+
     /// Error occurred during component update
     ///
     /// This includes failures in:
@@ -199,7 +196,7 @@ pub trait Component: Any + Send + Sync {
     /// # Returns
     /// The ComponentId assigned to this instance during creation
     fn id(&self) -> ComponentId;
-    
+
     /// Get the compile-time type name of this component
     ///
     /// This is primarily used for debugging, logging, and error reporting.
@@ -215,7 +212,7 @@ pub trait Component: Any + Send + Sync {
     fn type_name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
-    
+
     /// Render the component to the terminal frame
     ///
     /// This is the core method that every component must implement. It's
@@ -236,8 +233,13 @@ pub trait Component: Any + Send + Sync {
     /// - Handle gracefully if the area is too small for your content
     /// - Consider caching expensive layout calculations
     /// - Use appropriate styling and colors for consistency
-    fn render(&mut self, frame: &mut Frame, area: Rect, app: &crate::app::App) -> ComponentResult<()>;
-    
+    fn render(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        app: &crate::app::App,
+    ) -> ComponentResult<()>;
+
     /// Handle events sent to this component
     ///
     /// This method processes user input and system events. The default
@@ -259,42 +261,46 @@ pub trait Component: Any + Send + Sync {
     /// - Validate all input before updating application state
     /// - Return true only when the UI actually needs to be updated
     /// - Use the app reference sparingly and only for necessary updates
-    fn handle_event(&mut self, event: &crate::components::events::ComponentEvent, app: &mut crate::app::App) -> EventResult {
+    fn handle_event(
+        &mut self,
+        event: &crate::components::events::ComponentEvent,
+        app: &mut crate::app::App,
+    ) -> EventResult {
         let _ = (event, app);
         Ok(false) // Default: don't consume events
     }
-    
+
     /// Update component state (called every frame)
     fn update(&mut self, app: &mut crate::app::App) -> UpdateResult {
         let _ = app;
         Ok(()) // Default: no-op
     }
-    
+
     /// Get mutable child components
     fn children_mut(&mut self) -> Vec<&mut dyn Component> {
         Vec::new() // Default: no children
     }
-    
+
     /// Get child components
     fn children(&self) -> Vec<&dyn Component> {
         Vec::new() // Default: no children
     }
-    
+
     /// Check if component is visible
     fn is_visible(&self) -> bool {
         true // Default: visible
     }
-    
+
     /// Called when component is mounted
     fn on_mount(&mut self, _app: &mut crate::app::App) {
         // Default: no-op
     }
-    
+
     /// Called when component is unmounted
     fn on_unmount(&mut self, _app: &mut crate::app::App) {
         // Default: no-op
     }
-    
+
     /// Get component as Any for downcasting
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -307,25 +313,25 @@ macro_rules! impl_component_base {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-        
+
         fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
             self
         }
-        
+
         fn type_name(&self) -> &'static str {
             std::any::type_name::<$type>()
         }
     };
-    
+
     ($type:ty, $name:expr) => {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-        
+
         fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
             self
         }
-        
+
         fn type_name(&self) -> &'static str {
             $name
         }
