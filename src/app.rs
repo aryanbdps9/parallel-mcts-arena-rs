@@ -35,7 +35,7 @@
 
 // Import dependencies for game management and UI coordination
 use crate::game_wrapper::{GameWrapper, MoveWrapper}; // Unified game interface
-use crate::tui::blokus_ui::BlokusUIConfig; // Blokus-specific UI configuration
+use crate::tui::games::blokus::BlokusUIConfig; // Blokus-specific UI configuration
 use crate::tui::layout::LayoutConfig; // Responsive UI layout management
 use crate::tui::mouse::DragState; // Mouse interaction state tracking
 use mcts::{GameState, MCTS}; // Monte Carlo Tree Search engine

@@ -20,7 +20,7 @@ use crate::app::{ActiveTab, App, AppMode, GameStatus, Player};
 use crate::components::ui::{GenericGrid, GenericGridConfig};
 use crate::game_wrapper::GameWrapper;
 use crate::games::blokus::BlokusState;
-use crate::tui::blokus_ui;
+use crate::tui::games::{blokus, connect4, gomoku, othello};
 use mcts::GameState;
 use ratatui::prelude::*;
 use ratatui::widgets::{
@@ -1047,7 +1047,6 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     match &app.game_wrapper {
-        GameWrapper::Blokus(state) => draw_blokus_board(f, state, inner_area),
         _ => draw_standard_board(f, app, inner_area),
     }
 }
@@ -1092,46 +1091,9 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
             && !app.is_current_player_ai();
 
         let (symbol, mut style) = match &app.game_wrapper {
-            GameWrapper::Connect4(_) => match cell {
-                1 => ("🔴", Style::default().fg(Color::Red)),
-                -1 => ("🟡", Style::default().fg(Color::Yellow)),
-                _ => ("·", Style::default().fg(Color::DarkGray)),
-            },
-            GameWrapper::Othello(_) => match cell {
-                1 => ("⚫", Style::default().fg(Color::White)),
-                -1 => ("⚪", Style::default().fg(Color::White)),
-                _ => {
-                    if is_cursor_actual {
-                        (
-                            "▓",
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        )
-                    } else {
-                        ("·", Style::default().fg(Color::DarkGray))
-                    }
-                }
-            },
-            _ => {
-                // Gomoku and others
-                match cell {
-                    1 => ("X", Style::default().fg(Color::Red)),
-                    -1 => ("O", Style::default().fg(Color::Blue)),
-                    _ => {
-                        if is_cursor_actual {
-                            (
-                                "▓",
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            )
-                        } else {
-                            ("·", Style::default().fg(Color::DarkGray))
-                        }
-                    }
-                }
-            }
+            GameWrapper::Connect4(_) => connect4::get_cell_style(cell, is_cursor_actual),
+            GameWrapper::Othello(_) => othello::get_cell_style(cell, is_cursor_actual),
+            _ => gomoku::get_cell_style(cell, is_cursor_actual),
         };
 
         if is_cursor_actual && cell != 0 {
@@ -1155,114 +1117,4 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
 /// Displays the 20x20 Blokus board with colored squares for each player's pieces.
 /// Highlights the most recent move and can show ghost pieces for preview during
 /// human player turns.
-///
-/// # Arguments
-/// * `f` - Ratatui frame for rendering
-/// * `state` - Current Blokus game state
-/// * `area` - Screen area to render within
-fn draw_blokus_board(f: &mut Frame, state: &BlokusState, area: Rect) {
-    let board = state.get_board();
-    let board_height = board.len();
-    let board_width = if board_height > 0 { board[0].len() } else { 0 };
 
-    if board_height == 0 || board_width == 0 {
-        let paragraph = Paragraph::new("No board to display");
-        f.render_widget(paragraph, area);
-        return;
-    }
-
-    // Get last move positions for highlighting
-    let last_move_positions: std::collections::HashSet<(usize, usize)> = state
-        .get_last_move()
-        .map(|coords| coords.into_iter().collect())
-        .unwrap_or_default();
-
-    // For Blokus, create a symmetrical grid with touching squares
-    let mut board_lines = Vec::new();
-
-    for (r, row) in board.iter().enumerate() {
-        let mut line_spans = Vec::new();
-        for (c, &cell) in row.iter().enumerate() {
-            let is_last_move = last_move_positions.contains(&(r, c));
-
-            let (symbol, style) = match cell {
-                1 => {
-                    let color = if is_last_move {
-                        Color::LightRed
-                    } else {
-                        Color::Red
-                    };
-                    (
-                        "██",
-                        Style::default().fg(color).add_modifier(if is_last_move {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                    )
-                }
-                2 => {
-                    let color = if is_last_move {
-                        Color::LightBlue
-                    } else {
-                        Color::Blue
-                    };
-                    (
-                        "██",
-                        Style::default().fg(color).add_modifier(if is_last_move {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                    )
-                }
-                3 => {
-                    let color = if is_last_move {
-                        Color::LightGreen
-                    } else {
-                        Color::Green
-                    };
-                    (
-                        "██",
-                        Style::default().fg(color).add_modifier(if is_last_move {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                    )
-                }
-                4 => {
-                    let color = if is_last_move {
-                        Color::LightYellow
-                    } else {
-                        Color::Yellow
-                    };
-                    (
-                        "██",
-                        Style::default().fg(color).add_modifier(if is_last_move {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                    )
-                }
-                _ => {
-                    // Chess-like pattern for empty squares - alternating light and dark
-                    let is_light_square = (r + c) % 2 == 0;
-                    if is_light_square {
-                        ("░░", Style::default().fg(Color::Rgb(100, 100, 100))) // Light gray
-                    } else {
-                        ("▒▒", Style::default().fg(Color::Rgb(60, 60, 60))) // Dark gray
-                    }
-                }
-            };
-
-            line_spans.push(Span::styled(symbol, style));
-        }
-        board_lines.push(Line::from(line_spans));
-    }
-
-    let paragraph = Paragraph::new(board_lines)
-        .block(Block::default().borders(Borders::ALL).title("Blokus Board"));
-    f.render_widget(paragraph, area);
-}

@@ -29,7 +29,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use std::{io, time::Duration};
 
-pub mod blokus_ui;
+pub mod games;
 pub mod input;
 pub mod layout;
 pub mod mouse;

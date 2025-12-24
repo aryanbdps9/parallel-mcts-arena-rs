@@ -42,15 +42,29 @@ This guide outlines the steps to add a new game to the Parallel MCTS Arena.
 
 ## 3. UI Implementation
 
-1.  Open `src/tui/widgets.rs`.
-2.  Locate `draw_board`.
-3.  If your game fits the standard grid layout:
-    *   Update `draw_standard_board` to handle your game's specific symbols and colors.
-    *   You can customize the `GenericGridConfig` (cell width, labels, etc.) in the match block.
-    *   Add your symbol rendering logic to the closure passed to `GenericGrid::new`.
-4.  If your game requires a custom UI (like Blokus):
-    *   Create a new drawing function (e.g., `draw_mygame_board`).
-    *   Add a match arm in `draw_board` to call your function.
+The UI logic is separated into game-specific modules in `src/tui/games/`.
+
+1.  Create a new file `src/tui/games/mygame.rs`.
+2.  Implement the symbol and style logic. For standard grid games, implement `get_cell_style`:
+    ```rust
+    use ratatui::style::{Color, Style};
+
+    pub fn get_cell_style(cell: i32, is_cursor: bool) -> (&'static str, Style) {
+        // Return symbol and style based on cell value
+    }
+    ```
+3.  Register your module in `src/tui/games/mod.rs`:
+    ```rust
+    pub mod mygame;
+    ```
+4.  Open `src/tui/widgets.rs`:
+    *   Import your module: `use crate::tui::games::mygame;`
+    *   Update `draw_standard_board` to call your `get_cell_style` function in the match block.
+    *   If your game needs custom grid configuration (e.g., different cell width), update the configuration match block in `draw_standard_board`.
+
+If your game requires a completely custom UI (like Blokus):
+1.  Implement your drawing functions in `src/tui/games/mygame.rs`.
+2.  Update `draw_game_view` in `src/tui/widgets.rs` to dispatch to your custom view.
 
 ## 4. Input Handling
 
@@ -60,4 +74,4 @@ This guide outlines the steps to add a new game to the Parallel MCTS Arena.
 
 ## 5. Application Entry Point
 
-1.  Open `src/main.rs` or `src/app.rs` to ensure your game can be selected and initialized.
+1.  Open `src/app.rs` to ensure your game is in the `games` list in `App::new` if it's not automatically picked up (currently hardcoded in `main.rs` or `app.rs`).
