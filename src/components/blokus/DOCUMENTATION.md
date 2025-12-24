@@ -87,57 +87,7 @@ This is a sophisticated implementation because:
 3. **Dynamic Layout** - Grid adapts to screen size changes
 4. **Visual Consistency** - Maintains uniform appearance across different piece shapes
 
-#### `enhanced_piece_grid.rs` - Enhanced Grid Component
-**Primary Purpose:** Clean, bordered piece grid with responsive features
-
-**Key Structs:**
-- `EnhancedPieceGridComponent` - Enhanced grid implementation  
-- `EnhancedPieceGridConfig` - Configuration for enhanced features
-
-**Features:**
-- Clean border rendering similar to original design
-- Responsive pieces-per-row calculation
-- Simplified configuration compared to responsive grid
-- Focus on visual consistency and borders
-
 ### Supporting Components
-
-#### `player_panel.rs` - Individual Player Panel
-**Primary Purpose:** Modular component for displaying one player's pieces
-
-**Key Structs:**
-- `BlokusPlayerPanelComponent` - Single player panel
-
-**Features:**
-- Expandable/collapsible interface
-- Uses `EnhancedPieceGridComponent` internally
-- Handles piece click events for specific player
-- Dynamic height calculation
-
-#### `piece_cell.rs` - Individual Piece Cell
-**Primary Purpose:** Represents a single piece in the selector
-
-**Key Structs:**
-- `PieceCellComponent` - Single piece cell
-
-**Features:**
-- Shows piece availability (available/used)
-- Handles selection state
-- Click detection for piece selection
-- Player-specific coloring
-
-#### `piece_shape.rs` - Piece Shape Renderer
-**Primary Purpose:** Dedicated component for rendering individual piece shapes
-
-**Key Structs:**
-- `PieceShapeComponent` - Shape renderer
-- `PieceShapeConfig` - Rendering configuration
-
-**Features:**
-- Clean visual representation of piece shapes
-- Configurable borders and labels
-- Player color theming
-- Size constraints and padding
 
 #### `game_stats.rs` - Game Statistics Panel
 **Primary Purpose:** Displays game statistics and information

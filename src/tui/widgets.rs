@@ -17,6 +17,7 @@
 //! - **Blokus View**: Specialized 4-player layout with piece selection panels
 
 use crate::app::{ActiveTab, App, AppMode, GameStatus, Player};
+use crate::components::ui::{GenericGrid, GenericGridConfig};
 use crate::game_wrapper::GameWrapper;
 use crate::games::blokus::BlokusState;
 use crate::tui::blokus_ui;
@@ -1063,127 +1064,62 @@ fn draw_board(f: &mut Frame, app: &App, area: Rect) {
 /// * `area` - Screen area to render within
 fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
     let board = app.game_wrapper.get_board();
-    let board_height = board.len();
-    let board_width = if board_height > 0 { board[0].len() } else { 0 };
 
-    if board_height == 0 || board_width == 0 {
-        let paragraph = Paragraph::new("No board to display");
-        f.render_widget(paragraph, area);
-        return;
-    }
-
-    // Calculate column width based on board size for optimal display
-    let col_width = match &app.game_wrapper {
-        GameWrapper::Connect4(_) => 2, // Reduced for better aspect ratio
-        GameWrapper::Othello(_) => 2,  // Reduced for better aspect ratio
-        _ => 2,                        // Standard width for X/O
+    // Determine configuration based on game type
+    let (cell_width, show_row_labels, highlight_col) = match &app.game_wrapper {
+        GameWrapper::Connect4(_) => {
+            let highlight = if !app.is_current_player_ai() {
+                Some(app.board_cursor.1 as usize)
+            } else {
+                None
+            };
+            (2, false, highlight)
+        }
+        GameWrapper::Othello(_) => (2, true, None),
+        _ => (2, true, None),
     };
 
-    // Determine if we need row labels (not for Connect4)
-    let needs_row_labels = !matches!(app.game_wrapper, GameWrapper::Connect4(_));
-    let row_label_width = if needs_row_labels { 2 } else { 0 };
-
-    // Create layout with space for labels
-    let mut layout_constraints = Vec::new();
-
-    // Column header row
-    layout_constraints.push(Constraint::Length(1));
-
-    // Board rows
-    for _ in 0..board_height {
-        layout_constraints.push(Constraint::Length(1));
-    }
-
-    let rows_layout = Layout::default()
-        .constraints(layout_constraints)
-        .split(area);
-
-    // Draw column labels
-    let col_label_constraints = if needs_row_labels {
-        let mut constraints = vec![Constraint::Length(row_label_width)]; // Space for row label
-        constraints.extend(vec![Constraint::Length(col_width); board_width]);
-        constraints
-    } else {
-        vec![Constraint::Length(col_width); board_width]
+    let config = GenericGridConfig {
+        cell_width,
+        show_row_labels,
+        show_col_labels: true,
+        ..Default::default()
     };
 
-    let col_label_area = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(col_label_constraints)
-        .split(rows_layout[0]);
-
-    // Draw column labels with cursor for Connect4
-    let col_start_idx = if needs_row_labels { 1 } else { 0 };
-    for c in 0..board_width {
-        let col_number = (c + 1).to_string(); // Column numbers start from 1
-        let is_cursor_col = matches!(app.game_wrapper, GameWrapper::Connect4(_))
-            && (c as u16) == app.board_cursor.1
+    let grid = GenericGrid::new(board, |r, c, cell, is_cursor| {
+        let is_cursor_actual = is_cursor
+            && !matches!(app.game_wrapper, GameWrapper::Connect4(_))
             && !app.is_current_player_ai();
 
-        let style = if is_cursor_col {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-                .bg(Color::Blue)
-        } else {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        };
-
-        let paragraph = Paragraph::new(col_number)
-            .style(style)
-            .alignment(Alignment::Center);
-        f.render_widget(paragraph, col_label_area[col_start_idx + c]);
-    }
-
-    // Draw board rows with row labels
-    for (r, row) in board.iter().enumerate() {
-        let row_area = rows_layout[r + 1]; // +1 because first row is column labels
-
-        let row_constraints = if needs_row_labels {
-            let mut constraints = vec![Constraint::Length(row_label_width)]; // Space for row label
-            constraints.extend(vec![Constraint::Length(col_width); board_width]);
-            constraints
-        } else {
-            vec![Constraint::Length(col_width); board_width]
-        };
-
-        let cell_areas = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(row_constraints)
-            .split(row_area);
-
-        // Draw row label if needed
-        if needs_row_labels {
-            let row_number = (r + 1).to_string();
-            let paragraph = Paragraph::new(row_number)
-                .style(
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .alignment(Alignment::Center);
-            f.render_widget(paragraph, cell_areas[0]);
-        }
-
-        // Draw board cells
-        let cell_start_idx = if needs_row_labels { 1 } else { 0 };
-        for (c, &cell) in row.iter().enumerate() {
-            let is_cursor = matches!(app.game_wrapper, GameWrapper::Connect4(_)) == false
-                && (r as u16, c as u16) == app.board_cursor;
-
-            let (symbol, style) = match &app.game_wrapper {
-                GameWrapper::Connect4(_) => match cell {
-                    1 => ("🔴", Style::default().fg(Color::Red)),
-                    -1 => ("🟡", Style::default().fg(Color::Yellow)),
-                    _ => ("·", Style::default().fg(Color::DarkGray)),
-                },
-                GameWrapper::Othello(_) => match cell {
-                    1 => ("⚫", Style::default().fg(Color::White)),
-                    -1 => ("⚪", Style::default().fg(Color::White)),
+        let (symbol, mut style) = match &app.game_wrapper {
+            GameWrapper::Connect4(_) => match cell {
+                1 => ("🔴", Style::default().fg(Color::Red)),
+                -1 => ("🟡", Style::default().fg(Color::Yellow)),
+                _ => ("·", Style::default().fg(Color::DarkGray)),
+            },
+            GameWrapper::Othello(_) => match cell {
+                1 => ("⚫", Style::default().fg(Color::White)),
+                -1 => ("⚪", Style::default().fg(Color::White)),
+                _ => {
+                    if is_cursor_actual {
+                        (
+                            "▓",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        ("·", Style::default().fg(Color::DarkGray))
+                    }
+                }
+            },
+            _ => {
+                // Gomoku and others
+                match cell {
+                    1 => ("X", Style::default().fg(Color::Red)),
+                    -1 => ("O", Style::default().fg(Color::Blue)),
                     _ => {
-                        if is_cursor && !app.is_current_player_ai() {
+                        if is_cursor_actual {
                             (
                                 "▓",
                                 Style::default()
@@ -1194,40 +1130,24 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
                             ("·", Style::default().fg(Color::DarkGray))
                         }
                     }
-                },
-                _ => {
-                    // Gomoku and others
-                    match cell {
-                        1 => ("X", Style::default().fg(Color::Red)),
-                        -1 => ("O", Style::default().fg(Color::Blue)),
-                        _ => {
-                            if is_cursor && !app.is_current_player_ai() {
-                                (
-                                    "▓",
-                                    Style::default()
-                                        .fg(Color::Yellow)
-                                        .add_modifier(Modifier::BOLD),
-                                )
-                            } else {
-                                ("·", Style::default().fg(Color::DarkGray))
-                            }
-                        }
-                    }
                 }
-            };
+            }
+        };
 
-            let final_style = if is_cursor && cell != 0 && !app.is_current_player_ai() {
-                style.bg(Color::Yellow)
-            } else {
-                style
-            };
-
-            let paragraph = Paragraph::new(symbol)
-                .style(final_style)
-                .alignment(Alignment::Center);
-            f.render_widget(paragraph, cell_areas[cell_start_idx + c]);
+        if is_cursor_actual && cell != 0 {
+            style = style.bg(Color::Yellow);
         }
-    }
+
+        Span::styled(symbol, style)
+    })
+    .config(config)
+    .cursor(Some((
+        app.board_cursor.0 as usize,
+        app.board_cursor.1 as usize,
+    )))
+    .highlight_col(highlight_col);
+
+    f.render_widget(grid, area);
 }
 
 /// Renders the Blokus game board with piece placement visualization

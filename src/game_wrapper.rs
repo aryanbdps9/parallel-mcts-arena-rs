@@ -184,141 +184,88 @@ impl fmt::Display for GameWrapper {
     }
 }
 
-impl GameState for GameWrapper {
-    type Move = MoveWrapper;
+macro_rules! impl_game_dispatch {
+    ($($variant:ident),*) => {
+        impl GameState for GameWrapper {
+            type Move = MoveWrapper;
 
-    fn get_current_player(&self) -> i32 {
-        match self {
-            GameWrapper::Gomoku(g) => g.get_current_player(),
-            GameWrapper::Connect4(g) => g.get_current_player(),
-            GameWrapper::Blokus(g) => g.get_current_player(),
-            GameWrapper::Othello(g) => g.get_current_player(),
-        }
-    }
+            fn get_current_player(&self) -> i32 {
+                match self {
+                    $(GameWrapper::$variant(g) => g.get_current_player(),)*
+                }
+            }
 
-    fn get_num_players(&self) -> i32 {
-        match self {
-            GameWrapper::Gomoku(g) => g.get_num_players(),
-            GameWrapper::Connect4(g) => g.get_num_players(),
-            GameWrapper::Blokus(g) => g.get_num_players(),
-            GameWrapper::Othello(g) => g.get_num_players(),
-        }
-    }
+            fn get_num_players(&self) -> i32 {
+                match self {
+                    $(GameWrapper::$variant(g) => g.get_num_players(),)*
+                }
+            }
 
-    fn get_possible_moves(&self) -> Vec<Self::Move> {
-        match self {
-            GameWrapper::Gomoku(g) => g
-                .get_possible_moves()
-                .into_iter()
-                .map(MoveWrapper::Gomoku)
-                .collect(),
-            GameWrapper::Connect4(g) => g
-                .get_possible_moves()
-                .into_iter()
-                .map(MoveWrapper::Connect4)
-                .collect(),
-            GameWrapper::Blokus(g) => g
-                .get_possible_moves()
-                .into_iter()
-                .map(MoveWrapper::Blokus)
-                .collect(),
-            GameWrapper::Othello(g) => g
-                .get_possible_moves()
-                .into_iter()
-                .map(MoveWrapper::Othello)
-                .collect(),
-        }
-    }
+            fn get_possible_moves(&self) -> Vec<Self::Move> {
+                match self {
+                    $(GameWrapper::$variant(g) => g
+                        .get_possible_moves()
+                        .into_iter()
+                        .map(MoveWrapper::$variant)
+                        .collect(),)*
+                }
+            }
 
-    fn make_move(&mut self, mv: &Self::Move) {
-        match (self, mv) {
-            (GameWrapper::Gomoku(g), MoveWrapper::Gomoku(m)) => g.make_move(m),
-            (GameWrapper::Connect4(g), MoveWrapper::Connect4(m)) => g.make_move(m),
-            (GameWrapper::Blokus(g), MoveWrapper::Blokus(m)) => g.make_move(m),
-            (GameWrapper::Othello(g), MoveWrapper::Othello(m)) => g.make_move(m),
-            _ => panic!("Mismatched game and move types"),
-        }
-    }
+            fn make_move(&mut self, mv: &Self::Move) {
+                match (self, mv) {
+                    $((GameWrapper::$variant(g), MoveWrapper::$variant(m)) => g.make_move(m),)*
+                    _ => panic!("Mismatched game and move types"),
+                }
+            }
 
-    fn is_terminal(&self) -> bool {
-        match self {
-            GameWrapper::Gomoku(g) => g.is_terminal(),
-            GameWrapper::Connect4(g) => g.is_terminal(),
-            GameWrapper::Blokus(g) => g.is_terminal(),
-            GameWrapper::Othello(g) => g.is_terminal(),
-        }
-    }
+            fn is_terminal(&self) -> bool {
+                match self {
+                    $(GameWrapper::$variant(g) => g.is_terminal(),)*
+                }
+            }
 
-    fn get_winner(&self) -> Option<i32> {
-        match self {
-            GameWrapper::Gomoku(g) => g.get_winner(),
-            GameWrapper::Connect4(g) => g.get_winner(),
-            GameWrapper::Blokus(g) => g.get_winner(),
-            GameWrapper::Othello(g) => g.get_winner(),
-        }
-    }
+            fn get_winner(&self) -> Option<i32> {
+                match self {
+                    $(GameWrapper::$variant(g) => g.get_winner(),)*
+                }
+            }
 
-    fn get_board(&self) -> &Vec<Vec<i32>> {
-        match self {
-            GameWrapper::Gomoku(g) => g.get_board(),
-            GameWrapper::Connect4(g) => g.get_board(),
-            GameWrapper::Blokus(g) => g.get_board(),
-            GameWrapper::Othello(g) => g.get_board(),
+            fn get_board(&self) -> &Vec<Vec<i32>> {
+                match self {
+                    $(GameWrapper::$variant(g) => g.get_board(),)*
+                }
+            }
         }
-    }
+
+        impl GameWrapper {
+            /// Returns the size of the game board
+            pub fn get_board_size(&self) -> usize {
+                self.get_board().len()
+            }
+
+            /// Returns the number of pieces needed in a row to win
+            pub fn get_line_size(&self) -> usize {
+                match self {
+                    $(GameWrapper::$variant(g) => g.get_line_size(),)*
+                }
+            }
+
+            /// Returns coordinates of the last move made, if any
+            pub fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
+                match self {
+                    $(GameWrapper::$variant(g) => g.get_last_move(),)*
+                }
+            }
+
+            /// Checks if a move is legal in the current game state
+            pub fn is_legal(&self, mv: &MoveWrapper) -> bool {
+                match (self, mv) {
+                    $((GameWrapper::$variant(g), MoveWrapper::$variant(m)) => g.is_legal(m),)*
+                    _ => false,
+                }
+            }
+        }
+    };
 }
 
-impl GameWrapper {
-    /// Returns the size of the game board
-    ///
-    /// For most games this is the board height/width, but for Connect4 it's the height.
-    ///
-    /// # Returns
-    /// Board size as number of rows
-    pub fn get_board_size(&self) -> usize {
-        self.get_board().len()
-    }
-
-    /// Returns the number of pieces needed in a row to win
-    ///
-    /// # Returns
-    /// Number of pieces needed for victory (e.g., 5 for Gomoku, 4 for Connect4)
-    pub fn get_line_size(&self) -> usize {
-        match self {
-            GameWrapper::Gomoku(g) => g.get_line_size(),
-            GameWrapper::Connect4(g) => g.get_line_size(),
-            GameWrapper::Blokus(g) => g.get_line_size(),
-            GameWrapper::Othello(g) => g.get_line_size(),
-        }
-    }
-
-    /// Returns coordinates of the last move made, if any
-    ///
-    /// # Returns
-    /// Optional vector of (row, col) coordinates for the last move
-    pub fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
-        match self {
-            GameWrapper::Gomoku(g) => g.get_last_move(),
-            GameWrapper::Connect4(g) => g.get_last_move(),
-            GameWrapper::Blokus(g) => g.get_last_move(),
-            GameWrapper::Othello(g) => g.get_last_move(),
-        }
-    }
-
-    /// Checks if a move is legal in the current game state
-    ///
-    /// # Arguments
-    /// * `mv` - The move to check
-    ///
-    /// # Returns
-    /// True if the move is legal, false otherwise
-    pub fn is_legal(&self, mv: &MoveWrapper) -> bool {
-        match (self, mv) {
-            (GameWrapper::Gomoku(g), MoveWrapper::Gomoku(m)) => g.is_legal(m),
-            (GameWrapper::Connect4(g), MoveWrapper::Connect4(m)) => g.is_legal(m),
-            (GameWrapper::Blokus(g), MoveWrapper::Blokus(m)) => g.is_legal(m),
-            (GameWrapper::Othello(g), MoveWrapper::Othello(m)) => g.is_legal(m),
-            _ => false, // Or panic, but false is safer
-        }
-    }
-}
+impl_game_dispatch!(Gomoku, Connect4, Blokus, Othello);
