@@ -134,14 +134,22 @@ pub mod grid {
 
     /// Calculate the cell size and offset for a square grid board
     pub fn calculate_grid_layout(area: Rect, board_size: usize, padding: f32) -> GridLayout {
-        let available_size = area.width.min(area.height) - padding * 2.0;
-        let cell_size = available_size / board_size as f32;
-        
+        // Guard against tiny areas (e.g. window resized very small). If
+        // `min(width,height) < 2*padding`, the old math produced negative
+        // `cell_size` and inflated offsets.
+        let padded = area.inset(padding.max(0.0));
+        let available_size = padded.width.min(padded.height).max(0.0);
+        let cell_size = if board_size > 0 {
+            available_size / board_size as f32
+        } else {
+            0.0
+        };
+
         let board_width = cell_size * board_size as f32;
         let board_height = cell_size * board_size as f32;
-        
-        let offset_x = area.x + (area.width - board_width) / 2.0;
-        let offset_y = area.y + (area.height - board_height) / 2.0;
+
+        let offset_x = padded.x + (padded.width - board_width) / 2.0;
+        let offset_y = padded.y + (padded.height - board_height) / 2.0;
 
         GridLayout {
             cell_size,
@@ -173,6 +181,9 @@ pub mod grid {
 
         /// Get cell coordinates from screen position
         pub fn screen_to_cell(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+            if self.cell_size <= 0.0 {
+                return None;
+            }
             let col = ((x - self.offset_x) / self.cell_size).floor() as i32;
             let row = ((y - self.offset_y) / self.cell_size).floor() as i32;
 

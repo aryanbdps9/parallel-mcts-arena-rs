@@ -561,11 +561,13 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32, width: f32, height: f32) -> (b
             }
 
             if is_human && !app.ai_thinking {
-                // Get game area and pass to renderer
-                let game_area = get_game_area(width, height);
+                // Use the same area for input hit-testing as we use for rendering.
+                // Rendering uses `board_area` (left of the splitter); using the full
+                // `game_area` here inflates offsets and misaligns clicks/hover.
+                let board_area = get_board_area(app, width, height);
                 let input = GameInput::Click { x, y };
                 
-                match app.game_renderer.handle_input(input, &app.game, game_area) {
+                match app.game_renderer.handle_input(input, &app.game, board_area) {
                     InputResult::Move(mv) => {
                         app.make_move(mv);
                         return (true, false);
@@ -646,10 +648,10 @@ fn handle_mouse_move(app: &mut GuiApp, _renderer: &Renderer, x: f32, y: f32, wid
         }
 
         // Handle game hover
-        let game_area = get_game_area(width, height);
+        let board_area = get_board_area(app, width, height);
         let input = GameInput::Hover { x, y };
         
-        if let InputResult::Redraw = app.game_renderer.handle_input(input, &app.game, game_area) {
+        if let InputResult::Redraw = app.game_renderer.handle_input(input, &app.game, board_area) {
             needs_redraw = true;
         }
     }
