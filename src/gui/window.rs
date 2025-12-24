@@ -321,7 +321,7 @@ unsafe extern "system" fn window_proc(
             
             let should_quit = APP_STATE.with(|state| {
                 if let Some(app) = state.borrow().as_ref() {
-                    handle_key(&mut app.borrow_mut(), vk)
+                    handle_key(&mut app.borrow_mut(), vk, hwnd)
                 } else {
                     false
                 }
@@ -355,9 +355,16 @@ unsafe extern "system" fn window_proc(
 }
 
 /// Handle keyboard input
-fn handle_key(app: &mut GuiApp, vk: u16) -> bool {
+fn handle_key(app: &mut GuiApp, vk: u16, hwnd: HWND) -> bool {
     let num_settings = 12; // 10 settings + separator + Back
     let num_games = super::app::GameType::all().len() + 2; // games + Settings + Quit
+    
+    // Get window dimensions for layout calculations
+    let (width, height) = unsafe {
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        let _ = GetClientRect(hwnd, &mut rect);
+        ((rect.right - rect.left) as f32, (rect.bottom - rect.top) as f32)
+    };
 
     if vk == VK_ESCAPE.0 || vk == VK_BACK.0 {
         app.go_back();
@@ -451,8 +458,29 @@ fn handle_key(app: &mut GuiApp, vk: u16) -> bool {
                     ActiveTab::DebugStats => app.scroll_debug_down(),
                     ActiveTab::MoveHistory => app.scroll_history_down(),
                 }
+            } else {
+                // Forward other keys to game renderer for game-specific controls
+                // (e.g., R=Rotate, X=Flip, P=Pass, Arrow keys, Enter for Blokus)
+                let current_player = app.game.get_current_player();
+                let is_human = app.player_types
+                    .iter()
+                    .find(|(id, _)| *id == current_player)
+                    .map(|(_, pt)| *pt == PlayerType::Human)
+                    .unwrap_or(false);
+
+                if is_human && !app.ai_thinking {
+                    let board_area = get_board_area(app, width, height);
+                    let input = GameInput::Key { code: vk as u32, pressed: true };
+                    
+                    match app.game_renderer.handle_input(input, &app.game, board_area) {
+                        InputResult::Move(mv) => {
+                            app.make_move(mv);
+                        }
+                        InputResult::Redraw => {}
+                        InputResult::None => {}
+                    }
+                }
             }
-            // Additional game input would go here (arrow keys for cursor, etc.)
         }
         GuiMode::GameOver => {
             if vk == VK_RETURN.0 || vk == VK_SPACE.0 {

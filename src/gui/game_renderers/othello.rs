@@ -31,7 +31,7 @@ impl GameRenderer for OthelloRenderer {
         // Draw board background (green felt)
         let board_rect = layout.board_rect();
         let green_bg = windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
-            r: 0.0, g: 0.5, b: 0.25, a: 1.0,
+            r: 0.76, g: 0.60, b: 0.42, a: 1.0,
         };
         renderer.fill_rect(board_rect.inset(-5.0), green_bg);
 
