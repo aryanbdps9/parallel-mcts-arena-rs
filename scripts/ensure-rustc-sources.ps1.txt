@@ -1,0 +1,50 @@
+$ErrorActionPreference = 'Stop'
+
+function Get-RustcCommitHash {
+    $versionInfo = & rustc -vV
+    $match = $versionInfo | Select-String -Pattern '^commit-hash:\s*(.+)\s*$'
+    if (-not $match) {
+        throw "Unable to parse rustc commit hash from: $versionInfo"
+    }
+    return $match.Matches[0].Groups[1].Value.Trim()
+}
+
+function Get-RustcSysroot {
+    return (& rustc --print sysroot).Trim()
+}
+
+$hash = Get-RustcCommitHash
+$sysroot = Get-RustcSysroot
+
+$src = Join-Path $sysroot 'lib\rustlib\src\rust\library'
+if (-not (Test-Path $src)) {
+    Write-Host "rust-src not found at '$src'. Attempting to install rust-src..."
+    & rustup component add rust-src | Out-Host
+}
+
+if (-not (Test-Path $src)) {
+    throw "rust-src still not found at '$src'. Try: rustup component add rust-src"
+}
+
+$destRoot = "C:\rustc\$hash"
+$dest = Join-Path $destRoot 'library'
+
+if (-not (Test-Path $destRoot)) {
+    New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
+}
+
+if (Test-Path $dest) {
+    $item = Get-Item -LiteralPath $dest -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        # Already a junction/symlink; nothing to do.
+        Write-Host "rustc source junction already present: '$dest'"
+        exit 0
+    }
+
+    Write-Warning "Path '$dest' exists but is not a junction. Leaving it unchanged."
+    Write-Warning "If stepping into std still fails, delete '$dest' and rerun this script."
+    exit 0
+}
+
+New-Item -ItemType Junction -Path $dest -Target $src | Out-Null
+Write-Host "Created rustc source junction: '$dest' -> '$src'"

@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "setup rustc sources (std/core)",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\ensure-rustc-sources.ps1"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "cargo build (play)",
+            "type": "shell",
+            "command": "cargo",
+            "args": ["build", "--bin", "play", "--features", "gui"],
+            "problemMatcher": ["$rustc"],
+            "group": "build"
+        },
+        {
+            "label": "debug prep (play)",
+            "dependsOn": ["setup rustc sources (std/core)", "cargo build (play)"],
+            "dependsOrder": "sequence",
+            "problemMatcher": []
+        }
+    ]
+}
