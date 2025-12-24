@@ -1952,6 +1952,14 @@ impl InGameComponent {
                 }
                 Ok(true)
             }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                // Copy move history to clipboard using the app's formatted method
+                if !app.copy_history_to_clipboard() {
+                    #[cfg(debug_assertions)]
+                    eprintln!("Failed to copy to clipboard");
+                }
+                Ok(true)
+            }
             KeyCode::Esc => {
                 app.mode = AppMode::GameSelection;
                 Ok(true)

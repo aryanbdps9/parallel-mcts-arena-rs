@@ -2,12 +2,20 @@
 //!
 //! Manages the application state for the Windows GUI, including game state,
 //! AI coordination, and UI state.
+//!
+//! ## Architecture
+//! The GUI application uses a central GameController to own the authoritative
+//! game state. This ensures:
+//! - Clear separation between game logic and UI
+//! - Proper move validation before any state changes
+//! - Thread-safe communication with the AI worker
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime};
 
+use crate::game_controller::{GameController, MoveResult};
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::games::blokus::BlokusState;
 use crate::games::connect4::Connect4State;
@@ -110,6 +118,7 @@ pub struct MoveEntry {
 #[derive(Debug)]
 pub enum AIRequest {
     Search(GameWrapper, u64),
+    AdvanceRoot(MoveWrapper),
     Stop,
 }
 
@@ -166,6 +175,11 @@ impl AIWorker {
                             let _ = tx_resp.send(AIResponse::BestMove(best_move, stats));
                         }
                     }
+                    AIRequest::AdvanceRoot(move_made) => {
+                        if let Some(mcts_ref) = mcts.as_mut() {
+                            mcts_ref.advance_root(&move_made);
+                        }
+                    }
                     AIRequest::Stop => break,
                 }
             }
@@ -190,6 +204,14 @@ impl AIWorker {
     pub fn stop(&self) {
         self.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = self.tx.send(AIRequest::Stop);
+    }
+
+    /// Advance the MCTS tree root after a move is made
+    /// 
+    /// This allows the AI to reuse previous search results by promoting
+    /// the child node corresponding to the move as the new root.
+    pub fn advance_root(&self, move_made: &MoveWrapper) {
+        let _ = self.tx.send(AIRequest::AdvanceRoot(move_made.clone()));
     }
 }
 
@@ -216,7 +238,9 @@ pub struct GuiApp {
     pub player_types: Vec<(i32, PlayerType)>,
     pub selected_player_index: usize,
 
-    // Game state
+    // Game state - using GameController as the authoritative source
+    pub game_controller: GameController,
+    /// UI-facing game wrapper for rendering (synced with controller)
     pub game: GameWrapper,
     pub game_status: GameStatus,
     pub move_history: Vec<MoveEntry>,
@@ -251,6 +275,16 @@ pub struct GuiApp {
     pub history_scroll: i32,
     pub how_to_play_scroll: i32,
     pub selected_how_to_play_game: usize,
+
+    // Resizable panel state
+    /// Width of the right info panel (0.0 to 1.0 as percentage of available width)
+    pub info_panel_ratio: f32,
+    /// Whether we're currently dragging the splitter
+    pub is_dragging_splitter: bool,
+    /// Minimum panel width in pixels
+    pub min_panel_width: f32,
+    /// Maximum panel ratio
+    pub max_panel_ratio: f32,
 }
 
 impl GuiApp {
@@ -267,6 +301,7 @@ impl GuiApp {
         shared_tree: bool,
     ) -> Self {
         let default_game = GameWrapper::Gomoku(GomokuState::new(board_size, line_size));
+        let game_controller = GameController::new(default_game.clone());
         let renderer = create_renderer_for_game(&default_game);
 
         Self {
@@ -276,6 +311,7 @@ impl GuiApp {
             selected_game_type: GameType::Gomoku,
             player_types: vec![(1, PlayerType::Human), (-1, PlayerType::AI)],
             selected_player_index: 0,
+            game_controller,
             game: default_game,
             game_status: GameStatus::InProgress,
             move_history: Vec::new(),
@@ -302,6 +338,10 @@ impl GuiApp {
             history_scroll: 0,
             how_to_play_scroll: 0,
             selected_how_to_play_game: 0,
+            info_panel_ratio: 0.25, // Default 25% of game area width
+            is_dragging_splitter: false,
+            min_panel_width: 200.0,
+            max_panel_ratio: 0.5,
         }
     }
 
@@ -314,12 +354,16 @@ impl GuiApp {
             }
         }
 
-        self.game = match self.selected_game_type {
+        let new_game = match self.selected_game_type {
             GameType::Gomoku => GameWrapper::Gomoku(GomokuState::new(self.board_size, self.line_size)),
             GameType::Connect4 => GameWrapper::Connect4(Connect4State::new(7, 6, self.line_size)),
-            GameType::Othello => GameWrapper::Othello(OthelloState::new(8)),
+            GameType::Othello => GameWrapper::Othello(OthelloState::new(self.board_size)),
             GameType::Blokus => GameWrapper::Blokus(BlokusState::new()),
         };
+
+        // Reset the game controller with new state
+        self.game_controller.reset(new_game.clone());
+        self.game = new_game;
 
         self.game_renderer = create_renderer_for_game(&self.game);
         self.game_renderer.reset();
@@ -330,6 +374,14 @@ impl GuiApp {
         self.last_search_stats = None;
         self.mode = GuiMode::InGame;
         self.needs_redraw = true;
+
+        // Create a new AI worker (the old one may have been stopped when going back to menu)
+        self.ai_worker = AIWorker::new(
+            self.exploration_constant,
+            self.ai_threads,
+            self.max_nodes,
+            self.search_iterations,
+        );
 
         // Check if AI should move first
         self.check_ai_turn();
@@ -357,31 +409,56 @@ impl GuiApp {
     }
 
     /// Process a move (from human or AI)
+    ///
+    /// Uses the GameController to validate and apply the move.
+    /// Rejects invalid moves and updates game status accordingly.
     pub fn make_move(&mut self, mv: MoveWrapper) {
-        let player = self.game.get_current_player();
-        
-        self.game.make_move(&mv);
-        self.move_history.push(MoveEntry {
-            timestamp: SystemTime::now(),
-            player,
-            move_made: mv,
-        });
+        // Use GameController for move validation and application
+        match self.game_controller.try_make_move(mv.clone()) {
+            MoveResult::Success { player, game_over, winner, .. } => {
+                // Sync UI game state with controller
+                self.game = self.game_controller.get_state_for_search();
+                
+                // Advance MCTS tree root to maintain tree reuse
+                // This must happen for EVERY move (human or AI) so the tree stays in sync
+                self.ai_worker.advance_root(&mv);
+                
+                // Add to move history for UI display
+                self.move_history.push(MoveEntry {
+                    timestamp: SystemTime::now(),
+                    player,
+                    move_made: mv,
+                });
 
-        // Check game status
-        if self.game.is_terminal() {
-            if let Some(winner) = self.game.get_winner() {
-                self.game_status = GameStatus::Win(winner);
-            } else {
-                self.game_status = GameStatus::Draw;
+                // Auto-scroll history to bottom
+                self.history_scroll = i32::MAX;
+
+                // Check game status
+                if game_over {
+                    self.game_status = match winner {
+                        Some(w) => GameStatus::Win(w),
+                        None => GameStatus::Draw,
+                    };
+                    self.mode = GuiMode::GameOver;
+                }
+
+                self.ai_thinking = false;
+                self.needs_redraw = true;
+
+                // Check if AI should move next
+                self.check_ai_turn();
             }
-            self.mode = GuiMode::GameOver;
+            MoveResult::Invalid { reason: _reason } => {
+                // Move was rejected - log for debugging
+                #[cfg(debug_assertions)]
+                eprintln!("Move rejected: {}", _reason);
+                self.needs_redraw = true;
+            }
+            MoveResult::GameOver => {
+                // Game is already over, shouldn't happen
+                self.needs_redraw = true;
+            }
         }
-
-        self.ai_thinking = false;
-        self.needs_redraw = true;
-
-        // Check if AI should move next
-        self.check_ai_turn();
     }
 
     /// Update application state (called periodically)
@@ -390,8 +467,77 @@ impl GuiApp {
         if self.ai_thinking {
             if let Some(AIResponse::BestMove(mv, stats)) = self.ai_worker.try_recv() {
                 self.last_search_stats = Some(stats);
+                
+                // Validate AI move before applying
+                if let Err(reason) = self.game_controller.validate_move(&mv) {
+                    // AI proposed an invalid move - this is a critical error
+                    // Dump state and exit
+                    self.dump_invalid_ai_move(&mv, &reason);
+                    self.should_quit = true;
+                    return;
+                }
+                
                 self.make_move(mv);
             }
+        }
+    }
+
+    /// Dump game state and history when AI proposes an invalid move
+    fn dump_invalid_ai_move(&self, invalid_move: &MoveWrapper, reason: &crate::game_controller::MoveValidationError) {
+        use std::io::Write;
+        
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let filename = format!("ai_invalid_move_{}.txt", timestamp);
+        
+        let mut content = String::new();
+        content.push_str("=== AI INVALID MOVE DUMP ===\n\n");
+        content.push_str(&format!("Timestamp: {}\n", timestamp));
+        content.push_str(&format!("Game: {:?}\n", self.selected_game_type));
+        content.push_str(&format!("Invalid Move: {:?}\n", invalid_move));
+        content.push_str(&format!("Rejection Reason: {}\n\n", reason));
+        
+        content.push_str("=== Move History ===\n");
+        content.push_str(&self.game_controller.format_history_for_clipboard());
+        
+        content.push_str("\n=== Current Game State ===\n");
+        content.push_str(&format!("Current Player: {}\n", self.game.get_current_player()));
+        content.push_str(&format!("Is Terminal: {}\n", self.game.is_terminal()));
+        
+        // Add board state
+        content.push_str("\n=== Board State ===\n");
+        let board = self.game.get_board();
+        for row in board {
+            for cell in row {
+                let c = match *cell {
+                    0 => '.',
+                    1 => 'X',
+                    -1 => 'O',
+                    n => std::char::from_digit(n.unsigned_abs() as u32, 10).unwrap_or('?'),
+                };
+                content.push_str(&format!("{} ", c));
+            }
+            content.push('\n');
+        }
+        
+        content.push_str("\n=== Legal Moves ===\n");
+        let legal_moves = self.game_controller.get_legal_moves();
+        for mv in legal_moves.iter().take(50) {
+            content.push_str(&format!("{:?}\n", mv));
+        }
+        if legal_moves.len() > 50 {
+            content.push_str(&format!("... and {} more moves\n", legal_moves.len() - 50));
+        }
+        
+        // Write to file
+        if let Ok(mut file) = std::fs::File::create(&filename) {
+            let _ = file.write_all(content.as_bytes());
+            eprintln!("CRITICAL: AI proposed invalid move! Dumped state to: {}", filename);
+        } else {
+            eprintln!("CRITICAL: AI proposed invalid move! Failed to write dump file.");
+            eprintln!("{}", content);
         }
     }
 
@@ -416,8 +562,13 @@ impl GuiApp {
                 ],
             };
             
-            self.mode = GuiMode::PlayerConfig;
-            self.needs_redraw = true;
+            // In AI-only mode, skip player config and start game directly
+            if self.ai_only {
+                self.start_game();
+            } else {
+                self.mode = GuiMode::PlayerConfig;
+                self.needs_redraw = true;
+            }
         }
     }
 
@@ -450,6 +601,42 @@ impl GuiApp {
     /// Toggle the active tab between Debug Stats and Move History
     pub fn toggle_tab(&mut self) {
         self.active_tab = self.active_tab.next();
+        self.needs_redraw = true;
+    }
+
+    /// Scroll debug stats up
+    pub fn scroll_debug_up(&mut self) {
+        self.debug_scroll = (self.debug_scroll - 1).max(0);
+        self.needs_redraw = true;
+    }
+
+    /// Scroll debug stats down
+    pub fn scroll_debug_down(&mut self) {
+        self.debug_scroll += 1;
+        self.needs_redraw = true;
+    }
+
+    /// Scroll move history up
+    pub fn scroll_history_up(&mut self) {
+        self.history_scroll = (self.history_scroll - 1).max(0);
+        self.needs_redraw = true;
+    }
+
+    /// Scroll move history down
+    pub fn scroll_history_down(&mut self) {
+        self.history_scroll += 1;
+        self.needs_redraw = true;
+    }
+
+    /// Scroll how to play up
+    pub fn scroll_how_to_play_up(&mut self) {
+        self.how_to_play_scroll = (self.how_to_play_scroll - 1).max(0);
+        self.needs_redraw = true;
+    }
+
+    /// Scroll how to play down
+    pub fn scroll_how_to_play_down(&mut self) {
+        self.how_to_play_scroll += 1;
         self.needs_redraw = true;
     }
 
@@ -533,11 +720,14 @@ impl GuiApp {
     }
 
     /// Get formatted debug stats for display
+    /// 
+    /// Returns formatted lines that fit within typical panel widths.
+    /// Long move strings are shortened for better display.
     pub fn get_debug_stats_lines(&self) -> Vec<String> {
         let mut lines = vec!["Debug Statistics".to_string(), String::new()];
         
         if let Some(stats) = &self.last_search_stats {
-            lines.push(format!("AI Status: Active"));
+            lines.push("AI Status: Active".to_string());
             lines.push(format!("Total Nodes: {}", stats.total_nodes));
             lines.push(format!("Root Visits: {}", stats.root_visits));
             lines.push(format!("Root Value: {:.3}", stats.root_value));
@@ -550,13 +740,68 @@ impl GuiApp {
             
             lines.push("Top AI Moves:".to_string());
             for (i, (move_str, (value, visits))) in sorted_children.iter().take(10).enumerate() {
-                lines.push(format!("{}. {}: {:.3} ({})", i + 1, move_str, value, visits));
+                // Shorten the move string for display - extract just the move part
+                let short_move = shorten_move_string(move_str);
+                lines.push(format!("{}. {}", i + 1, short_move));
+                lines.push(format!("   {:.1} ({} visits)", value, visits));
             }
         } else {
             lines.push("AI Status: Idle".to_string());
-            lines.push("Waiting for MCTS statistics...".to_string());
+            lines.push("Waiting for MCTS...".to_string());
         }
         
         lines
+    }
+
+    /// Copy move history to clipboard
+    ///
+    /// Formats the move history as a readable string and copies it to the system clipboard.
+    /// Returns true if successful, false otherwise.
+    pub fn copy_history_to_clipboard(&self) -> bool {
+        let history_text = self.game_controller.format_history_for_clipboard();
+        crate::clipboard::copy_history_to_clipboard(&history_text)
+    }
+
+    /// Get clipboard-ready formatted history
+    ///
+    /// Returns the move history formatted for clipboard, using the GameController's
+    /// authoritative history.
+    pub fn get_clipboard_history(&self) -> String {
+        self.game_controller.format_history_for_clipboard()
+    }
+}
+
+/// Shorten a move string for display in the debug panel
+/// 
+/// Extracts the essential move information from verbose move strings like
+/// "Gomoku(GomokuMove(3, 3))" -> "G(3,3)"
+fn shorten_move_string(move_str: &str) -> String {
+    // Try to extract coordinates from patterns like "Move(x, y)" or "(x, y)"
+    if let Some(start) = move_str.find('(') {
+        if let Some(end) = move_str.rfind(')') {
+            // Get game prefix (first letter)
+            let prefix = move_str.chars().next().unwrap_or('?');
+            // Get the inner content
+            let inner = &move_str[start..=end];
+            // Try to simplify nested parens like "GomokuMove(3, 3)" -> "(3,3)"
+            if let Some(inner_start) = inner.find('(') {
+                if inner_start > 0 {
+                    // There's nested content, extract innermost
+                    let coords = &inner[inner_start..];
+                    // Remove spaces for compactness
+                    let compact = coords.replace(" ", "");
+                    return format!("{}{}", prefix, compact);
+                }
+            }
+            // Just use the parenthetical part
+            let compact = inner.replace(" ", "");
+            return format!("{}{}", prefix, compact);
+        }
+    }
+    // Fallback: truncate long strings
+    if move_str.len() > 25 {
+        format!("{}...", &move_str[..22])
+    } else {
+        move_str.to_string()
     }
 }

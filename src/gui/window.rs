@@ -9,18 +9,18 @@ use std::rc::Rc;
 use mcts::GameState;
 use windows::{
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
-        Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT},
+        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM, POINT},
+        Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, ScreenToClient, PAINTSTRUCT},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
             LoadCursorW, PostQuitMessage, RegisterClassW, ShowWindow, TranslateMessage,
-            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, MSG,
-            SW_SHOW, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-            WM_MOUSEMOVE, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
-            SetTimer, KillTimer,
+            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, IDC_SIZEWE, MSG,
+            SW_SHOW, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+            SetTimer, KillTimer, SetCursor,
         },
-        UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_TAB, VK_SPACE, VK_BACK},
+        UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_TAB, VK_SPACE, VK_BACK, VK_PRIOR, VK_NEXT, SetCapture, ReleaseCapture},
     },
     core::PCWSTR,
 };
@@ -188,17 +188,40 @@ unsafe extern "system" fn window_proc(
             let x = (lparam.0 & 0xFFFF) as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as f32;
             
-            let needs_redraw = APP_STATE.with(|state| {
+            let (needs_redraw, capture) = APP_STATE.with(|state| {
                 if let Some(app) = state.borrow().as_ref() {
-                    handle_click(&mut app.borrow_mut(), x, y)
+                    let mut rect = windows::Win32::Foundation::RECT::default();
+                    unsafe { let _ = GetClientRect(hwnd, &mut rect); }
+                    let width = (rect.right - rect.left) as f32;
+                    let height = (rect.bottom - rect.top) as f32;
+                    let (redraw, start_drag) = handle_click(&mut app.borrow_mut(), x, y, width, height);
+                    (redraw, start_drag)
                 } else {
-                    false
+                    (false, false)
                 }
             });
 
+            if capture {
+                unsafe { let _ = SetCapture(hwnd); }
+            }
             if needs_redraw {
                 unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
             }
+            LRESULT(0)
+        }
+
+        WM_LBUTTONUP => {
+            APP_STATE.with(|state| {
+                if let Some(app) = state.borrow().as_ref() {
+                    let mut app = app.borrow_mut();
+                    if app.is_dragging_splitter {
+                        app.is_dragging_splitter = false;
+                        app.needs_redraw = true;
+                    }
+                }
+            });
+            unsafe { let _ = ReleaseCapture(); }
+            unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
             LRESULT(0)
         }
 
@@ -206,15 +229,82 @@ unsafe extern "system" fn window_proc(
             let x = (lparam.0 & 0xFFFF) as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as f32;
             
-            let needs_redraw = RENDERER.with(|r| {
+            let (needs_redraw, cursor_change) = RENDERER.with(|r| {
                 if let Some(renderer) = r.borrow().as_ref() {
                     APP_STATE.with(|state| {
                         if let Some(app) = state.borrow().as_ref() {
-                            handle_mouse_move(&mut app.borrow_mut(), renderer, x, y)
+                            let mut rect = windows::Win32::Foundation::RECT::default();
+                            unsafe { let _ = GetClientRect(hwnd, &mut rect); }
+                            let width = (rect.right - rect.left) as f32;
+                            let height = (rect.bottom - rect.top) as f32;
+                            handle_mouse_move(&mut app.borrow_mut(), renderer, x, y, width, height)
                         } else {
-                            false
+                            (false, false)
                         }
                     })
+                } else {
+                    (false, false)
+                }
+            });
+
+            // Change cursor when over splitter
+            if cursor_change {
+                unsafe {
+                    if let Ok(cursor) = LoadCursorW(None, IDC_SIZEWE) {
+                        let _ = SetCursor(Some(cursor));
+                    }
+                }
+            }
+
+            if needs_redraw {
+                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+            }
+            LRESULT(0)
+        }
+
+        WM_MOUSEWHEEL => {
+            let delta = (wparam.0 >> 16) as i16;
+            let x_screen = (lparam.0 & 0xFFFF) as i32;
+            let y_screen = ((lparam.0 >> 16) & 0xFFFF) as i32;
+            
+            let mut point = POINT { x: x_screen, y: y_screen };
+            unsafe { let _ = ScreenToClient(hwnd, &mut point); }
+            let x = point.x as f32;
+            let y = point.y as f32;
+
+            let needs_redraw = APP_STATE.with(|state| {
+                if let Some(app) = state.borrow().as_ref() {
+                    let mut app = app.borrow_mut();
+                    
+                    match app.mode {
+                        GuiMode::InGame => {
+                            let mut rect = windows::Win32::Foundation::RECT::default();
+                            unsafe { let _ = GetClientRect(hwnd, &mut rect); }
+                            let width = (rect.right - rect.left) as f32;
+                            let height = (rect.bottom - rect.top) as f32;
+                            
+                            let info_area = get_info_area(&app, width, height);
+                            
+                            // Check if mouse is over info panel
+                            if info_area.contains(x, y) {
+                                match app.active_tab {
+                                    ActiveTab::DebugStats => {
+                                        if delta > 0 { app.scroll_debug_up(); } else { app.scroll_debug_down(); }
+                                    },
+                                    ActiveTab::MoveHistory => {
+                                        if delta > 0 { app.scroll_history_up(); } else { app.scroll_history_down(); }
+                                    }
+                                }
+                                return true;
+                            }
+                        },
+                        GuiMode::HowToPlay => {
+                            if delta > 0 { app.scroll_how_to_play_up(); } else { app.scroll_how_to_play_down(); }
+                            return true;
+                        },
+                        _ => {}
+                    }
+                    false
                 } else {
                     false
                 }
@@ -349,12 +439,26 @@ fn handle_key(app: &mut GuiApp, vk: u16) -> bool {
         GuiMode::InGame => {
             if vk == VK_TAB.0 {
                 app.toggle_tab();
+            } else if vk == 0x43 { // 'C' key - Copy move history to clipboard
+                app.copy_history_to_clipboard();
+            } else if vk == VK_PRIOR.0 { // Page Up
+                match app.active_tab {
+                    ActiveTab::DebugStats => app.scroll_debug_up(),
+                    ActiveTab::MoveHistory => app.scroll_history_up(),
+                }
+            } else if vk == VK_NEXT.0 { // Page Down
+                match app.active_tab {
+                    ActiveTab::DebugStats => app.scroll_debug_down(),
+                    ActiveTab::MoveHistory => app.scroll_history_down(),
+                }
             }
             // Additional game input would go here (arrow keys for cursor, etc.)
         }
         GuiMode::GameOver => {
             if vk == VK_RETURN.0 || vk == VK_SPACE.0 {
                 app.go_back();
+            } else if vk == 0x43 { // 'C' key - Copy move history to clipboard
+                app.copy_history_to_clipboard();
             }
         }
         GuiMode::HowToPlay => {
@@ -369,9 +473,13 @@ fn handle_key(app: &mut GuiApp, vk: u16) -> bool {
                     app.how_to_play_scroll = 0;
                 }
             } else if vk == VK_UP.0 {
-                app.how_to_play_scroll = (app.how_to_play_scroll - 1).max(0);
+                app.scroll_how_to_play_up();
             } else if vk == VK_DOWN.0 {
-                app.how_to_play_scroll += 1;
+                app.scroll_how_to_play_down();
+            } else if vk == VK_PRIOR.0 { // Page Up
+                for _ in 0..5 { app.scroll_how_to_play_up(); }
+            } else if vk == VK_NEXT.0 { // Page Down
+                for _ in 0..5 { app.scroll_how_to_play_down(); }
             }
         }
     }
@@ -380,7 +488,9 @@ fn handle_key(app: &mut GuiApp, vk: u16) -> bool {
 }
 
 /// Handle mouse click
-fn handle_click(app: &mut GuiApp, x: f32, y: f32) -> bool {
+/// Handle mouse click
+/// Returns (needs_redraw, start_capture) tuple
+fn handle_click(app: &mut GuiApp, x: f32, y: f32, width: f32, height: f32) -> (bool, bool) {
     app.needs_redraw = true;
 
     match app.mode {
@@ -388,46 +498,53 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32) -> bool {
             // Check button clicks
             let games = super::app::GameType::all();
             for (i, _) in games.iter().enumerate() {
-                let button_rect = get_game_button_rect(i);
+                let button_rect = get_game_button_rect(i, width, height);
                 if button_rect.contains(x, y) {
                     app.select_game(i);
-                    return true;
+                    return (true, false);
                 }
             }
             // Check Settings button
-            let settings_rect = get_game_button_rect(games.len());
+            let settings_rect = get_game_button_rect(games.len(), width, height);
             if settings_rect.contains(x, y) {
                 app.mode = GuiMode::Settings;
                 app.selected_settings_index = 0;
-                return true;
+                return (true, false);
             }
             // Check How To Play button
-            let help_rect = get_game_button_rect(games.len() + 1);
+            let help_rect = get_game_button_rect(games.len() + 1, width, height);
             if help_rect.contains(x, y) {
                 app.mode = GuiMode::HowToPlay;
                 app.selected_how_to_play_game = 0;
                 app.how_to_play_scroll = 0;
-                return true;
+                return (true, false);
             }
         }
         GuiMode::PlayerConfig => {
             // Check player toggle buttons
             for i in 0..app.player_types.len() {
-                let button_rect = get_player_button_rect(i);
+                let button_rect = get_player_button_rect(i, width, height);
                 if button_rect.contains(x, y) {
                     app.toggle_player(i);
-                    return true;
+                    return (true, false);
                 }
             }
             
             // Check start button
-            let start_rect = get_start_button_rect();
+            let start_rect = get_start_button_rect(width, height);
             if start_rect.contains(x, y) {
                 app.start_game();
-                return true;
+                return (true, false);
             }
         }
         GuiMode::InGame => {
+            // Check if clicking on splitter
+            let splitter = get_splitter_rect(app, width, height);
+            if splitter.contains(x, y) {
+                app.is_dragging_splitter = true;
+                return (true, true); // Start capture
+            }
+
             // Check if current player is human
             let current_player = app.game.get_current_player();
             let is_human = app.player_types
@@ -437,23 +554,23 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32) -> bool {
                 .unwrap_or(false);
 
             // Check for tab clicks (always allowed, even during AI thinking)
-            let tab_area = get_tab_area();
+            let tab_area = get_tab_area(app, width, height);
             if tab_area.contains(x, y) {
                 app.toggle_tab();
-                return true;
+                return (true, false);
             }
 
             if is_human && !app.ai_thinking {
                 // Get game area and pass to renderer
-                let game_area = get_game_area();
+                let game_area = get_game_area(width, height);
                 let input = GameInput::Click { x, y };
                 
                 match app.game_renderer.handle_input(input, &app.game, game_area) {
                     InputResult::Move(mv) => {
                         app.make_move(mv);
-                        return true;
+                        return (true, false);
                     }
-                    InputResult::Redraw => return true,
+                    InputResult::Redraw => return (true, false),
                     InputResult::None => {}
                 }
             }
@@ -462,7 +579,7 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32) -> bool {
             // Check settings item clicks
             let settings = app.get_settings_items();
             for i in 0..settings.len() + 2 {
-                let item_rect = get_settings_item_rect(i);
+                let item_rect = get_settings_item_rect(i, width, height);
                 if item_rect.contains(x, y) {
                     app.selected_settings_index = i;
                     if i == settings.len() + 1 {
@@ -472,7 +589,7 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32) -> bool {
                         // Toggle bool settings
                         app.adjust_setting(i, 1);
                     }
-                    return true;
+                    return (true, false);
                 }
             }
         }
@@ -480,35 +597,64 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32) -> bool {
             // Check game tab clicks
             let games = ["Gomoku", "Connect4", "Othello", "Blokus"];
             for (i, _) in games.iter().enumerate() {
-                let tab_rect = get_how_to_play_tab_rect(i);
+                let tab_rect = get_how_to_play_tab_rect(i, width, height);
                 if tab_rect.contains(x, y) {
                     app.selected_how_to_play_game = i;
                     app.how_to_play_scroll = 0;
-                    return true;
+                    return (true, false);
                 }
             }
         }
         GuiMode::GameOver => {
             // Click anywhere to go back
             app.go_back();
-            return true;
+            return (true, false);
         }
     }
 
-    false
+    (false, false)
 }
 
-/// Handle mouse movement (for hover effects)
-fn handle_mouse_move(app: &mut GuiApp, _renderer: &Renderer, x: f32, y: f32) -> bool {
+/// Handle mouse movement (for hover effects and splitter dragging)
+/// Returns (needs_redraw, show_resize_cursor) tuple
+fn handle_mouse_move(app: &mut GuiApp, _renderer: &Renderer, x: f32, y: f32, width: f32, height: f32) -> (bool, bool) {
+    let mut needs_redraw = false;
+    let mut show_resize_cursor = false;
+
     if app.mode == GuiMode::InGame {
-        let game_area = get_game_area();
+        // Handle splitter dragging
+        if app.is_dragging_splitter {
+            let game_area = get_game_area(width, height);
+            // Calculate new panel ratio based on mouse position
+            // x position relative to the right edge of game area gives us the panel width
+            let panel_width = (game_area.x + game_area.width) - x;
+            let new_ratio = (panel_width / game_area.width).clamp(
+                app.min_panel_width / game_area.width,
+                app.max_panel_ratio,
+            );
+            if (new_ratio - app.info_panel_ratio).abs() > 0.001 {
+                app.info_panel_ratio = new_ratio;
+                needs_redraw = true;
+            }
+            show_resize_cursor = true;
+        } else {
+            // Check if hovering over splitter
+            let splitter = get_splitter_rect(app, width, height);
+            if splitter.contains(x, y) {
+                show_resize_cursor = true;
+            }
+        }
+
+        // Handle game hover
+        let game_area = get_game_area(width, height);
         let input = GameInput::Hover { x, y };
         
         if let InputResult::Redraw = app.game_renderer.handle_input(input, &app.game, game_area) {
-            return true;
+            needs_redraw = true;
         }
     }
-    false
+    
+    (needs_redraw, show_resize_cursor)
 }
 
 /// Main render function
@@ -544,7 +690,7 @@ fn render_game_selection(renderer: &Renderer, app: &GuiApp) {
     // Game buttons
     let games = super::app::GameType::all();
     for (i, game) in games.iter().enumerate() {
-        let button_rect = get_game_button_rect(i);
+        let button_rect = get_game_button_rect(i, client.width, client.height);
         let is_selected = i == app.selected_game_index;
         
         let bg_color = if is_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
@@ -560,14 +706,14 @@ fn render_game_selection(renderer: &Renderer, app: &GuiApp) {
     }
 
     // Settings button
-    let settings_rect = get_game_button_rect(games.len());
+    let settings_rect = get_game_button_rect(games.len(), client.width, client.height);
     let is_settings_selected = app.selected_game_index == games.len();
     let settings_bg = if is_settings_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
     renderer.fill_rounded_rect(settings_rect, 8.0, settings_bg);
     renderer.draw_text("Settings", Rect::new(settings_rect.x, settings_rect.y + 20.0, settings_rect.width, 30.0), Colors::TEXT_PRIMARY, true);
 
     // How To Play button
-    let help_button_rect = get_game_button_rect(games.len() + 1);
+    let help_button_rect = get_game_button_rect(games.len() + 1, client.width, client.height);
     let is_help_selected = app.selected_game_index == games.len() + 1;
     let help_bg = if is_help_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
     renderer.fill_rounded_rect(help_button_rect, 8.0, help_bg);
@@ -589,7 +735,7 @@ fn render_settings(renderer: &Renderer, app: &GuiApp) {
     // Settings list
     let settings = app.get_settings_items();
     for (i, (name, value)) in settings.iter().enumerate() {
-        let item_rect = get_settings_item_rect(i);
+        let item_rect = get_settings_item_rect(i, client.width, client.height);
         let is_selected = i == app.selected_settings_index;
         
         let bg_color = if is_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
@@ -606,14 +752,14 @@ fn render_settings(renderer: &Renderer, app: &GuiApp) {
     
     // Separator (empty row)
     let sep_index = settings.len();
-    let sep_rect = get_settings_item_rect(sep_index);
+    let sep_rect = get_settings_item_rect(sep_index, client.width, client.height);
     renderer.draw_line(sep_rect.x + 50.0, sep_rect.y + sep_rect.height / 2.0, 
                        sep_rect.x + sep_rect.width - 50.0, sep_rect.y + sep_rect.height / 2.0,
                        Colors::GRID_LINE, 1.0);
     
     // Back button
     let back_index = settings.len() + 1;
-    let back_rect = get_settings_item_rect(back_index);
+    let back_rect = get_settings_item_rect(back_index, client.width, client.height);
     let is_back_selected = app.selected_settings_index == back_index;
     let back_bg = if is_back_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
     renderer.fill_rounded_rect(back_rect, 5.0, back_bg);
@@ -635,7 +781,7 @@ fn render_how_to_play(renderer: &Renderer, app: &GuiApp) {
     // Game tabs
     let games = ["Gomoku", "Connect4", "Othello", "Blokus"];
     for (i, name) in games.iter().enumerate() {
-        let tab_rect = get_how_to_play_tab_rect(i);
+        let tab_rect = get_how_to_play_tab_rect(i, client.width, client.height);
         let is_selected = i == app.selected_how_to_play_game;
         let bg_color = if is_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
         renderer.fill_rounded_rect(tab_rect, 5.0, bg_color);
@@ -647,8 +793,34 @@ fn render_how_to_play(renderer: &Renderer, app: &GuiApp) {
     renderer.fill_rounded_rect(content_rect, 10.0, Colors::PANEL_BG);
     
     let instructions = get_game_instructions(app.selected_how_to_play_game);
-    let text_rect = content_rect.with_padding(20.0);
-    renderer.draw_small_text(&instructions, text_rect, Colors::TEXT_PRIMARY, false);
+    let lines: Vec<&str> = instructions.lines().collect();
+    
+    let line_height = 20.0;
+    let text_area = content_rect.with_padding(20.0);
+    let max_visible = (text_area.height / line_height) as usize;
+    
+    let start_index = (app.how_to_play_scroll as usize).min(lines.len().saturating_sub(1));
+    
+    for (i, line) in lines.iter().skip(start_index).enumerate() {
+        if i >= max_visible {
+            break;
+        }
+        let y = text_area.y + i as f32 * line_height;
+        let line_rect = Rect::new(text_area.x, y, text_area.width, line_height);
+        renderer.draw_small_text(line, line_rect, Colors::TEXT_PRIMARY, false);
+    }
+    
+    // Scrollbar
+    if lines.len() > max_visible {
+        let max_scroll = lines.len().saturating_sub(max_visible);
+        if max_scroll > 0 {
+            let scroll_pct = (start_index as f32 / max_scroll as f32).min(1.0);
+            let bar_height = content_rect.height * (max_visible as f32 / lines.len() as f32);
+            let bar_y = content_rect.y + (content_rect.height - bar_height) * scroll_pct;
+            let bar_rect = Rect::new(content_rect.x + content_rect.width - 6.0, bar_y, 6.0, bar_height);
+            renderer.fill_rounded_rect(bar_rect, 3.0, Colors::GRID_LINE);
+        }
+    }
     
     // Navigation help
     let help_rect = Rect::new(0.0, client.height - 50.0, client.width, 30.0);
@@ -724,7 +896,7 @@ fn render_player_config(renderer: &Renderer, app: &GuiApp) {
 
     // Player type buttons
     for (i, (player_id, player_type)) in app.player_types.iter().enumerate() {
-        let button_rect = get_player_button_rect(i);
+        let button_rect = get_player_button_rect(i, client.width, client.height);
         let is_selected = i == app.selected_player_index;
         
         let bg_color = match player_type {
@@ -754,7 +926,7 @@ fn render_player_config(renderer: &Renderer, app: &GuiApp) {
     }
 
     // Start button
-    let start_rect = get_start_button_rect();
+    let start_rect = get_start_button_rect(client.width, client.height);
     renderer.fill_rounded_rect(start_rect, 8.0, Colors::BUTTON_SELECTED);
     renderer.draw_text("Start Game", start_rect, Colors::TEXT_PRIMARY, true);
 
@@ -788,21 +960,46 @@ fn render_in_game(renderer: &Renderer, app: &GuiApp) {
     let status_color = if app.ai_thinking { Colors::AI_THINKING } else { Colors::TEXT_PRIMARY };
     renderer.draw_text(&status_text, status_rect, status_color, false);
 
-    // Main area: game board on left, info panel on right
-    let game_area = get_game_area();
-    let info_panel_width = 300.0;
-    let board_area = Rect::new(game_area.x, game_area.y, game_area.width - info_panel_width - 20.0, game_area.height);
-    let info_area = Rect::new(game_area.x + board_area.width + 20.0, game_area.y, info_panel_width, game_area.height);
+    if app.ai_thinking {
+        // Draw loading bar below the header
+        let bar_rect = Rect::new(status_rect.x, 52.0, 200.0, 4.0);
+        renderer.fill_rounded_rect(bar_rect, 2.0, Colors::BUTTON_BG);
+        
+        // Animate bar
+        let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as f32;
+        let fill_width = bar_rect.width * 0.3;
+        let x_pos = bar_rect.x + (bar_rect.width - fill_width) * ((time / 500.0).sin().abs());
+        
+        let fill_rect = Rect::new(x_pos, bar_rect.y, fill_width, bar_rect.height);
+        renderer.fill_rounded_rect(fill_rect, 2.0, Colors::AI_THINKING);
+    }
+
+    // Main area: game board on left, splitter in middle, info panel on right
+    let board_area = get_board_area(app, client.width, client.height);
+    let info_area = get_info_area(app, client.width, client.height);
+    let splitter = get_splitter_rect(app, client.width, client.height);
     
     // Render game board
     app.game_renderer.render(renderer, &app.game, board_area);
 
+    // Render splitter (visible resize handle)
+    let splitter_color = if app.is_dragging_splitter { 
+        Colors::BUTTON_SELECTED 
+    } else { 
+        Colors::GRID_LINE 
+    };
+    renderer.fill_rounded_rect(
+        Rect::new(splitter.x + 2.0, splitter.y + splitter.height / 3.0, 4.0, splitter.height / 3.0),
+        2.0,
+        splitter_color
+    );
+
     // Render info panel with tabs
     render_info_panel(renderer, app, info_area);
 
-    // Move count and controls hint at bottom
-    let moves_text = format!("Moves: {} | Tab: Switch Panel", app.move_history.len());
-    let moves_rect = Rect::new(10.0, client.height - 30.0, 400.0, 30.0);
+    // Move count and controls hint at bottom (update hint to include drag)
+    let moves_text = format!("Moves: {} | Tab: Switch Panel | C: Copy History | Drag splitter to resize", app.move_history.len());
+    let moves_rect = Rect::new(10.0, client.height - 30.0, 700.0, 30.0);
     renderer.draw_small_text(&moves_text, moves_rect, Colors::TEXT_SECONDARY, false);
 }
 
@@ -840,12 +1037,15 @@ fn render_info_panel(renderer: &Renderer, app: &GuiApp, area: Rect) {
 fn render_debug_stats_panel(renderer: &Renderer, app: &GuiApp, area: Rect) {
     let lines = app.get_debug_stats_lines();
     let line_height = 18.0;
+    let max_visible = (area.height / line_height) as usize;
     
-    for (i, line) in lines.iter().enumerate() {
-        let y = area.y + i as f32 * line_height;
-        if y + line_height > area.y + area.height {
-            break; // Stop if we run out of space
+    let start_index = (app.debug_scroll as usize).min(lines.len().saturating_sub(1));
+    
+    for (i, line) in lines.iter().skip(start_index).enumerate() {
+        if i >= max_visible {
+            break;
         }
+        let y = area.y + i as f32 * line_height;
         let line_rect = Rect::new(area.x, y, area.width, line_height);
         let color = if line.starts_with("AI Status") || line.contains("Top AI Moves") {
             Colors::TEXT_ACCENT
@@ -853,6 +1053,15 @@ fn render_debug_stats_panel(renderer: &Renderer, app: &GuiApp, area: Rect) {
             Colors::TEXT_SECONDARY
         };
         renderer.draw_small_text(line, line_rect, color, false);
+    }
+
+    // Scrollbar indicator
+    if lines.len() > max_visible {
+        let scroll_pct = start_index as f32 / (lines.len() - max_visible) as f32;
+        let bar_height = area.height * (max_visible as f32 / lines.len() as f32);
+        let bar_y = area.y + (area.height - bar_height) * scroll_pct;
+        let bar_rect = Rect::new(area.x + area.width - 4.0, bar_y, 4.0, bar_height);
+        renderer.fill_rounded_rect(bar_rect, 2.0, Colors::GRID_LINE);
     }
 }
 
@@ -867,17 +1076,33 @@ fn render_move_history_panel(renderer: &Renderer, app: &GuiApp, area: Rect) {
         return;
     }
     
-    // Show recent moves (scroll to bottom)
     let max_visible = ((area.height / line_height) as usize).max(1);
-    let start_index = history.len().saturating_sub(max_visible);
+    let max_scroll = history.len().saturating_sub(max_visible);
+    
+    // When history_scroll is i32::MAX (auto-scroll mode), show the end of the list
+    // Otherwise use the scroll position as starting index
+    let start_index = if app.history_scroll >= max_scroll as i32 {
+        max_scroll
+    } else {
+        (app.history_scroll as usize).min(max_scroll)
+    };
     
     for (i, line) in history.iter().skip(start_index).enumerate() {
-        let y = area.y + i as f32 * line_height;
-        if y + line_height > area.y + area.height {
+        if i >= max_visible {
             break;
         }
+        let y = area.y + i as f32 * line_height;
         let line_rect = Rect::new(area.x, y, area.width, line_height);
         renderer.draw_small_text(line, line_rect, Colors::TEXT_SECONDARY, false);
+    }
+
+    // Scrollbar indicator
+    if history.len() > max_visible && max_scroll > 0 {
+        let scroll_pct = (start_index as f32 / max_scroll as f32).min(1.0);
+        let bar_height = area.height * (max_visible as f32 / history.len() as f32);
+        let bar_y = area.y + (area.height - bar_height) * scroll_pct;
+        let bar_rect = Rect::new(area.x + area.width - 4.0, bar_y, 4.0, bar_height);
+        renderer.fill_rounded_rect(bar_rect, 2.0, Colors::GRID_LINE);
     }
 }
 
@@ -929,38 +1154,91 @@ fn render_game_over(renderer: &Renderer, app: &GuiApp) {
 
 // Layout helper functions
 
-fn get_game_button_rect(index: usize) -> Rect {
-    // Use smaller spacing to fit all 6 items (4 games + Settings + How To Play)
-    let y = 140.0 + index as f32 * 85.0;
-    Rect::new(400.0, y, 480.0, 70.0)
+fn get_game_button_rect(index: usize, width: f32, height: f32) -> Rect {
+    let button_width = 480.0_f32.min(width * 0.8);
+    let button_height = 70.0_f32.min(height * 0.1);
+    let start_y = height * 0.2;
+    let spacing = button_height * 1.2;
+    let x = (width - button_width) / 2.0;
+    let y = start_y + index as f32 * spacing;
+    Rect::new(x, y, button_width, button_height)
 }
 
-fn get_player_button_rect(index: usize) -> Rect {
-    let y = 140.0 + index as f32 * 60.0;
-    Rect::new(440.0, y, 400.0, 50.0)
+fn get_player_button_rect(index: usize, width: f32, height: f32) -> Rect {
+    let button_width = 400.0_f32.min(width * 0.8);
+    let button_height = 50.0_f32.min(height * 0.08);
+    let start_y = height * 0.25;
+    let spacing = button_height * 1.2;
+    let x = (width - button_width) / 2.0;
+    let y = start_y + index as f32 * spacing;
+    Rect::new(x, y, button_width, button_height)
 }
 
-fn get_start_button_rect() -> Rect {
-    // Position below the player buttons, accounting for up to 4 players (Blokus)
-    Rect::new(490.0, 400.0, 300.0, 50.0)
+fn get_start_button_rect(width: f32, height: f32) -> Rect {
+    let button_width = 300.0_f32.min(width * 0.6);
+    let button_height = 50.0_f32.min(height * 0.08);
+    let x = (width - button_width) / 2.0;
+    let y = height * 0.7;
+    Rect::new(x, y, button_width, button_height)
 }
 
-fn get_game_area() -> Rect {
+fn get_game_area(width: f32, height: f32) -> Rect {
     // Reserve space for header and margins
-    Rect::new(20.0, 60.0, 1240.0, 700.0)
+    let margin = 20.0;
+    let header_height = 60.0;
+    Rect::new(margin, header_height, width - 2.0 * margin, height - header_height - margin)
 }
 
-fn get_settings_item_rect(index: usize) -> Rect {
-    let y = 100.0 + index as f32 * 45.0;
-    Rect::new(340.0, y, 600.0, 40.0)
+fn get_settings_item_rect(index: usize, width: f32, height: f32) -> Rect {
+    let item_width = 600.0_f32.min(width * 0.9);
+    let item_height = 40.0_f32.min(height * 0.06);
+    let start_y = height * 0.15;
+    let spacing = item_height * 1.1;
+    let x = (width - item_width) / 2.0;
+    let y = start_y + index as f32 * spacing;
+    Rect::new(x, y, item_width, item_height)
 }
 
-fn get_how_to_play_tab_rect(index: usize) -> Rect {
-    let x = 200.0 + index as f32 * 220.0;
-    Rect::new(x, 90.0, 200.0, 40.0)
+fn get_how_to_play_tab_rect(index: usize, width: f32, _height: f32) -> Rect {
+    let tab_width = (width - 40.0) / 4.0;
+    let tab_height = 40.0;
+    let x = 20.0 + index as f32 * tab_width;
+    let y = 80.0;
+    Rect::new(x, y, tab_width, tab_height)
 }
 
-fn get_tab_area() -> Rect {
-    // The tab area in the info panel
-    Rect::new(960.0, 60.0, 300.0, 35.0)
+/// Get the info panel width based on the app's panel ratio
+fn get_info_panel_width(app: &GuiApp, game_area: &Rect) -> f32 {
+    (game_area.width * app.info_panel_ratio).max(app.min_panel_width).min(game_area.width * app.max_panel_ratio)
 }
+
+/// Get the splitter rect for hit testing and rendering
+fn get_splitter_rect(app: &GuiApp, width: f32, height: f32) -> Rect {
+    let game_area = get_game_area(width, height);
+    let info_panel_width = get_info_panel_width(app, &game_area);
+    let splitter_width = 8.0;
+    let splitter_x = game_area.x + game_area.width - info_panel_width - splitter_width;
+    Rect::new(splitter_x, game_area.y, splitter_width, game_area.height)
+}
+
+/// Get the board area (left of the splitter)
+fn get_board_area(app: &GuiApp, width: f32, height: f32) -> Rect {
+    let game_area = get_game_area(width, height);
+    let info_panel_width = get_info_panel_width(app, &game_area);
+    let splitter_width = 8.0;
+    Rect::new(game_area.x, game_area.y, game_area.width - info_panel_width - splitter_width - 10.0, game_area.height)
+}
+
+/// Get the info panel area (right of the splitter)
+fn get_info_area(app: &GuiApp, width: f32, height: f32) -> Rect {
+    let game_area = get_game_area(width, height);
+    let info_panel_width = get_info_panel_width(app, &game_area);
+    Rect::new(game_area.x + game_area.width - info_panel_width, game_area.y, info_panel_width, game_area.height)
+}
+
+fn get_tab_area(app: &GuiApp, width: f32, height: f32) -> Rect {
+    let info_area = get_info_area(app, width, height);
+    Rect::new(info_area.x, info_area.y, info_area.width, 35.0)
+}
+
+

@@ -1692,6 +1692,84 @@ impl App {
         }
     }
 
+    /// Get the player name for a given player ID
+    ///
+    /// Returns a human-readable name based on game type and player ID.
+    fn get_player_name_for_id(&self, player_id: i32) -> String {
+        match &self.game_wrapper {
+            GameWrapper::Blokus(_) => {
+                match player_id {
+                    1 => "Blue".to_string(),
+                    2 => "Yellow".to_string(),
+                    3 => "Red".to_string(),
+                    4 => "Green".to_string(),
+                    _ => format!("Player {}", player_id),
+                }
+            }
+            GameWrapper::Othello(_) => {
+                if player_id == 1 { "Black".to_string() } else { "White".to_string() }
+            }
+            _ => {
+                if player_id == 1 { "Player 1".to_string() } else { "Player 2".to_string() }
+            }
+        }
+    }
+
+    /// Format move history for clipboard copying
+    ///
+    /// Creates a nicely formatted string suitable for pasting into other applications.
+    /// Includes game type, all moves with player names, and game result if over.
+    pub fn format_history_for_clipboard(&self) -> String {
+        if self.move_history.is_empty() {
+            return String::from("No moves made yet.");
+        }
+
+        let game_name = match &self.game_wrapper {
+            GameWrapper::Gomoku(_) => "Gomoku",
+            GameWrapper::Connect4(_) => "Connect 4",
+            GameWrapper::Othello(_) => "Othello",
+            GameWrapper::Blokus(_) => "Blokus",
+        };
+
+        let mut output = format!("=== {} Game History ===\n\n", game_name);
+
+        for (i, entry) in self.move_history.iter().enumerate() {
+            let player_name = self.get_player_name_for_id(entry.player);
+            output.push_str(&format!(
+                "{}. {} - {}\n",
+                i + 1,
+                player_name,
+                entry.a_move
+            ));
+        }
+
+        // Add game result if over
+        match self.game_status {
+            GameStatus::Win(winner) => {
+                let winner_name = self.get_player_name_for_id(winner);
+                output.push_str(&format!("\nResult: {} wins!\n", winner_name));
+            }
+            GameStatus::Draw => {
+                output.push_str("\nResult: Draw\n");
+            }
+            GameStatus::InProgress => {
+                output.push_str(&format!("\n(Game in progress - {} to move)\n", 
+                    self.get_player_name_for_id(self.game_wrapper.get_current_player())));
+            }
+        }
+
+        output
+    }
+
+    /// Copy move history to clipboard
+    ///
+    /// Formats the move history nicely and copies it to the system clipboard.
+    /// Returns true if successful, false otherwise.
+    pub fn copy_history_to_clipboard(&self) -> bool {
+        let history_text = self.format_history_for_clipboard();
+        crate::clipboard::copy_history_to_clipboard(&history_text)
+    }
+
     /// Get the player symbol/marker for display
     pub fn get_player_symbol(&self, player_id: i32) -> &'static str {
         match &self.game_wrapper {

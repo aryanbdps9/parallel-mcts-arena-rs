@@ -36,7 +36,7 @@ impl BlokusInstructionPanelComponent {
     }
 
     /// Generate instruction text based on current game state
-    fn get_instructions(&self, app: &App) -> Vec<Line> {
+    fn get_instructions(&self, app: &App) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
         // Game-specific instructions

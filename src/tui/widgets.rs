@@ -19,7 +19,6 @@
 use crate::app::{ActiveTab, App, AppMode, GameStatus, Player};
 use crate::components::ui::{GenericGrid, GenericGridConfig};
 use crate::game_wrapper::GameWrapper;
-use crate::games::blokus::BlokusState;
 use crate::tui::games::{blokus, connect4, gomoku, othello};
 use mcts::GameState;
 use ratatui::prelude::*;
@@ -1089,7 +1088,7 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
         ..Default::default()
     };
 
-    let grid = GenericGrid::new(board, |r, c, cell, is_cursor| {
+    let grid = GenericGrid::new(board, |_r, _c, cell, is_cursor| {
         let is_cursor_actual = is_cursor
             && !matches!(app.game_wrapper, GameWrapper::Connect4(_))
             && !app.is_current_player_ai();

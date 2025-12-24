@@ -57,11 +57,14 @@ pub mod app; // Core application state and configuration
 #[cfg(feature = "tui")]
 pub mod components;
 pub mod game_wrapper; // Unified interface for all games
+pub mod game_controller; // Central game state management
 pub mod games; // Game implementations (Gomoku, Connect4, Othello, Blokus)
 #[cfg(feature = "tui")]
 pub mod tui; // Terminal user interface implementation
 #[cfg(feature = "gui")]
 pub mod gui; // Windows GUI implementation
+pub mod clipboard; // Cross-platform clipboard support
+
 
 #[cfg(feature = "tui")]
 use crate::app::App;
