@@ -87,6 +87,13 @@ impl Component for GameOverComponent {
             ),
             Span::raw(" - Restart game  "),
             Span::styled(
+                "H",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" - How to play  "),
+            Span::styled(
                 "ESC",
                 Style::default()
                     .fg(Color::Yellow)
@@ -118,6 +125,10 @@ impl Component for GameOverComponent {
                 }
                 KeyCode::Char('r') | KeyCode::Enter => {
                     app.reset_game();
+                    Ok(true)
+                }
+                KeyCode::Char('h') | KeyCode::Char('H') => {
+                    app.mode = AppMode::HowToPlay;
                     Ok(true)
                 }
                 KeyCode::Esc => {

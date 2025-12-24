@@ -1,0 +1,52 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                           HOW TO PLAY: OTHELLO                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+OBJECTIVE
+─────────
+Have the majority of discs showing your color when the game ends.
+
+GAMEPLAY
+────────
+• Two players: Black (⚫) goes first, White (⚪) second
+• Place a disc to "capture" opponent's discs by flanking them
+• Captured discs flip to your color
+• You MUST capture at least one disc each turn
+• If you cannot make a legal move, your turn is skipped
+
+CAPTURING
+─────────
+• Place your disc so opponent's discs are between your new disc
+  and another disc of your color (in a straight line)
+• All flanked discs flip to your color
+• You can capture in multiple directions with one move!
+• Lines can be horizontal, vertical, or diagonal
+
+WINNING
+───────
+• Game ends when neither player can move (usually board is full)
+• Count all discs - player with the most wins
+• The board is 8×8 (64 squares total)
+
+CONTROLS
+────────
+  ↑ ↓ ← →     Move cursor on the board
+  Enter/Space  Place your disc at the cursor position
+  R            Restart the game
+  H            Show this help screen
+  Tab          Switch between Debug Stats and Move History
+  PgUp/PgDn    Scroll the stats/history panel
+  Esc          Return to game selection menu
+  Q            Quit the application
+
+STRATEGY TIPS
+─────────────
+• CORNERS are the most valuable - they can never be flipped!
+• Edges are stable once connected to corners
+• Avoid giving your opponent corner access
+• "X-squares" (diagonal to corners) are often dangerous to take early
+• Fewer discs early can be better - more mobility!
+• Try to limit opponent's legal moves (mobility strategy)
+• The endgame is about disc count - early game is about position
+
+Press ESC or H to return to the game

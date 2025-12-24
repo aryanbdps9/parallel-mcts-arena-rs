@@ -1,0 +1,44 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          HOW TO PLAY: CONNECT 4                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+OBJECTIVE
+─────────
+Be the first player to connect {LINE_SIZE} of your discs in a row - 
+horizontally, vertically, or diagonally.
+
+GAMEPLAY
+────────
+• Players take turns dropping discs into columns
+• Player 1 uses 🔴 (red), Player 2 uses 🟡 (yellow)
+• Discs fall to the lowest available position in a column
+• Current board: {BOARD_HEIGHT} rows × {BOARD_WIDTH} columns
+
+WINNING
+───────
+• Form an unbroken line of {LINE_SIZE} discs in any direction
+• The game ends immediately when a player achieves this
+• If the board fills up with no winner, the game is a draw
+
+CONTROLS
+────────
+  ← →          Select column
+  Enter/Space  Drop your disc into the selected column
+  R            Restart the game
+  H            Show this help screen
+  Tab          Switch between Debug Stats and Move History
+  PgUp/PgDn    Scroll the stats/history panel
+  Esc          Return to game selection menu
+  Q            Quit the application
+
+STRATEGY TIPS
+─────────────
+• Control the center column - it's the most valuable position
+• Build threats in multiple directions simultaneously
+• Force your opponent to block, creating opportunities elsewhere
+• Watch for diagonal connections - they're often overlooked
+• The bottom row is crucial - establish a strong foundation
+• Try to get the "7th disc" in a column race (odd/even strategy)
+• Set up "traps" where you can win in two different ways
+
+Press ESC or H to return to the game

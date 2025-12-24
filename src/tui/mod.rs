@@ -106,21 +106,39 @@ pub fn run(app: &mut App) -> io::Result<()> {
                     // Create component event from mouse input
                     let component_event = match mouse.kind {
                         crossterm::event::MouseEventKind::Down(_) => {
-                            crate::components::events::ComponentEvent::Input(
+                            Some(crate::components::events::ComponentEvent::Input(
                                 crate::components::events::InputEvent::MouseClick {
                                     x: mouse.column,
                                     y: mouse.row,
                                     button: 1, // Left button by default
                                 },
-                            )
+                            ))
                         }
                         crossterm::event::MouseEventKind::Drag(_) => {
-                            crate::components::events::ComponentEvent::Input(
+                            Some(crate::components::events::ComponentEvent::Input(
                                 crate::components::events::InputEvent::MouseMove {
                                     x: mouse.column,
                                     y: mouse.row,
                                 },
-                            )
+                            ))
+                        }
+                        crossterm::event::MouseEventKind::ScrollUp => {
+                            Some(crate::components::events::ComponentEvent::Input(
+                                crate::components::events::InputEvent::MouseScroll {
+                                    x: mouse.column,
+                                    y: mouse.row,
+                                    up: true,
+                                },
+                            ))
+                        }
+                        crossterm::event::MouseEventKind::ScrollDown => {
+                            Some(crate::components::events::ComponentEvent::Input(
+                                crate::components::events::InputEvent::MouseScroll {
+                                    x: mouse.column,
+                                    y: mouse.row,
+                                    up: false,
+                                },
+                            ))
                         }
                         _ => {
                             // For other mouse events, use legacy handling
@@ -134,14 +152,12 @@ pub fn run(app: &mut App) -> io::Result<()> {
                                 mouse.row,
                                 terminal_rect,
                             );
-                            continue;
+                            None
                         }
                     };
 
-                    // Try component system first
-                    let use_components = true; // Always try components first
-
-                    if use_components {
+                    // Try component system first if we have a component event
+                    if let Some(component_event) = component_event {
                         let mut temp_manager = std::mem::take(&mut app.component_manager);
                         let consumed = temp_manager.handle_event(&component_event, app);
                         app.component_manager = temp_manager;
@@ -159,18 +175,6 @@ pub fn run(app: &mut App) -> io::Result<()> {
                                 terminal_rect,
                             );
                         }
-                    } else {
-                        // Use legacy mouse handling for non-migrated modes
-                        let terminal_size = terminal.size()?;
-                        let terminal_rect =
-                            Rect::new(0, 0, terminal_size.width, terminal_size.height);
-                        input::handle_mouse_event(
-                            app,
-                            mouse.kind,
-                            mouse.column,
-                            mouse.row,
-                            terminal_rect,
-                        );
                     }
                 }
                 _ => {}

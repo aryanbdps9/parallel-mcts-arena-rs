@@ -370,6 +370,7 @@ pub enum AppMode {
     PlayerConfig,
     InGame,
     GameOver,
+    HowToPlay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

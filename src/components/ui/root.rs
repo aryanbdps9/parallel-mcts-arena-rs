@@ -35,7 +35,8 @@ use crate::app::{App, AppMode};
 use crate::components::core::{Component, ComponentId, ComponentResult, EventResult};
 use crate::components::events::ComponentEvent;
 use crate::components::ui::{
-    game_over::GameOverComponent, game_selection::GameSelectionComponent, in_game::InGameComponent,
+    game_over::GameOverComponent, game_selection::GameSelectionComponent,
+    how_to_play::HowToPlayComponent, in_game::InGameComponent,
     player_config::PlayerConfigComponent, settings::SettingsComponent,
 };
 
@@ -85,6 +86,10 @@ pub struct RootComponent {
     /// End-game results and continuation options component
     /// Active when AppMode::GameOver
     game_over: GameOverComponent,
+
+    /// Help screen showing how to play the current game
+    /// Active when AppMode::HowToPlay
+    how_to_play: HowToPlayComponent,
 }
 
 impl RootComponent {
@@ -107,6 +112,7 @@ impl RootComponent {
             player_config: PlayerConfigComponent::new(),
             in_game: InGameComponent::new(),
             game_over: GameOverComponent::new(),
+            how_to_play: HowToPlayComponent::new(),
         }
     }
 }
@@ -145,6 +151,7 @@ impl Component for RootComponent {
             AppMode::PlayerConfig => self.player_config.render(frame, area, app),
             AppMode::InGame => self.in_game.render(frame, area, app),
             AppMode::GameOver => self.game_over.render(frame, area, app),
+            AppMode::HowToPlay => self.how_to_play.render(frame, area, app),
         }
     }
 
@@ -173,6 +180,7 @@ impl Component for RootComponent {
             AppMode::PlayerConfig => self.player_config.handle_event(event, app),
             AppMode::InGame => self.in_game.handle_event(event, app),
             AppMode::GameOver => self.game_over.handle_event(event, app),
+            AppMode::HowToPlay => self.how_to_play.handle_event(event, app),
         }
     }
 
@@ -194,6 +202,7 @@ impl Component for RootComponent {
             &mut self.player_config,
             &mut self.in_game,
             &mut self.game_over,
+            &mut self.how_to_play,
         ]
     }
 
@@ -211,6 +220,7 @@ impl Component for RootComponent {
             &self.player_config,
             &self.in_game,
             &self.game_over,
+            &self.how_to_play,
         ]
     }
 

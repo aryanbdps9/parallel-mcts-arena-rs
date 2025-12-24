@@ -75,3 +75,31 @@ If your game requires a completely custom UI (like Blokus):
 ## 5. Application Entry Point
 
 1.  Open `src/app.rs` to ensure your game is in the `games` list in `App::new` if it's not automatically picked up (currently hardcoded in `main.rs` or `app.rs`).
+
+## 6. How To Play Documentation
+
+When adding a new game, you should also add a "How to Play" help file that players can view by pressing `H` during gameplay.
+
+1.  Create a new file `docs/how_to_play/mygame.txt` with the following sections:
+    *   **Header**: Game title in a box
+    *   **OBJECTIVE**: Brief description of how to win
+    *   **GAMEPLAY**: How the game is played turn by turn
+    *   **WINNING**: Win/lose/draw conditions
+    *   **CONTROLS**: List of keyboard controls with descriptions
+    *   **STRATEGY TIPS**: Optional helpful hints for players
+
+2.  Open `src/components/ui/how_to_play.rs`:
+    *   Add an include for your help file:
+        ```rust
+        const MYGAME_HELP: &str = include_str!("../../../docs/how_to_play/mygame.txt");
+        ```
+    *   Update `get_help_content()` to return your help text:
+        ```rust
+        GameWrapper::MyGame(_) => MYGAME_HELP,
+        ```
+    *   Update `get_game_name()` to return the display name:
+        ```rust
+        GameWrapper::MyGame(_) => "My Game",
+        ```
+
+See the existing help files (`gomoku.txt`, `connect4.txt`, `othello.txt`, `blokus.txt`) for examples of the formatting style.

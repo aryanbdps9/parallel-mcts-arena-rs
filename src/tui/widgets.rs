@@ -47,6 +47,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         AppMode::Settings => draw_settings_menu(frame, app, main_layout[0]),
         AppMode::PlayerConfig => draw_player_config_menu(frame, app, main_layout[0]),
         AppMode::InGame | AppMode::GameOver => draw_game_view(frame, app, main_layout[0]),
+        AppMode::HowToPlay => {
+            // HowToPlay is handled by the component system, not legacy rendering
+            // This branch should not be reached in normal operation
+        }
     }
 }
 
@@ -329,7 +333,7 @@ fn draw_blokus_game_view(f: &mut Frame, app: &App, area: Rect) {
         };
         // Only show cursor for human turns
         let show_cursor = !app.is_current_player_ai();
-        blokus_ui::draw_blokus_board(
+        blokus::draw_blokus_board(
             f,
             state,
             board_area,
@@ -340,10 +344,10 @@ fn draw_blokus_game_view(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Draw piece selection panel
-    blokus_ui::draw_blokus_piece_selection(f, app, piece_area);
+    blokus::draw_blokus_piece_selection(f, app, piece_area);
 
     // Draw player status panel
-    blokus_ui::draw_blokus_player_status(f, app, player_area);
+    blokus::draw_blokus_player_status(f, app, player_area);
 
     // Split the bottom area into instructions and stats/history
     let bottom_vertical = Layout::default()
@@ -1111,10 +1115,4 @@ fn draw_standard_board(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(grid, area);
 }
-
-/// Renders the Blokus game board with piece placement visualization
-///
-/// Displays the 20x20 Blokus board with colored squares for each player's pieces.
-/// Highlights the most recent move and can show ghost pieces for preview during
-/// human player turns.
 

@@ -157,6 +157,10 @@ fn handle_mouse_click(app: &mut App, col: u16, row: u16, terminal_size: Rect) {
             // Handle clicks on player configuration menu items
             handle_player_config_click(app, col, row, terminal_size);
         }
+        AppMode::HowToPlay => {
+            // No mouse click handling needed for help screen
+            // Scrolling is handled via keyboard or mouse scroll events
+        }
     }
 }
 

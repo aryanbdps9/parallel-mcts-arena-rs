@@ -836,15 +836,15 @@ impl InGameComponent {
             crate::app::AppMode::InGame => {
                 if app.game_status == GameStatus::InProgress {
                     if app.is_current_player_ai() {
-                        "AI is thinking..."
+                        "AI is thinking... | H: Help"
                     } else {
-                        "Arrows: move cursor | Enter/Space: make move | PgUp/PgDn: scroll"
+                        "Arrows: move | Enter: place | H: Help | Tab: stats/history"
                     }
                 } else {
-                    "Press 'r' to restart | Esc for menu"
+                    "R: restart | H: Help | Esc: menu"
                 }
             }
-            crate::app::AppMode::GameOver => "Press 'r' to restart | Esc for menu",
+            crate::app::AppMode::GameOver => "R: restart | H: Help | Esc: menu",
             _ => "",
         };
 
@@ -1837,6 +1837,11 @@ impl Component for InGameComponent {
                         app.should_quit = true;
                         Ok(true)
                     }
+                    KeyCode::Char('h') | KeyCode::Char('H') => {
+                        // Show help screen - works even during AI's turn
+                        app.mode = AppMode::HowToPlay;
+                        Ok(true)
+                    }
                     KeyCode::Char('r') | KeyCode::Char('R') => {
                         // For Blokus, let the keyboard input handler deal with rotation vs reset
                         if matches!(app.game_wrapper, GameWrapper::Blokus(_))
@@ -1995,6 +2000,11 @@ impl InGameComponent {
             }
             KeyCode::End => {
                 app.enable_history_auto_scroll();
+                Ok(true)
+            }
+            // Help screen - show how to play
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                app.mode = AppMode::HowToPlay;
                 Ok(true)
             }
             // Blokus-specific keys
