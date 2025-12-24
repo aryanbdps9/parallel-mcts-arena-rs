@@ -2,8 +2,7 @@
 //!
 //! Renders the Blokus game board with polyomino pieces for 4 players.
 
-use crate::game_wrapper::{GameWrapper, MoveWrapper};
-use crate::games::blokus::BlokusMove;
+use crate::game_wrapper::GameWrapper;
 use crate::gui::colors::Colors;
 use crate::gui::renderer::{Rect, Renderer};
 use mcts::GameState;
@@ -184,7 +183,7 @@ impl GameRenderer for BlokusRenderer {
                 }
                 InputResult::None
             }
-            GameInput::Key { code, pressed } => {
+            GameInput::Key { code: _, pressed } => {
                 // Could use keyboard to select pieces
                 if pressed {
                     // R to rotate, F to flip, 0-9 for piece selection, etc.

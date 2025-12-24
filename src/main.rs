@@ -323,7 +323,7 @@ fn main() -> io::Result<()> {
     // Check if GUI mode is requested
     #[cfg(feature = "gui")]
     if args.gui {
-        // Launch Windows GUI
+        // Launch Windows GUI with all configuration options
         let gui_app = gui::GuiApp::new(
             args.exploration_factor,
             num_threads,
@@ -332,6 +332,9 @@ fn main() -> io::Result<()> {
             args.board_size,
             args.line_size,
             args.timeout_secs,
+            args.stats_interval_secs,
+            args.ai_only,
+            args.shared_tree,
         );
         
         return gui::run_gui(gui_app)
