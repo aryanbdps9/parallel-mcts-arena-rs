@@ -9,7 +9,6 @@ A multi-threaded Monte Carlo Tree Search engine that plays four classic board ga
 - Set `--num-threads` to match your CPU core count (default: 8)
 - Increase `--timeout-secs` for stronger play at the cost of speed
 - Enable `--shared-tree` for consistent game analysis (enabled by default)
-- Use modern terminal (Windows Terminal, iTerm2, or similar) for best UI experience
 
 **Gomoku (Five in a Row)**
 - Board: 15×15 grid (configurable)
@@ -42,8 +41,8 @@ A multi-threaded Monte Carlo Tree Search engine that plays four classic board ga
 - Real-time search statistics
 
 **Interface**
-- Terminal-based UI with mouse and keyboard support
-- Resizable panels with drag-and-drop boundaries
+- Windows GUI with Direct2D rendering
+- Mouse and keyboard support
 - Live AI analysis and move history
 - Game-specific controls and optimizations
 - Debug mode with detailed search statistics
@@ -58,14 +57,14 @@ A multi-threaded Monte Carlo Tree Search engine that plays four classic board ga
 
 **Prerequisites**
 - Rust toolchain (install from [rustup.rs](https://rustup.rs/))
-- Modern terminal (Windows Terminal recommended)
+- Windows (for GUI support)
 
 **Build and Run**
 ```bash
 git clone https://github.com/aryanbdps9/parallel-mcts-arena-rs.git
 cd parallel-mcts-arena-rs
-cargo build --release
-cargo run --release
+cargo build --release --features gui
+cargo run --release --features gui
 ```
 
 **Alternative execution methods:**
@@ -74,7 +73,7 @@ cargo run --release
 ./target/release/play
 
 # Explicitly specify the binary name
-cargo run --release --bin play
+cargo run --release --features gui --bin play
 ```
 
 Use `--release` for optimal performance.
@@ -91,15 +90,15 @@ Launch the application and use the menu system:
 **Command Line Mode**
 ```bash
 # Start specific game with AI vs AI
-cargo run --release -- --game Gomoku --ai-only
+cargo run --release --features gui -- --game Gomoku --ai-only
 
 # Custom board size and AI settings
-cargo run --release -- --game Gomoku --board-size 19 --exploration-factor 1.4 --num-threads 16
+cargo run --release --features gui -- --game Gomoku --board-size 19 --exploration-factor 1.4 --num-threads 16
 
 # Fast AI games for analysis
-cargo run --release -- --ai-only --timeout-secs 10
+cargo run --release --features gui -- --ai-only --timeout-secs 10
 
-# Using the binary directly (after building with cargo build --release)
+# Using the binary directly (after building with cargo build --release --features gui)
 ./target/release/play --game Connect4 --ai-only --timeout-secs 5
 ```
 
@@ -128,11 +127,6 @@ cargo run --release -- --ai-only --timeout-secs 10
 - R: Restart game
 - Esc: Return to menu
 - Q: Quit application
-
-**Information Panels**
-- Page Up/Down: Scroll statistics and move history
-- Home/End: Jump to top/bottom of panels
-- Mouse drag: Resize panel boundaries
 
 **Blokus-Specific**
 - R: Rotate selected piece
@@ -165,13 +159,12 @@ cargo run --release -- --ai-only --timeout-secs 10
 **Architecture**
 - GameState trait provides unified interface for all games
 - Wrapper types allow generic MCTS engine to work with any game
-- Terminal UI built with Ratatui and Crossterm
+- Windows GUI built with Direct2D
 - Async communication between UI and AI threads
 
 **Dependencies**
 - Rust: Systems programming language with memory safety
-- Ratatui: Terminal user interface framework
-- Crossterm: Cross-platform terminal manipulation
+- Windows API: Native GUI rendering with Direct2D
 - Rayon: Data parallelism library
 - Parking Lot: High-performance synchronization primitives
 - Clap: Command line argument parsing
@@ -187,10 +180,9 @@ cargo run --release -- --ai-only --timeout-secs 10
 - Disable debug features in release builds
 
 **UI Issues**
-- Ensure terminal supports mouse input and 256 colors
-- Try resizing terminal window if layout appears broken
-- Use Ctrl+C to force quit if application becomes unresponsive
-- Check terminal documentation for proper mouse support
+- Ensure Windows is up to date for proper Direct2D support
+- Try resizing window if layout appears broken
+- Use Alt+F4 to force quit if application becomes unresponsive
 
 **Installation Issues**
 - Update Rust toolchain: `rustup update`

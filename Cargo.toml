@@ -8,12 +8,11 @@ edition = "2024"
 description = "A multi-threaded Monte Carlo Tree Search engine that plays four classic board games with configurable AI opponents"
 readme = "README.md"
 license-file = "LICENSE"
-keywords = ["games", "mcts", "ai", "board-games", "tui"]
+keywords = ["games", "mcts", "ai", "board-games"]
 categories = ["games", "command-line-utilities"]
 
 [features]
-default = ["tui"]
-tui = ["ratatui", "crossterm", "windows"]
+default = ["gui"]
 gui = ["windows"]
 
 # Runtime Dependencies
@@ -28,10 +27,6 @@ parking_lot = "0.12.3"
 colored = "3.0.0"
 # High-quality random number generator
 rand_xoshiro = "0.7.0"
-# Terminal UI framework with crossterm support (optional for TUI mode)
-ratatui = { version = "0.29.0", features = ["crossterm"], optional = true }
-# Cross-platform terminal manipulation (optional for TUI mode)
-crossterm = { version = "0.29.0", optional = true }
 # Asynchronous runtime
 tokio = { version = "1.45.1", features = ["full"] }
 # CPU information and control

@@ -14,7 +14,7 @@
 //! }
 //! ```
 
-#[cfg(any(feature = "tui", feature = "gui"))]
+#[cfg(feature = "gui")]
 use windows::{
     Win32::{
         Foundation::{HANDLE, GlobalFree},
@@ -30,11 +30,11 @@ use windows::{
     core::Result,
 };
 
-#[cfg(any(feature = "tui", feature = "gui"))]
+#[cfg(feature = "gui")]
 use std::ffi::CString;
 
 /// Clipboard format for plain text (CF_TEXT = 1)
-#[cfg(any(feature = "tui", feature = "gui"))]
+#[cfg(feature = "gui")]
 const CF_TEXT: u32 = 1;
 
 /// Error type for clipboard operations
@@ -89,7 +89,7 @@ pub type ClipboardResult<T> = std::result::Result<T, ClipboardError>;
 /// let move_history = "1. Player 1 - G(7,7)\n2. Player 2 - G(7,8)";
 /// copy_to_clipboard(move_history)?;
 /// ```
-#[cfg(any(feature = "tui", feature = "gui"))]
+#[cfg(feature = "gui")]
 pub fn copy_to_clipboard(text: &str) -> Result<()> {
     unsafe {
         // Open the clipboard
@@ -139,17 +139,17 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Fallback implementation when Windows features are not available
-#[cfg(not(any(feature = "tui", feature = "gui")))]
+/// Fallback implementation when GUI features are not available
+#[cfg(not(feature = "gui"))]
 pub fn copy_to_clipboard(_text: &str) -> std::result::Result<(), ClipboardError> {
-    // No clipboard support without Windows features
+    // No clipboard support without GUI features
     Ok(())
 }
 
 /// Copy move history to clipboard with visual feedback
 ///
 /// This function is designed to be called from the UI and provides
-/// a consistent interface for copying move history across both TUI and GUI.
+/// a consistent interface for copying move history.
 ///
 /// # Arguments
 /// * `history_text` - The formatted move history text to copy
@@ -157,13 +157,13 @@ pub fn copy_to_clipboard(_text: &str) -> std::result::Result<(), ClipboardError>
 /// # Returns
 /// * `true` if the copy was successful
 /// * `false` if the copy failed
-#[cfg(any(feature = "tui", feature = "gui"))]
+#[cfg(feature = "gui")]
 pub fn copy_history_to_clipboard(history_text: &str) -> bool {
     copy_to_clipboard(history_text).is_ok()
 }
 
-/// Fallback for when Windows features are not available
-#[cfg(not(any(feature = "tui", feature = "gui")))]
+/// Fallback for when GUI features are not available
+#[cfg(not(feature = "gui"))]
 pub fn copy_history_to_clipboard(_history_text: &str) -> bool {
     false
 }

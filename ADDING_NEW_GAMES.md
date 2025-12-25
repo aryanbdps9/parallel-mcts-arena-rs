@@ -40,45 +40,27 @@ This guide outlines the steps to add a new game to the Parallel MCTS Arena.
         impl_game_dispatch!(Gomoku, Connect4, Blokus, Othello, MyGame);
         ```
 
-## 3. UI Implementation
+## 3. GUI Implementation
 
-The UI logic is separated into game-specific modules in `src/tui/games/`.
+The GUI rendering logic is in `src/gui/game_renderers/`.
 
-1.  Create a new file `src/tui/games/mygame.rs`.
-2.  Implement the symbol and style logic. For standard grid games, implement `get_cell_style`:
-    ```rust
-    use ratatui::style::{Color, Style};
-
-    pub fn get_cell_style(cell: i32, is_cursor: bool) -> (&'static str, Style) {
-        // Return symbol and style based on cell value
-    }
-    ```
-3.  Register your module in `src/tui/games/mod.rs`:
+1.  Create a new file `src/gui/game_renderers/mygame.rs`.
+2.  Implement the rendering functions for your game using Direct2D.
+3.  Register your module in `src/gui/game_renderers/mod.rs`:
     ```rust
     pub mod mygame;
     ```
-4.  Open `src/tui/widgets.rs`:
-    *   Import your module: `use crate::tui::games::mygame;`
-    *   Update `draw_standard_board` to call your `get_cell_style` function in the match block.
-    *   If your game needs custom grid configuration (e.g., different cell width), update the configuration match block in `draw_standard_board`.
-
-If your game requires a completely custom UI (like Blokus):
-1.  Implement your drawing functions in `src/tui/games/mygame.rs`.
-2.  Update `draw_game_view` in `src/tui/widgets.rs` to dispatch to your custom view.
+4.  Update `src/gui/renderer.rs` to handle rendering your game.
 
 ## 4. Input Handling
 
-1.  Open `src/tui/mouse.rs`.
-2.  Update `handle_mouse_event` to translate click coordinates into your game's move type.
+1.  Open `src/gui/window.rs`.
+2.  Update the mouse click handling to translate click coordinates into your game's move type.
 3.  Wrap the move in `MoveWrapper::MyGame(move)`.
 
-## 5. Application Entry Point
+## 5. How To Play Documentation
 
-1.  Open `src/app.rs` to ensure your game is in the `games` list in `App::new` if it's not automatically picked up (currently hardcoded in `main.rs` or `app.rs`).
-
-## 6. How To Play Documentation
-
-When adding a new game, you should also add a "How to Play" help file that players can view by pressing `H` during gameplay.
+When adding a new game, you should also add a "How to Play" help file.
 
 1.  Create a new file `docs/how_to_play/mygame.txt` with the following sections:
     *   **Header**: Game title in a box
@@ -87,19 +69,5 @@ When adding a new game, you should also add a "How to Play" help file that playe
     *   **WINNING**: Win/lose/draw conditions
     *   **CONTROLS**: List of keyboard controls with descriptions
     *   **STRATEGY TIPS**: Optional helpful hints for players
-
-2.  Open `src/components/ui/how_to_play.rs`:
-    *   Add an include for your help file:
-        ```rust
-        const MYGAME_HELP: &str = include_str!("../../../docs/how_to_play/mygame.txt");
-        ```
-    *   Update `get_help_content()` to return your help text:
-        ```rust
-        GameWrapper::MyGame(_) => MYGAME_HELP,
-        ```
-    *   Update `get_game_name()` to return the display name:
-        ```rust
-        GameWrapper::MyGame(_) => "My Game",
-        ```
 
 See the existing help files (`gomoku.txt`, `connect4.txt`, `othello.txt`, `blokus.txt`) for examples of the formatting style.
