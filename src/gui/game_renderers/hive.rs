@@ -480,7 +480,7 @@ impl HiveRenderer {
         renderer.draw_text("Select Piece", title_rect, Colors::TEXT_PRIMARY, true);
         
         let mut y = area.y + 35.0;
-        let button_height = 30.0;
+        let button_height = 50.0;
         let spacing = 5.0;
         
         for piece_type in PieceType::all() {
@@ -499,10 +499,17 @@ impl HiveRenderer {
             
             renderer.fill_rounded_rect(button_rect, 5.0, bg_color);
             
-            // Button text
-            let label = format!("{} ({})", piece_type.char(), count);
+            // Draw piece icon on the left side
+            let icon_size = button_height * 0.35;
+            let icon_cx = button_rect.x + 30.0;
+            let icon_cy = button_rect.y + button_height / 2.0;
+            self.draw_piece_icon(renderer, icon_cx, icon_cy, icon_size, *piece_type, Colors::TEXT_PRIMARY);
+            
+            // Draw count on the right side
+            let count_text = format!("x{}", count);
             let text_color = if count == 0 { Colors::TEXT_SECONDARY } else { Colors::TEXT_PRIMARY };
-            renderer.draw_text(&label, button_rect, text_color, true);
+            let count_rect = Rect::new(button_rect.x + 55.0, button_rect.y, button_rect.width - 70.0, button_height);
+            renderer.draw_text(&count_text, count_rect, text_color, true);
             
             // Key hint
             let key_hint = match piece_type {
@@ -512,7 +519,7 @@ impl HiveRenderer {
                 PieceType::Grasshopper => "G",
                 PieceType::Ant => "A",
             };
-            let hint_rect = Rect::new(area.x + area.width - 35.0, y, 25.0, button_height);
+            let hint_rect = Rect::new(area.x + area.width - 35.0, y + (button_height - 20.0) / 2.0, 25.0, 20.0);
             renderer.draw_small_text(key_hint, hint_rect, Colors::TEXT_SECONDARY, true);
             
             y += button_height + spacing;
@@ -522,12 +529,31 @@ impl HiveRenderer {
         let hint_y = area.y + area.height - 60.0;
         let hint_rect = Rect::new(area.x + 5.0, hint_y, area.width - 10.0, 55.0);
         let hint_text = match self.mode {
-            InputMode::SelectPiece => "Press Q/B/S/G/A\nto select piece",
+            InputMode::SelectPiece => "Click piece or\npress Q/B/S/G/A",
             InputMode::PlacePiece(_) => "Click to place\nESC to cancel",
             InputMode::SelectMove => "Click your piece\nto move it",
             InputMode::MovePiece(_) => "Click destination\nESC to cancel",
         };
         renderer.draw_small_text(hint_text, hint_rect, Colors::TEXT_SECONDARY, true);
+    }
+
+    /// Get piece button rect for hit testing
+    fn get_piece_button_rect(&self, area: Rect, piece_index: usize) -> Rect {
+        let y = area.y + 35.0 + (piece_index as f32) * 55.0; // button_height (50) + spacing (5)
+        Rect::new(area.x + 10.0, y, area.width - 20.0, 50.0)
+    }
+
+    /// Check if a point is in the piece panel and return the piece type if clicking a button
+    fn get_piece_at_panel_click(&self, x: f32, y: f32, panel_area: Rect) -> Option<PieceType> {
+        for (index, piece_type) in PieceType::all().iter().enumerate() {
+            let button_rect = self.get_piece_button_rect(panel_area, index);
+            if x >= button_rect.x && x <= button_rect.x + button_rect.width
+                && y >= button_rect.y && y <= button_rect.y + button_rect.height
+            {
+                return Some(*piece_type);
+            }
+        }
+        None
     }
 
     /// Get valid positions based on current mode
@@ -692,6 +718,27 @@ impl GameRenderer for HiveRenderer {
 
         match input {
             GameInput::Click { x, y } => {
+                // Calculate panel area for hit testing
+                let panel_area = Rect::new(area.x + area.width - panel_width, area.y, panel_width, area.height);
+                
+                // Check if click is in panel area
+                if x >= panel_area.x {
+                    if let Some(piece_type) = self.get_piece_at_panel_click(x, y, panel_area) {
+                        let count = state.pieces_in_hand(state.get_current_player(), piece_type);
+                        if count > 0 {
+                            // Check if must place queen
+                            if self.must_place_queen(state) && piece_type != PieceType::Queen {
+                                return InputResult::None;
+                            }
+                            
+                            self.mode = InputMode::PlacePiece(piece_type);
+                            self.update_valid_positions(state);
+                            return InputResult::Redraw;
+                        }
+                    }
+                    return InputResult::None;
+                }
+                
                 // Check if click is in board area
                 if x < board_area.x + board_area.width {
                     let hex = layout.screen_to_hex(x, y);
