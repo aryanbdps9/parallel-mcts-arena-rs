@@ -38,7 +38,7 @@
 // Each module handles a specific aspect of the application:
 pub mod game_wrapper; // Unified interface for all games
 pub mod game_controller; // Central game state management
-pub mod games; // Game implementations (Gomoku, Connect4, Othello, Blokus)
+pub use mcts::games; // Game implementations (Gomoku, Connect4, Othello, Blokus) - from lib
 #[cfg(feature = "gui")]
 pub mod gui; // Windows GUI implementation
 pub mod clipboard; // Cross-platform clipboard support

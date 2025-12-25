@@ -27,7 +27,7 @@
 //! - All piece transformations (rotations + reflections) pre-computed for efficiency
 //! - Move validation includes adjacency rules and corner-touching requirements
 
-use mcts::GameState;
+use crate::GameState;
 use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;

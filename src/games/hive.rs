@@ -24,7 +24,7 @@
 //! Uses axial coordinates (q, r) for hexagonal grid representation.
 //! The hexagons use "pointy-top" orientation.
 
-use mcts::GameState;
+use crate::GameState;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 

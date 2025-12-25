@@ -164,7 +164,18 @@ impl AIWorker {
                         }
 
                         if mcts.is_none() {
-                            mcts = Some(MCTS::new(exploration_constant, num_threads, max_nodes));
+                            #[cfg(feature = "gpu")]
+                            {
+                                let (new_mcts, gpu_msg) = MCTS::with_gpu(exploration_constant, num_threads, max_nodes);
+                                if let Some(msg) = gpu_msg {
+                                    eprintln!("[AI] {}", msg);
+                                }
+                                mcts = Some(new_mcts);
+                            }
+                            #[cfg(not(feature = "gpu"))]
+                            {
+                                mcts = Some(MCTS::new(exploration_constant, num_threads, max_nodes));
+                            }
                         }
 
                         let (best_move, stats) = mcts.as_mut().unwrap().search_with_stop(

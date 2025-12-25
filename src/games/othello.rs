@@ -12,7 +12,7 @@
 //! - Game ends when neither player can make a move
 //! - Winner is determined by who has more pieces on the board
 
-use mcts::GameState;
+use crate::GameState;
 use std::fmt;
 use std::str::FromStr;
 

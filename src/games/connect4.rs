@@ -10,7 +10,7 @@
 //! - First player to get 4 pieces in a row wins
 //! - Game is a draw if the board fills up with no winner
 
-use mcts::GameState;
+use crate::GameState;
 use std::fmt;
 use std::str::FromStr;
 

@@ -10,7 +10,7 @@
 //! - The line can be horizontal, vertical, or diagonal
 //! - Game is a draw if the board fills up with no winner
 
-use mcts::GameState;
+use crate::GameState;
 use std::fmt;
 use std::str::FromStr;
 

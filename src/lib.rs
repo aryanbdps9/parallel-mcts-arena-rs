@@ -9,6 +9,7 @@
 //! - **Virtual Losses**: Prevents multiple threads from exploring the same paths
 //! - **Memory Management**: Node recycling and automatic tree pruning
 //! - **PUCT Selection**: Enhanced UCB1 formula with prior probabilities
+//! - **GPU Acceleration** (optional): Batch PUCT calculation on GPU for large trees
 //!
 //! ## Example Usage
 //! ```rust
@@ -18,6 +19,19 @@
 //! let mut mcts = MCTS::new(1.4, 8, 1000000);
 //! let (best_move, stats) = mcts.search(&game_state, 0, 0, 30); // 30 second timeout
 //! ```
+//!
+//! ## GPU Acceleration
+//! To enable GPU acceleration, build with the `gpu` feature:
+//! ```bash
+//! cargo build --features gpu
+//! ```
+//! Then use `MCTS::with_gpu()` to create a GPU-accelerated engine.
+
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
+// Game implementations - available for all features
+pub mod games;
 
 use parking_lot::{Mutex, RwLock};
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -128,7 +142,7 @@ pub trait GameState: Clone + Send + Sync {
     ///
     /// Must be cloneable, comparable, hashable, debuggable, and thread-safe.
     /// Used as keys in hash maps and for move generation.
-    type Move: Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync;
+    type Move: Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync + 'static;
 
     /// Returns the board state.
     ///
@@ -376,6 +390,25 @@ pub struct MCTS<S: GameState> {
     timeout_measurements: Arc<AtomicI32>,
     /// Counter for searches since last overhead measurement
     searches_since_measurement: Arc<AtomicI32>,
+    /// GPU accelerator for batch PUCT computation (optional, requires 'gpu' feature)
+    #[cfg(feature = "gpu")]
+    gpu_accelerator: Option<Arc<Mutex<gpu::GpuMctsAccelerator>>>,
+    /// Whether GPU acceleration is enabled
+    #[cfg(feature = "gpu")]
+    gpu_enabled: bool,
+    /// Cached GPU-computed PUCT scores keyed by (parent_node_id, child_node_id)
+    /// This allows caching PUCT for the entire tree, not just root children
+    #[cfg(feature = "gpu")]
+    gpu_puct_cache: Arc<RwLock<HashMap<(usize, usize), f64>>>,
+    /// Last time the GPU PUCT cache was updated
+    #[cfg(feature = "gpu")]
+    gpu_cache_timestamp: Arc<Mutex<Instant>>,
+    /// Number of simulations since last GPU cache update
+    #[cfg(feature = "gpu")]
+    simulations_since_gpu_update: Arc<AtomicI32>,
+    /// Statistics: nodes processed in last GPU batch
+    #[cfg(feature = "gpu")]
+    gpu_last_batch_size: Arc<AtomicI32>,
 }
 
 impl<S: GameState> MCTS<S> {
@@ -402,7 +435,136 @@ impl<S: GameState> MCTS<S> {
             timeout_overhead_ms: Arc::new(Mutex::new(50.0)), // Start with conservative 50ms estimate
             timeout_measurements: Arc::new(AtomicI32::new(0)),
             searches_since_measurement: Arc::new(AtomicI32::new(0)),
+            #[cfg(feature = "gpu")]
+            gpu_accelerator: None,
+            #[cfg(feature = "gpu")]
+            gpu_enabled: false,
+            #[cfg(feature = "gpu")]
+            gpu_puct_cache: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "gpu")]
+            gpu_cache_timestamp: Arc::new(Mutex::new(Instant::now())),
+            #[cfg(feature = "gpu")]
+            simulations_since_gpu_update: Arc::new(AtomicI32::new(0)),
+            #[cfg(feature = "gpu")]
+            gpu_last_batch_size: Arc::new(AtomicI32::new(0)),
         }
+    }
+
+    /// Creates a new MCTS engine with GPU acceleration enabled.
+    ///
+    /// This constructor attempts to initialize a GPU context for accelerating
+    /// PUCT calculations. If GPU initialization fails, the engine falls back
+    /// to CPU-only mode.
+    ///
+    /// # Arguments
+    /// * `exploration_parameter` - A constant to tune the level of exploration.
+    /// * `num_threads` - The number of threads to use for the search. If 0, rayon will use the default.
+    /// * `max_nodes` - Maximum number of nodes allowed in the tree.
+    ///
+    /// # Returns
+    /// A tuple of (MCTS engine, Option<String>) where the string contains GPU info or error message.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(exploration_parameter: f64, num_threads: usize, max_nodes: usize) -> (Self, Option<String>) {
+        let pool_builder = ThreadPoolBuilder::new();
+        let pool = if num_threads > 0 {
+            pool_builder.num_threads(num_threads).build().unwrap()
+        } else {
+            pool_builder.build().unwrap()
+        };
+
+        let gpu_config = gpu::GpuConfig::default();
+        let (gpu_accelerator, gpu_enabled, message) = match gpu::try_init_gpu(&gpu_config) {
+            gpu::GpuInitResult::Success(ctx) => {
+                let info = ctx.debug_info();
+                let accelerator = gpu::GpuMctsAccelerator::new(std::sync::Arc::new(ctx));
+                (Some(Arc::new(Mutex::new(accelerator))), true, Some(format!("GPU enabled: {}", info)))
+            }
+            gpu::GpuInitResult::Unavailable(msg) => {
+                (None, false, Some(format!("GPU unavailable, using CPU: {}", msg)))
+            }
+            gpu::GpuInitResult::Error(msg) => {
+                (None, false, Some(format!("GPU initialization failed, using CPU: {}", msg)))
+            }
+        };
+
+        let mcts = MCTS {
+            root: Arc::new(Node::new()),
+            exploration_parameter,
+            pool,
+            node_pool: NodePool::new(),
+            max_nodes,
+            node_count: Arc::new(AtomicI32::new(1)),
+            timeout_overhead_ms: Arc::new(Mutex::new(50.0)),
+            timeout_measurements: Arc::new(AtomicI32::new(0)),
+            searches_since_measurement: Arc::new(AtomicI32::new(0)),
+            gpu_accelerator,
+            gpu_enabled,
+            gpu_puct_cache: Arc::new(RwLock::new(HashMap::new())),
+            gpu_cache_timestamp: Arc::new(Mutex::new(Instant::now())),
+            simulations_since_gpu_update: Arc::new(AtomicI32::new(0)),
+            gpu_last_batch_size: Arc::new(AtomicI32::new(0)),
+        };
+
+        (mcts, message)
+    }
+
+    /// Creates a new MCTS engine with custom GPU configuration.
+    ///
+    /// # Arguments
+    /// * `exploration_parameter` - A constant to tune the level of exploration.
+    /// * `num_threads` - The number of threads to use for the search.
+    /// * `max_nodes` - Maximum number of nodes allowed in the tree.
+    /// * `gpu_config` - Custom GPU configuration.
+    ///
+    /// # Returns
+    /// A tuple of (MCTS engine, Option<String>) where the string contains GPU info or error message.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu_config(
+        exploration_parameter: f64,
+        num_threads: usize,
+        max_nodes: usize,
+        gpu_config: gpu::GpuConfig,
+    ) -> (Self, Option<String>) {
+        let pool_builder = ThreadPoolBuilder::new();
+        let pool = if num_threads > 0 {
+            pool_builder.num_threads(num_threads).build().unwrap()
+        } else {
+            pool_builder.build().unwrap()
+        };
+
+        let (gpu_accelerator, gpu_enabled, message) = match gpu::try_init_gpu(&gpu_config) {
+            gpu::GpuInitResult::Success(ctx) => {
+                let info = ctx.debug_info();
+                let accelerator = gpu::GpuMctsAccelerator::new(std::sync::Arc::new(ctx));
+                (Some(Arc::new(Mutex::new(accelerator))), true, Some(format!("GPU enabled: {}", info)))
+            }
+            gpu::GpuInitResult::Unavailable(msg) => {
+                (None, false, Some(format!("GPU unavailable, using CPU: {}", msg)))
+            }
+            gpu::GpuInitResult::Error(msg) => {
+                (None, false, Some(format!("GPU initialization failed, using CPU: {}", msg)))
+            }
+        };
+
+        let mcts = MCTS {
+            root: Arc::new(Node::new()),
+            exploration_parameter,
+            pool,
+            node_pool: NodePool::new(),
+            max_nodes,
+            node_count: Arc::new(AtomicI32::new(1)),
+            timeout_overhead_ms: Arc::new(Mutex::new(50.0)),
+            timeout_measurements: Arc::new(AtomicI32::new(0)),
+            searches_since_measurement: Arc::new(AtomicI32::new(0)),
+            gpu_accelerator,
+            gpu_enabled,
+            gpu_puct_cache: Arc::new(RwLock::new(HashMap::new())),
+            gpu_cache_timestamp: Arc::new(Mutex::new(Instant::now())),
+            simulations_since_gpu_update: Arc::new(AtomicI32::new(0)),
+            gpu_last_batch_size: Arc::new(AtomicI32::new(0)),
+        };
+
+        (mcts, message)
     }
 
     /// Gets the exploration parameter used in the UCB1 formula
@@ -419,6 +581,44 @@ impl<S: GameState> MCTS<S> {
     /// Maximum node count before tree pruning occurs
     pub fn get_max_nodes(&self) -> usize {
         self.max_nodes
+    }
+
+    /// Returns whether GPU acceleration is enabled
+    ///
+    /// # Returns
+    /// True if GPU acceleration is enabled and available
+    #[cfg(feature = "gpu")]
+    pub fn is_gpu_enabled(&self) -> bool {
+        self.gpu_enabled
+    }
+
+    /// Returns GPU debug information if available
+    ///
+    /// # Returns
+    /// Optional string with GPU statistics and info
+    #[cfg(feature = "gpu")]
+    pub fn get_gpu_info(&self) -> Option<String> {
+        if let Some(ref accelerator) = self.gpu_accelerator {
+            Some(accelerator.lock().debug_info())
+        } else {
+            None
+        }
+    }
+
+    /// Enables or disables GPU acceleration at runtime
+    ///
+    /// This allows toggling GPU usage without recreating the MCTS engine.
+    /// Useful for comparing GPU vs CPU performance or when GPU encounters issues.
+    ///
+    /// # Arguments
+    /// * `enabled` - Whether to enable GPU acceleration
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu_enabled(&mut self, enabled: bool) {
+        if enabled && self.gpu_accelerator.is_some() {
+            self.gpu_enabled = true;
+        } else if !enabled {
+            self.gpu_enabled = false;
+        }
     }
 
     /// Advances the root of the tree to the node corresponding to the given move.
@@ -593,6 +793,23 @@ impl<S: GameState> MCTS<S> {
             ),
         ];
 
+        // Add GPU status if feature is enabled
+        #[cfg(feature = "gpu")]
+        {
+            if self.gpu_enabled {
+                if let Some(ref accelerator) = self.gpu_accelerator {
+                    let acc = accelerator.lock();
+                    let (total_us, dispatches, avg_us) = acc.stats();
+                    debug_lines.push(format!(
+                        "GPU: enabled, {} dispatches, {:.2}ms total, {:.2}µs avg",
+                        dispatches, total_us as f64 / 1000.0, avg_us
+                    ));
+                }
+            } else {
+                debug_lines.push("GPU: disabled".to_string());
+            }
+        }
+
         // Add top child statistics (limited to prevent UI overflow)
         let children = self.root.children.read();
         if !children.is_empty() {
@@ -700,6 +917,10 @@ impl<S: GameState> MCTS<S> {
 
         self.ensure_root_expanded(state);
 
+        // Initialize GPU PUCT cache if GPU is enabled
+        #[cfg(feature = "gpu")]
+        self.update_gpu_puct_cache(true);
+
         let possible_moves = state.get_possible_moves();
         if possible_moves.len() == 1 {
             return (possible_moves[0].clone(), SearchStatistics::default());
@@ -757,6 +978,98 @@ impl<S: GameState> MCTS<S> {
                         }
                     }
                     std::thread::sleep(check_interval);
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Start a GPU cache refresh thread if GPU is enabled
+        #[cfg(feature = "gpu")]
+        let gpu_refresh_handle = if self.gpu_enabled && self.gpu_accelerator.is_some() {
+            let stop_flag = stop_searching.clone();
+            let gpu_accelerator = self.gpu_accelerator.clone();
+            let root = self.root.clone();
+            let exploration_parameter = self.exploration_parameter;
+            let gpu_puct_cache = self.gpu_puct_cache.clone();
+            let simulations_counter = self.simulations_since_gpu_update.clone();
+            
+            Some(std::thread::spawn(move || {
+                let refresh_interval = Duration::from_millis(50); // Refresh every 50ms for better GPU utilization
+                const MAX_DEPTH: u32 = 50;
+                const MAX_NODES: usize = 65536;
+                
+                while !stop_flag.load(Ordering::Relaxed) {
+                    std::thread::sleep(refresh_interval);
+                    
+                    // Check if enough simulations have passed
+                    let sims = simulations_counter.load(Ordering::Relaxed);
+                    if sims < 500 {
+                        continue;
+                    }
+                    simulations_counter.store(0, Ordering::Relaxed);
+                    
+                    // Deep tree traversal to collect all parent-child pairs
+                    let mut node_data: Vec<gpu::GpuNodeData> = Vec::with_capacity(MAX_NODES);
+                    let mut cache_keys: Vec<(usize, usize)> = Vec::with_capacity(MAX_NODES);
+                    let mut stack: Vec<(Arc<Node<S::Move>>, u32)> = Vec::with_capacity(1024);
+                    stack.push((root.clone(), 0));
+                    
+                    while let Some((parent_node, depth)) = stack.pop() {
+                        if depth >= MAX_DEPTH || node_data.len() >= MAX_NODES {
+                            break;
+                        }
+                        
+                        let children = parent_node.children.read();
+                        if children.is_empty() {
+                            continue;
+                        }
+                        
+                        let parent_visits = parent_node.visits.load(Ordering::Relaxed);
+                        let num_children = children.len();
+                        let prior_prob = 1.0 / num_children as f32;
+                        let parent_id = Arc::as_ptr(&parent_node) as usize;
+                        
+                        for (_mv, child_node) in children.iter() {
+                            if node_data.len() >= MAX_NODES {
+                                break;
+                            }
+                            
+                            let child_id = Arc::as_ptr(child_node) as usize;
+                            
+                            node_data.push(gpu::GpuNodeData::new(
+                                child_node.visits.load(Ordering::Relaxed),
+                                child_node.wins.load(Ordering::Relaxed),
+                                child_node.virtual_losses.load(Ordering::Relaxed),
+                                parent_visits,
+                                prior_prob,
+                                exploration_parameter as f32,
+                            ));
+                            cache_keys.push((parent_id, child_id));
+                            
+                            // Add visited children to stack for deeper traversal
+                            if child_node.visits.load(Ordering::Relaxed) > 0 {
+                                stack.push((child_node.clone(), depth + 1));
+                            }
+                        }
+                    }
+                    
+                    if node_data.is_empty() {
+                        continue;
+                    }
+                    
+                    // Compute PUCT on GPU
+                    if let Some(ref accelerator) = gpu_accelerator {
+                        let mut acc = accelerator.lock();
+                        if let Ok(results) = acc.compute_puct_batch(&node_data) {
+                            let mut cache = gpu_puct_cache.write();
+                            cache.clear();
+                            cache.reserve(results.len());
+                            for (i, result) in results.iter().enumerate() {
+                                cache.insert(cache_keys[i], result.puct_score as f64);
+                            }
+                        }
+                    }
                 }
             }))
         } else {
@@ -847,6 +1160,13 @@ impl<S: GameState> MCTS<S> {
                     }
                 }
             }
+        }
+
+        // Clean up GPU refresh thread
+        #[cfg(feature = "gpu")]
+        if let Some(handle) = gpu_refresh_handle {
+            // The stop_searching flag is already set, GPU thread will exit
+            let _ = handle.join();
         }
 
         // After all simulations, the best move is the one most visited.
@@ -1144,6 +1464,12 @@ impl<S: GameState> MCTS<S> {
             return;
         }
 
+        // Increment GPU simulation counter for cache updates
+        #[cfg(feature = "gpu")]
+        {
+            self.simulations_since_gpu_update.fetch_add(1, Ordering::Relaxed);
+        }
+
         let mut current_state = state.clone();
         let mut path: Vec<Arc<Node<S::Move>>> = Vec::with_capacity(64); // Pre-allocate reasonable capacity
         let mut path_players: Vec<i32> = Vec::with_capacity(64); // Track which player made each move
@@ -1189,6 +1515,16 @@ impl<S: GameState> MCTS<S> {
                         .iter()
                         .filter_map(|m| children_guard.get(m).map(|n| (m, n)))
                         .map(|(m, n)| {
+                            // Use GPU-cached PUCT for any level if available
+                            #[cfg(feature = "gpu")]
+                            let puct = self.get_cached_puct_by_node(&current_node, n).unwrap_or_else(|| {
+                                n.puct(
+                                    parent_visits,
+                                    self.exploration_parameter,
+                                    prior_probability,
+                                )
+                            });
+                            #[cfg(not(feature = "gpu"))]
                             let puct = n.puct(
                                 parent_visits,
                                 self.exploration_parameter,
@@ -1431,6 +1767,320 @@ impl<S: GameState> MCTS<S> {
             // Slightly higher alpha since we measure less frequently now
             *current_avg = 0.85 * (*current_avg) + 0.15 * clamped_overhead;
         }
+    }
+
+    /// Performs GPU-accelerated batch PUCT calculation for root children
+    ///
+    /// This method computes PUCT scores for all root children in parallel on the GPU,
+    /// which is more efficient than CPU computation when there are many children.
+    ///
+    /// # Returns
+    /// Vector of (move, puct_score) pairs sorted by score descending
+    #[cfg(feature = "gpu")]
+    pub fn gpu_compute_root_pucts(&self) -> Vec<(S::Move, f64)> {
+        if !self.gpu_enabled {
+            return self.cpu_compute_root_pucts();
+        }
+
+        let children = self.root.children.read();
+        if children.is_empty() {
+            return Vec::new();
+        }
+
+        let parent_visits = self.root.visits.load(Ordering::Relaxed);
+        let prior_prob = 1.0 / children.len() as f32;
+
+        // Collect node data for GPU
+        let mut moves: Vec<S::Move> = Vec::with_capacity(children.len());
+        let mut node_data: Vec<gpu::GpuNodeData> = Vec::with_capacity(children.len());
+
+        for (mv, node) in children.iter() {
+            moves.push(mv.clone());
+            node_data.push(gpu::GpuNodeData::new(
+                node.visits.load(Ordering::Relaxed),
+                node.wins.load(Ordering::Relaxed),
+                node.virtual_losses.load(Ordering::Relaxed),
+                parent_visits,
+                prior_prob,
+                self.exploration_parameter as f32,
+            ));
+        }
+
+        drop(children);
+
+        // Compute PUCT scores on GPU
+        if let Some(ref accelerator) = self.gpu_accelerator {
+            let mut acc = accelerator.lock();
+            match acc.compute_puct_batch(&node_data) {
+                Ok(results) => {
+                    let mut scored_moves: Vec<_> = results
+                        .iter()
+                        .map(|r| (moves[r.node_index as usize].clone(), r.puct_score as f64))
+                        .collect();
+                    scored_moves.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                    return scored_moves;
+                }
+                Err(_) => {
+                    // Fall back to CPU on GPU error
+                    return self.cpu_compute_root_pucts();
+                }
+            }
+        }
+
+        self.cpu_compute_root_pucts()
+    }
+
+    /// CPU fallback for computing root PUCT scores
+    #[cfg(feature = "gpu")]
+    fn cpu_compute_root_pucts(&self) -> Vec<(S::Move, f64)> {
+        let children = self.root.children.read();
+        let parent_visits = self.root.visits.load(Ordering::Relaxed);
+        let prior_prob = 1.0 / children.len() as f64;
+
+        let mut scored_moves: Vec<_> = children
+            .iter()
+            .map(|(mv, node)| {
+                let puct = node.puct(parent_visits, self.exploration_parameter, prior_prob);
+                (mv.clone(), puct)
+            })
+            .collect();
+        scored_moves.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored_moves
+    }
+
+    /// Gets recommended moves based on GPU-computed PUCT scores
+    ///
+    /// Returns the top N moves ranked by PUCT score, computed using GPU acceleration
+    /// when available.
+    ///
+    /// # Arguments
+    /// * `count` - Maximum number of moves to return
+    ///
+    /// # Returns
+    /// Vector of (move, puct_score, visit_count, win_rate) tuples
+    #[cfg(feature = "gpu")]
+    pub fn gpu_get_top_moves(&self, count: usize) -> Vec<(S::Move, f64, i32, f64)> {
+        let puct_scores = self.gpu_compute_root_pucts();
+        let children = self.root.children.read();
+
+        puct_scores
+            .into_iter()
+            .take(count)
+            .map(|(mv, puct)| {
+                if let Some(node) = children.get(&mv) {
+                    let visits = node.visits.load(Ordering::Relaxed);
+                    let wins = node.wins.load(Ordering::Relaxed) as f64;
+                    let win_rate = if visits > 0 { wins / visits as f64 / 2.0 } else { 0.0 };
+                    (mv, puct, visits, win_rate)
+                } else {
+                    (mv, puct, 0, 0.0)
+                }
+            })
+            .collect()
+    }
+
+    /// Performs batch expansion decision using GPU
+    ///
+    /// Evaluates which nodes in the tree should be expanded based on depth,
+    /// visit count, and tree capacity constraints using GPU parallelism.
+    ///
+    /// # Arguments
+    /// * `node_infos` - Vector of (depth, visits, is_leaf, is_terminal) tuples
+    ///
+    /// # Returns
+    /// Vector of indices of nodes that should be expanded
+    #[cfg(feature = "gpu")]
+    pub fn gpu_decide_expansions(
+        &self,
+        node_infos: &[(u32, i32, bool, bool)],
+    ) -> Vec<usize> {
+        if !self.gpu_enabled || self.gpu_accelerator.is_none() {
+            return self.cpu_decide_expansions(node_infos);
+        }
+
+        let inputs: Vec<gpu::GpuExpansionInput> = node_infos
+            .iter()
+            .map(|(depth, visits, is_leaf, is_terminal)| gpu::GpuExpansionInput {
+                depth: *depth,
+                visits: *visits,
+                is_leaf: if *is_leaf { 1 } else { 0 },
+                is_terminal: if *is_terminal { 1 } else { 0 },
+            })
+            .collect();
+
+        let max_nodes = self.max_nodes as u32;
+        let current_nodes = self.node_count.load(Ordering::Relaxed) as u32;
+        let random_seed = with_rng(|rng| rng.next_u64() as u32);
+
+        if let Some(ref accelerator) = self.gpu_accelerator {
+            let acc = accelerator.lock();
+            match acc.compute_expansion_batch(&inputs, max_nodes, current_nodes, random_seed) {
+                Ok(result) => result.nodes_to_expand,
+                Err(_) => self.cpu_decide_expansions(node_infos),
+            }
+        } else {
+            self.cpu_decide_expansions(node_infos)
+        }
+    }
+
+    /// CPU fallback for expansion decisions
+    #[cfg(feature = "gpu")]
+    fn cpu_decide_expansions(&self, node_infos: &[(u32, i32, bool, bool)]) -> Vec<usize> {
+        let current_nodes = self.node_count.load(Ordering::Relaxed) as usize;
+        let tree_capacity_available = current_nodes < self.max_nodes;
+
+        if !tree_capacity_available {
+            return Vec::new();
+        }
+
+        node_infos
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, (depth, visits, is_leaf, is_terminal))| {
+                if !is_leaf || *is_terminal {
+                    return None;
+                }
+
+                // Root always expands
+                if *depth == 0 {
+                    return Some(idx);
+                }
+
+                // Probabilistic expansion based on depth and visits
+                let depth_factor = 1.0 / (1.0 + *depth as f64 * 0.5);
+                let visit_factor = (*visits as f64).sqrt() / 10.0;
+                let expansion_probability = (depth_factor + visit_factor).min(1.0);
+
+                if random_f64() < expansion_probability {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Updates the GPU PUCT cache for root children
+    ///
+    /// This method traverses the entire tree and computes PUCT scores on the GPU
+    /// for all children of all expanded nodes. This enables processing thousands
+    /// of nodes in a single GPU batch for maximum GPU utilization.
+    ///
+    /// # Arguments
+    /// * `force` - If true, update the cache regardless of the simulation count
+    #[cfg(feature = "gpu")]
+    fn update_gpu_puct_cache(&self, force: bool) {
+        if !self.gpu_enabled || self.gpu_accelerator.is_none() {
+            return;
+        }
+
+        // Only update every 1000 simulations or if forced
+        let sims = self.simulations_since_gpu_update.load(Ordering::Relaxed);
+        if !force && sims < 1000 {
+            return;
+        }
+
+        // Reset the counter
+        self.simulations_since_gpu_update.store(0, Ordering::Relaxed);
+
+        // Traverse the entire tree and collect all parent-child pairs
+        // Use BFS to process level by level
+        let mut node_data: Vec<gpu::GpuNodeData> = Vec::with_capacity(65536);
+        let mut cache_keys: Vec<(usize, usize)> = Vec::with_capacity(65536);
+        
+        // Stack for DFS traversal: (node, depth)
+        let mut stack: Vec<(Arc<Node<S::Move>>, u32)> = Vec::with_capacity(1024);
+        stack.push((self.root.clone(), 0));
+        
+        const MAX_DEPTH: u32 = 50; // Limit depth to avoid infinite recursion
+        const MAX_NODES: usize = 65536; // Limit to avoid GPU buffer overflow
+        
+        while let Some((parent_node, depth)) = stack.pop() {
+            if depth >= MAX_DEPTH || node_data.len() >= MAX_NODES {
+                break;
+            }
+            
+            let children = parent_node.children.read();
+            if children.is_empty() {
+                continue;
+            }
+            
+            let parent_visits = parent_node.visits.load(Ordering::Relaxed);
+            let num_children = children.len();
+            let prior_prob = 1.0 / num_children as f32;
+            let parent_id = Arc::as_ptr(&parent_node) as usize;
+            
+            for (_mv, child_node) in children.iter() {
+                if node_data.len() >= MAX_NODES {
+                    break;
+                }
+                
+                let child_id = Arc::as_ptr(child_node) as usize;
+                
+                node_data.push(gpu::GpuNodeData::new(
+                    child_node.visits.load(Ordering::Relaxed),
+                    child_node.wins.load(Ordering::Relaxed),
+                    child_node.virtual_losses.load(Ordering::Relaxed),
+                    parent_visits,
+                    prior_prob,
+                    self.exploration_parameter as f32,
+                ));
+                cache_keys.push((parent_id, child_id));
+                
+                // Only add children with visits to the stack (they might have their own children)
+                if child_node.visits.load(Ordering::Relaxed) > 0 {
+                    stack.push((child_node.clone(), depth + 1));
+                }
+            }
+        }
+
+        if node_data.is_empty() {
+            return;
+        }
+
+        let batch_size = node_data.len();
+        self.gpu_last_batch_size.store(batch_size as i32, Ordering::Relaxed);
+
+        // Compute PUCT scores on GPU
+        if let Some(ref accelerator) = self.gpu_accelerator {
+            let mut acc = accelerator.lock();
+            if let Ok(results) = acc.compute_puct_batch(&node_data) {
+                // Update the cache
+                let mut cache = self.gpu_puct_cache.write();
+                cache.clear();
+                cache.reserve(results.len());
+                
+                for (i, result) in results.iter().enumerate() {
+                    cache.insert(cache_keys[i], result.puct_score as f64);
+                }
+                
+                // Update timestamp
+                let mut ts = self.gpu_cache_timestamp.lock();
+                *ts = Instant::now();
+                
+                // Debug output
+                if force {
+                    eprintln!("[GPU] Deep tree PUCT batch: {} nodes processed", batch_size);
+                }
+            }
+        }
+    }
+
+    /// Gets a cached PUCT score from the GPU cache using node pointers
+    ///
+    /// Returns the cached PUCT score for a parent-child node pair if available,
+    /// or None if the cache doesn't have this pair.
+    #[cfg(feature = "gpu")]
+    fn get_cached_puct_by_node(&self, parent: &Arc<Node<S::Move>>, child: &Arc<Node<S::Move>>) -> Option<f64> {
+        if !self.gpu_enabled {
+            return None;
+        }
+        
+        let parent_id = Arc::as_ptr(parent) as usize;
+        let child_id = Arc::as_ptr(child) as usize;
+        
+        let cache = self.gpu_puct_cache.read();
+        cache.get(&(parent_id, child_id)).copied()
     }
 
     /// Prunes children based on visit percentage relative to the best child
