@@ -20,6 +20,7 @@ use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::games::blokus::BlokusState;
 use crate::games::connect4::Connect4State;
 use crate::games::gomoku::GomokuState;
+use crate::games::hive::HiveState;
 use crate::games::othello::OthelloState;
 use mcts::{GameState, MCTS, SearchStatistics};
 
@@ -80,6 +81,7 @@ pub enum GameType {
     Connect4,
     Othello,
     Blokus,
+    Hive,
 }
 
 impl GameType {
@@ -89,6 +91,7 @@ impl GameType {
             GameType::Connect4 => "Connect 4",
             GameType::Othello => "Othello",
             GameType::Blokus => "Blokus",
+            GameType::Hive => "Hive",
         }
     }
 
@@ -98,11 +101,12 @@ impl GameType {
             GameType::Connect4 => "Drop pieces to connect four",
             GameType::Othello => "Flip opponent's pieces by surrounding",
             GameType::Blokus => "Place polyomino pieces strategically",
+            GameType::Hive => "Surround the opponent's Queen Bee",
         }
     }
 
     pub fn all() -> &'static [GameType] {
-        &[GameType::Gomoku, GameType::Connect4, GameType::Othello, GameType::Blokus]
+        &[GameType::Gomoku, GameType::Connect4, GameType::Othello, GameType::Blokus, GameType::Hive]
     }
 }
 
@@ -359,6 +363,7 @@ impl GuiApp {
             GameType::Connect4 => GameWrapper::Connect4(Connect4State::new(7, 6, self.line_size)),
             GameType::Othello => GameWrapper::Othello(OthelloState::new(self.board_size)),
             GameType::Blokus => GameWrapper::Blokus(BlokusState::new()),
+            GameType::Hive => GameWrapper::Hive(HiveState::new()),
         };
 
         // Reset the game controller with new state

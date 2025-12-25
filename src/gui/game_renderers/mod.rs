@@ -11,6 +11,7 @@
 
 mod connect4;
 mod gomoku;
+mod hive;
 mod othello;
 mod blokus;
 
@@ -19,6 +20,7 @@ use crate::gui::renderer::{Rect, Renderer};
 
 pub use connect4::Connect4Renderer;
 pub use gomoku::GomokuRenderer;
+pub use hive::HiveRenderer;
 pub use othello::OthelloRenderer;
 pub use blokus::BlokusRenderer;
 
@@ -124,6 +126,7 @@ pub fn create_renderer_for_game(game: &GameWrapper) -> Box<dyn GameRenderer> {
         GameWrapper::Connect4(_) => Box::new(Connect4Renderer::new()),
         GameWrapper::Othello(_) => Box::new(OthelloRenderer::new()),
         GameWrapper::Blokus(_) => Box::new(BlokusRenderer::new()),
+        GameWrapper::Hive(_) => Box::new(HiveRenderer::new()),
     }
 }
 

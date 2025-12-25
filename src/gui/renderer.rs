@@ -12,7 +12,8 @@ use windows::{
         Foundation::{HWND, RECT},
         Graphics::{
             Direct2D::{
-                Common::{D2D1_COLOR_F, D2D_POINT_2F, D2D_SIZE_U},
+                Common::{D2D1_COLOR_F, D2D_POINT_2F, D2D_SIZE_U, D2D1_FIGURE_BEGIN_FILLED,
+                         D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED},
                 D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
                 ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_NONE,
                 D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -387,6 +388,164 @@ impl Renderer {
                 } else {
                     windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED
                 });
+            }
+        }
+    }
+
+    /// Get hexagon corner points for a pointy-top hexagon
+    /// Returns 6 points starting from the top and going clockwise
+    pub fn get_hexagon_points(center_x: f32, center_y: f32, size: f32) -> [(f32, f32); 6] {
+        let mut points = [(0.0f32, 0.0f32); 6];
+        for i in 0..6 {
+            // Pointy-top hexagon: angles at 30°, 90°, 150°, 210°, 270°, 330°
+            let angle_deg = 60.0 * i as f32 - 30.0;
+            let angle_rad = std::f32::consts::PI / 180.0 * angle_deg;
+            points[i] = (
+                center_x + size * angle_rad.cos(),
+                center_y + size * angle_rad.sin(),
+            );
+        }
+        points
+    }
+
+    /// Fill a hexagon (pointy-top orientation)
+    pub fn fill_hexagon(&self, center_x: f32, center_y: f32, size: f32, color: D2D1_COLOR_F) {
+        if let Some(rt) = &self.render_target {
+            if let Ok(brush) = self.create_brush(color) {
+                // Create path geometry
+                if let Ok(path_geometry) = unsafe { self.factory.CreatePathGeometry() } {
+                    if let Ok(sink) = unsafe { path_geometry.Open() } {
+                        let points = Self::get_hexagon_points(center_x, center_y, size);
+                        
+                        unsafe {
+                            sink.BeginFigure(
+                                D2D_POINT_2F { x: points[0].0, y: points[0].1 },
+                                D2D1_FIGURE_BEGIN_FILLED,
+                            );
+                            
+                            for i in 1..6 {
+                                sink.AddLine(D2D_POINT_2F { x: points[i].0, y: points[i].1 });
+                            }
+                            
+                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                            let _ = sink.Close();
+                        }
+                        
+                        unsafe {
+                            rt.FillGeometry(&path_geometry, &brush, None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw a hexagon outline (pointy-top orientation)
+    pub fn draw_hexagon(&self, center_x: f32, center_y: f32, size: f32, color: D2D1_COLOR_F, stroke_width: f32) {
+        if let Some(rt) = &self.render_target {
+            if let Ok(brush) = self.create_brush(color) {
+                // Create path geometry
+                if let Ok(path_geometry) = unsafe { self.factory.CreatePathGeometry() } {
+                    if let Ok(sink) = unsafe { path_geometry.Open() } {
+                        let points = Self::get_hexagon_points(center_x, center_y, size);
+                        
+                        unsafe {
+                            sink.BeginFigure(
+                                D2D_POINT_2F { x: points[0].0, y: points[0].1 },
+                                D2D1_FIGURE_BEGIN_HOLLOW,
+                            );
+                            
+                            for i in 1..6 {
+                                sink.AddLine(D2D_POINT_2F { x: points[i].0, y: points[i].1 });
+                            }
+                            
+                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                            let _ = sink.Close();
+                        }
+                        
+                        unsafe {
+                            rt.DrawGeometry(&path_geometry, &brush, stroke_width, None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get hexagon corner points for a pointy-top hexagon with isometric tilt
+    /// y_scale compresses the vertical axis (0.5 = 50% height for isometric look)
+    pub fn get_iso_hexagon_points(center_x: f32, center_y: f32, size: f32, y_scale: f32) -> [(f32, f32); 6] {
+        let mut points = [(0.0f32, 0.0f32); 6];
+        for i in 0..6 {
+            // Pointy-top hexagon: angles at 30°, 90°, 150°, 210°, 270°, 330°
+            let angle_deg = 60.0 * i as f32 - 30.0;
+            let angle_rad = std::f32::consts::PI / 180.0 * angle_deg;
+            points[i] = (
+                center_x + size * angle_rad.cos(),
+                center_y + size * angle_rad.sin() * y_scale,
+            );
+        }
+        points
+    }
+
+    /// Fill an isometric hexagon (pointy-top orientation, compressed Y)
+    pub fn fill_iso_hexagon(&self, center_x: f32, center_y: f32, size: f32, y_scale: f32, color: D2D1_COLOR_F) {
+        if let Some(rt) = &self.render_target {
+            if let Ok(brush) = self.create_brush(color) {
+                if let Ok(path_geometry) = unsafe { self.factory.CreatePathGeometry() } {
+                    if let Ok(sink) = unsafe { path_geometry.Open() } {
+                        let points = Self::get_iso_hexagon_points(center_x, center_y, size, y_scale);
+                        
+                        unsafe {
+                            sink.BeginFigure(
+                                D2D_POINT_2F { x: points[0].0, y: points[0].1 },
+                                D2D1_FIGURE_BEGIN_FILLED,
+                            );
+                            
+                            for i in 1..6 {
+                                sink.AddLine(D2D_POINT_2F { x: points[i].0, y: points[i].1 });
+                            }
+                            
+                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                            let _ = sink.Close();
+                        }
+                        
+                        unsafe {
+                            rt.FillGeometry(&path_geometry, &brush, None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw an isometric hexagon outline (pointy-top orientation, compressed Y)
+    pub fn draw_iso_hexagon(&self, center_x: f32, center_y: f32, size: f32, y_scale: f32, color: D2D1_COLOR_F, stroke_width: f32) {
+        if let Some(rt) = &self.render_target {
+            if let Ok(brush) = self.create_brush(color) {
+                if let Ok(path_geometry) = unsafe { self.factory.CreatePathGeometry() } {
+                    if let Ok(sink) = unsafe { path_geometry.Open() } {
+                        let points = Self::get_iso_hexagon_points(center_x, center_y, size, y_scale);
+                        
+                        unsafe {
+                            sink.BeginFigure(
+                                D2D_POINT_2F { x: points[0].0, y: points[0].1 },
+                                D2D1_FIGURE_BEGIN_HOLLOW,
+                            );
+                            
+                            for i in 1..6 {
+                                sink.AddLine(D2D_POINT_2F { x: points[i].0, y: points[i].1 });
+                            }
+                            
+                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                            let _ = sink.Close();
+                        }
+                        
+                        unsafe {
+                            rt.DrawGeometry(&path_geometry, &brush, stroke_width, None);
+                        }
+                    }
+                }
             }
         }
     }

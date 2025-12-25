@@ -358,6 +358,7 @@ impl GameController {
             GameWrapper::Connect4(_) => "Connect 4",
             GameWrapper::Othello(_) => "Othello",
             GameWrapper::Blokus(_) => "Blokus",
+            GameWrapper::Hive(_) => "Hive",
         };
 
         let mut output = format!("=== {} Game History ===\n\n", game_name);

@@ -1,0 +1,97 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                             HOW TO PLAY: HIVE                                ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+OBJECTIVE
+─────────
+Completely surround your opponent's Queen Bee with pieces (yours or theirs).
+
+OVERVIEW
+────────
+Hive is a strategic two-player game played with hexagonal tiles.
+There is no board - pieces are placed adjacent to each other on a flat surface.
+Each piece type has unique movement abilities based on real insect behavior.
+
+PIECES (each player has 11 pieces)
+──────────────────────────────────
+  Q - Queen Bee (×1)    Must be placed by turn 4. Moves 1 space.
+  B - Beetle (×2)       Moves 1 space. Can climb on top of the hive!
+  S - Spider (×2)       Moves exactly 3 spaces around the hive edge.
+  G - Grasshopper (×3)  Jumps in a straight line over pieces.
+  A - Ant (×3)          Moves any number of spaces around the hive.
+
+PLACEMENT RULES
+───────────────
+• First piece: Place anywhere
+• Second piece (opponent): Must touch the first piece
+• All other pieces: Must touch ONLY your own color pieces
+• Queen Bee: MUST be placed by your 4th turn
+• You can only move pieces AFTER your Queen is placed
+
+MOVEMENT RULES
+──────────────
+• The hive must always stay connected (One Hive Rule)
+• Pieces cannot break the hive when moving
+• Pieces must slide around the hive (can't squeeze through tight gaps)
+• Exception: Beetles can climb on top of the hive
+
+PIECE ABILITIES
+───────────────
+Queen Bee (Q):
+  • Moves exactly 1 space by sliding around the hive
+  • Cannot squeeze through tight gaps
+  • Protect her at all costs!
+
+Beetle (B):
+  • Moves 1 space in any direction
+  • Can climb ON TOP of other pieces
+  • Pieces underneath cannot move
+  • Stack height is shown on the tile
+
+Spider (S):
+  • Moves exactly 3 spaces (no more, no less)
+  • Must slide around the hive edge
+  • Cannot backtrack during a move
+
+Grasshopper (G):
+  • Jumps in a straight line over pieces
+  • Must jump over at least 1 piece
+  • Lands in the first empty space
+
+Ant (A):
+  • Moves any number of spaces around the hive
+  • Most mobile piece in the game
+  • Excellent for surrounding the enemy Queen
+
+WINNING
+───────
+• A player wins when the opponent's Queen is surrounded on all 6 sides
+• It doesn't matter whose pieces surround the Queen
+• If both Queens become surrounded on the same turn, it's a draw
+
+CONTROLS
+────────
+  Q/B/S/G/A   Select piece type to place
+  Click       Place piece or select piece to move
+  Click       Select destination for movement
+  Esc         Cancel current selection
+  R           Restart the game
+  H           Show this help screen
+  Tab         Switch between Debug Stats and Move History
+  PgUp/PgDn   Scroll the stats/history panel
+  Esc         Return to game selection menu (from menu)
+  Quit        Quit the application
+
+STRATEGY TIPS
+─────────────
+• Place your Queen early for flexibility, but not first!
+• Beetles are great for pinning enemy pieces
+• Ants can quickly surround an exposed Queen
+• Keep your Queen mobile - don't let it get boxed in
+• Control the center of the hive
+• Grasshoppers are excellent for quick attacks
+• Use Spiders to reach specific positions precisely
+• Watch for "pillbugging" - moving pieces that would break the hive
+
+Press ESC or H to return to the game
+
