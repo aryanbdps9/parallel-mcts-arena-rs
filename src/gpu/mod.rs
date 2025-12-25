@@ -18,7 +18,7 @@ mod accelerator;
 mod shaders;
 
 pub use context::GpuContext;
-pub use accelerator::{GpuMctsAccelerator, GpuNodeData, GpuPuctResult, BatchExpansionResult, GpuExpansionInput, GpuSimulationParams};
+pub use accelerator::{GpuMctsAccelerator, GpuNodeData, GpuPuctResult, GpuSimulationParams};
 
 /// Configuration for GPU acceleration
 #[derive(Debug, Clone)]

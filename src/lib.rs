@@ -428,9 +428,6 @@ pub struct MCTS<S: GameState> {
     /// Counter for pending GPU evaluations
     #[cfg(feature = "gpu")]
     gpu_pending_evaluations: Arc<AtomicI32>,
-    /// Flag for using heuristic vs random rollout evaluation
-    #[cfg(feature = "gpu")]
-    gpu_use_heuristic: bool,
 }
 
 impl<S: GameState> MCTS<S> {
@@ -473,8 +470,6 @@ impl<S: GameState> MCTS<S> {
             gpu_simulation_sender: None,
             #[cfg(feature = "gpu")]
             gpu_pending_evaluations: Arc::new(AtomicI32::new(0)),
-            #[cfg(feature = "gpu")]
-            gpu_use_heuristic: false,
         }
     }
 
@@ -716,7 +711,6 @@ impl<S: GameState> MCTS<S> {
             gpu_last_batch_size: Arc::new(AtomicI32::new(0)),
             gpu_simulation_sender,
             gpu_pending_evaluations: pending_evaluations,
-            gpu_use_heuristic: use_heuristic,
         };
 
         (mcts, message)
@@ -1960,197 +1954,6 @@ impl<S: GameState> MCTS<S> {
             // Slightly higher alpha since we measure less frequently now
             *current_avg = 0.85 * (*current_avg) + 0.15 * clamped_overhead;
         }
-    }
-
-    /// Performs GPU-accelerated batch PUCT calculation for root children
-    ///
-    /// This method computes PUCT scores for all root children in parallel on the GPU,
-    /// which is more efficient than CPU computation when there are many children.
-    ///
-    /// # Returns
-    /// Vector of (move, puct_score) pairs sorted by score descending
-    #[cfg(feature = "gpu")]
-    pub fn gpu_compute_root_pucts(&self) -> Vec<(S::Move, f64)> {
-        if !self.gpu_enabled {
-            return self.cpu_compute_root_pucts();
-        }
-
-        let children = self.root.children.read();
-        if children.is_empty() {
-            return Vec::new();
-        }
-
-        let parent_visits = self.root.visits.load(Ordering::Relaxed);
-        let prior_prob = 1.0 / children.len() as f32;
-
-        // Collect node data for GPU
-        let mut moves: Vec<S::Move> = Vec::with_capacity(children.len());
-        let mut node_data: Vec<gpu::GpuNodeData> = Vec::with_capacity(children.len());
-
-        for (mv, node) in children.iter() {
-            moves.push(mv.clone());
-            node_data.push(gpu::GpuNodeData::new(
-                node.visits.load(Ordering::Relaxed),
-                node.wins.load(Ordering::Relaxed),
-                node.virtual_losses.load(Ordering::Relaxed),
-                parent_visits,
-                prior_prob,
-                self.exploration_parameter as f32,
-            ));
-        }
-
-        drop(children);
-
-        // Compute PUCT scores on GPU
-        if let Some(ref accelerator) = self.gpu_accelerator {
-            let mut acc = accelerator.lock();
-            match acc.compute_puct_batch(&node_data) {
-                Ok(results) => {
-                    let mut scored_moves: Vec<_> = results
-                        .iter()
-                        .map(|r| (moves[r.node_index as usize].clone(), r.puct_score as f64))
-                        .collect();
-                    scored_moves.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                    return scored_moves;
-                }
-                Err(_) => {
-                    // Fall back to CPU on GPU error
-                    return self.cpu_compute_root_pucts();
-                }
-            }
-        }
-
-        self.cpu_compute_root_pucts()
-    }
-
-    /// CPU fallback for computing root PUCT scores
-    #[cfg(feature = "gpu")]
-    fn cpu_compute_root_pucts(&self) -> Vec<(S::Move, f64)> {
-        let children = self.root.children.read();
-        let parent_visits = self.root.visits.load(Ordering::Relaxed);
-        let prior_prob = 1.0 / children.len() as f64;
-
-        let mut scored_moves: Vec<_> = children
-            .iter()
-            .map(|(mv, node)| {
-                let puct = node.puct(parent_visits, self.exploration_parameter, prior_prob);
-                (mv.clone(), puct)
-            })
-            .collect();
-        scored_moves.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        scored_moves
-    }
-
-    /// Gets recommended moves based on GPU-computed PUCT scores
-    ///
-    /// Returns the top N moves ranked by PUCT score, computed using GPU acceleration
-    /// when available.
-    ///
-    /// # Arguments
-    /// * `count` - Maximum number of moves to return
-    ///
-    /// # Returns
-    /// Vector of (move, puct_score, visit_count, win_rate) tuples
-    #[cfg(feature = "gpu")]
-    pub fn gpu_get_top_moves(&self, count: usize) -> Vec<(S::Move, f64, i32, f64)> {
-        let puct_scores = self.gpu_compute_root_pucts();
-        let children = self.root.children.read();
-
-        puct_scores
-            .into_iter()
-            .take(count)
-            .map(|(mv, puct)| {
-                if let Some(node) = children.get(&mv) {
-                    let visits = node.visits.load(Ordering::Relaxed);
-                    let wins = node.wins.load(Ordering::Relaxed) as f64;
-                    let win_rate = if visits > 0 { wins / visits as f64 / 2.0 } else { 0.0 };
-                    (mv, puct, visits, win_rate)
-                } else {
-                    (mv, puct, 0, 0.0)
-                }
-            })
-            .collect()
-    }
-
-    /// Performs batch expansion decision using GPU
-    ///
-    /// Evaluates which nodes in the tree should be expanded based on depth,
-    /// visit count, and tree capacity constraints using GPU parallelism.
-    ///
-    /// # Arguments
-    /// * `node_infos` - Vector of (depth, visits, is_leaf, is_terminal) tuples
-    ///
-    /// # Returns
-    /// Vector of indices of nodes that should be expanded
-    #[cfg(feature = "gpu")]
-    pub fn gpu_decide_expansions(
-        &self,
-        node_infos: &[(u32, i32, bool, bool)],
-    ) -> Vec<usize> {
-        if !self.gpu_enabled || self.gpu_accelerator.is_none() {
-            return self.cpu_decide_expansions(node_infos);
-        }
-
-        let inputs: Vec<gpu::GpuExpansionInput> = node_infos
-            .iter()
-            .map(|(depth, visits, is_leaf, is_terminal)| gpu::GpuExpansionInput {
-                depth: *depth,
-                visits: *visits,
-                is_leaf: if *is_leaf { 1 } else { 0 },
-                is_terminal: if *is_terminal { 1 } else { 0 },
-            })
-            .collect();
-
-        let max_nodes = self.max_nodes as u32;
-        let current_nodes = self.node_count.load(Ordering::Relaxed) as u32;
-        let random_seed = with_rng(|rng| rng.next_u64() as u32);
-
-        if let Some(ref accelerator) = self.gpu_accelerator {
-            let acc = accelerator.lock();
-            match acc.compute_expansion_batch(&inputs, max_nodes, current_nodes, random_seed) {
-                Ok(result) => result.nodes_to_expand,
-                Err(_) => self.cpu_decide_expansions(node_infos),
-            }
-        } else {
-            self.cpu_decide_expansions(node_infos)
-        }
-    }
-
-    /// CPU fallback for expansion decisions
-    #[cfg(feature = "gpu")]
-    fn cpu_decide_expansions(&self, node_infos: &[(u32, i32, bool, bool)]) -> Vec<usize> {
-        let current_nodes = self.node_count.load(Ordering::Relaxed) as usize;
-        let tree_capacity_available = current_nodes < self.max_nodes;
-
-        if !tree_capacity_available {
-            return Vec::new();
-        }
-
-        node_infos
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, (depth, visits, is_leaf, is_terminal))| {
-                if !is_leaf || *is_terminal {
-                    return None;
-                }
-
-                // Root always expands
-                if *depth == 0 {
-                    return Some(idx);
-                }
-
-                // Probabilistic expansion based on depth and visits
-                let depth_factor = 1.0 / (1.0 + *depth as f64 * 0.5);
-                let visit_factor = (*visits as f64).sqrt() / 10.0;
-                let expansion_probability = (depth_factor + visit_factor).min(1.0);
-
-                if random_f64() < expansion_probability {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect()
     }
 
     /// Updates the GPU PUCT cache for root children
