@@ -8,7 +8,7 @@ use crate::games::hive::{HexCoord, HiveMove, HiveState, Piece, PieceType};
 use crate::gui::colors::{Colors, with_alpha};
 use crate::gui::renderer::{Rect, Renderer};
 use mcts::GameState;
-use super::{GameInput, GameRenderer, InputResult};
+use super::{GameInput, GameRenderer, InputResult, RotatableBoard};
 use std::collections::HashSet;
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
@@ -22,11 +22,11 @@ const HEX_BG_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.76, g: 0.60, b: 0.42, a: 
 const HEX_GRID_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.60, g: 0.45, b: 0.30, a: 0.4 }; // Grid lines
 const HEX_EMPTY_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.85, g: 0.72, b: 0.55, a: 0.3 }; // Empty hex fill
 
-/// Isometric tilt factor (0.0 = top-down, 1.0 = full tilt)
-/// This compresses the Y axis to give a 3D perspective
-const ISO_TILT: f32 = 0.55;
 /// Vertical offset per stack level (in pixels, scaled by hex_size)
-const STACK_OFFSET: f32 = 0.35;
+/// This is applied in local coordinates before the tilt transform
+const STACK_OFFSET_Y: f32 = 0.6;
+/// Forward offset per stack level (towards camera when tilted)
+const STACK_OFFSET_Z: f32 = 0.3;
 
 /// Virtual key codes for keyboard input
 mod vk {
@@ -49,11 +49,15 @@ pub struct HexLayout {
     /// View offset for panning (in hex coordinates)
     pub offset_q: f32,
     pub offset_r: f32,
+    /// Isometric tilt factor
+    pub iso_tilt: f32,
+    /// Rotation angle in radians (around the center)
+    pub rotation: f32,
 }
 
 impl HexLayout {
     /// Calculate hex layout based on available area and board bounds
-    fn calculate(area: Rect, state: &HiveState) -> Self {
+    fn calculate(area: Rect, state: &HiveState, iso_tilt: f32, rotation: f32) -> Self {
         // Find bounds of placed pieces
         let mut min_q: i32 = 0;
         let mut max_q: i32 = 0;
@@ -99,40 +103,53 @@ impl HexLayout {
             center_y: area.y + area.height / 2.0,
             offset_q: center_q,
             offset_r: center_r,
+            iso_tilt,
+            rotation,
         }
     }
     
     /// Convert hex coordinates to screen coordinates (with isometric tilt)
+    /// Note: Rotation is applied via D2D transform, not here
     fn hex_to_screen(&self, q: i32, r: i32) -> (f32, f32) {
         let sqrt3 = 3.0_f32.sqrt();
         let q_adj = q as f32 - self.offset_q;
         let r_adj = r as f32 - self.offset_r;
         
-        let x = self.center_x + self.hex_size * sqrt3 * (q_adj + r_adj / 2.0);
-        // Apply isometric tilt by compressing Y axis
-        let y = self.center_y + self.hex_size * 1.5 * r_adj * ISO_TILT;
+        // Calculate position with tilt (rotation handled by D2D transform)
+        let x_local = self.hex_size * sqrt3 * (q_adj + r_adj / 2.0);
+        let y_local = self.hex_size * 1.5 * r_adj;
         
-        (x, y)
+        (self.center_x + x_local, self.center_y + y_local)
     }
     
     /// Convert hex coordinates to screen coordinates with stack height offset
     fn hex_to_screen_stacked(&self, q: i32, r: i32, stack_level: usize) -> (f32, f32) {
         let (x, y) = self.hex_to_screen(q, r);
-        // Move pieces up based on their stack level
-        let y_offset = stack_level as f32 * self.hex_size * STACK_OFFSET;
-        (x, y - y_offset)
+        // Move pieces up (negative Y) and forward (negative Y in local space = towards camera when tilted)
+        // The Y offset lifts pieces visually, the "forward" offset separates them in the tilt direction
+        let level = stack_level as f32;
+        let y_offset = level * self.hex_size * STACK_OFFSET_Y;
+        let z_offset = level * self.hex_size * STACK_OFFSET_Z;
+        (x, y - y_offset - z_offset)
     }
     
-    /// Convert screen coordinates to hex coordinates (approximate, accounting for tilt)
+    /// Convert screen coordinates to hex coordinates (approximate, accounting for tilt and rotation)
     fn screen_to_hex(&self, x: f32, y: f32) -> HexCoord {
         let sqrt3 = 3.0_f32.sqrt();
         
-        let x_adj = x - self.center_x;
-        let y_adj = y - self.center_y;
+        // Translate to local coordinates (relative to center)
+        let x_local = x - self.center_x;
+        let y_local = y - self.center_y;
+        
+        // Reverse the rotation
+        let cos_r = self.rotation.cos();
+        let sin_r = self.rotation.sin();
+        let x_unrotated = x_local * cos_r + y_local * sin_r;
+        let y_unrotated = -x_local * sin_r + y_local * cos_r;
         
         // Reverse the isometric tilt
-        let r = y_adj / (self.hex_size * 1.5 * ISO_TILT);
-        let q = x_adj / (self.hex_size * sqrt3) - r / 2.0;
+        let r = y_unrotated / (self.hex_size * 1.5 * self.iso_tilt);
+        let q = x_unrotated / (self.hex_size * sqrt3) - r / 2.0;
         
         // Round to nearest hex
         let q_adj = q + self.offset_q;
@@ -165,6 +182,8 @@ pub struct HiveRenderer {
     valid_positions: HashSet<HexCoord>,
     /// Layout cache
     last_layout: Option<HexLayout>,
+    /// 3D rotatable board component for tilt/rotation
+    board_view: RotatableBoard,
 }
 
 impl HiveRenderer {
@@ -174,6 +193,7 @@ impl HiveRenderer {
             hover_hex: None,
             valid_positions: HashSet::new(),
             last_layout: None,
+            board_view: RotatableBoard::new(),
         }
     }
 
@@ -183,16 +203,16 @@ impl HiveRenderer {
         let (cx, cy) = layout.hex_to_screen(q, r);
         let size = layout.hex_size * 0.95; // Slightly smaller to show gaps
         
-        // Draw isometric hexagon
-        renderer.fill_iso_hexagon(cx, cy, size, ISO_TILT, fill_color);
+        // Draw hexagon (tilt+rotation handled by D2D transform)
+        renderer.fill_iso_hexagon(cx, cy, size, fill_color);
         
         if let Some(outline) = outline_color {
-            renderer.draw_iso_hexagon(cx, cy, size, ISO_TILT, outline, 2.0);
+            renderer.draw_iso_hexagon(cx, cy, size, outline, 2.0);
         }
     }
 
     /// Draw a piece on a hex at a specific stack level
-    fn draw_piece(&self, renderer: &Renderer, layout: &HexLayout, q: i32, r: i32, stack_level: usize, piece: &Piece, is_top: bool, is_selected: bool, is_last_move: bool) {
+    fn draw_piece(&self, renderer: &Renderer, layout: &HexLayout, q: i32, r: i32, stack_level: usize, piece: &Piece, _is_top: bool, is_selected: bool, is_last_move: bool) {
         let (cx, cy) = layout.hex_to_screen_stacked(q, r, stack_level);
         let size = layout.hex_size * 0.85;
         
@@ -203,37 +223,31 @@ impl HiveRenderer {
             (PLAYER_2_COLOR, PLAYER_2_TEXT)
         };
         
-        // Draw hex-shaped piece using isometric hexagon
-        renderer.fill_iso_hexagon(cx, cy, size, ISO_TILT, fill_color);
+        // Draw hex-shaped piece (tilt+rotation handled by D2D transform)
+        renderer.fill_iso_hexagon(cx, cy, size, fill_color);
         
         // Draw outline
         let outline_color = if piece.player == 1 { PLAYER_2_COLOR } else { PLAYER_1_COLOR };
-        renderer.draw_iso_hexagon(cx, cy, size, ISO_TILT, outline_color, 2.0);
+        renderer.draw_iso_hexagon(cx, cy, size, outline_color, 2.0);
         
-        // Only draw piece icon for the top piece in the stack
-        if is_top {
-            let icon_size = size * 0.55;
-            self.draw_piece_icon(renderer, cx, cy, icon_size, piece.piece_type, text_color);
-        }
+        // Draw piece icon (always draw, even for pieces under a beetle)
+        let icon_size = size * 0.55;
+        self.draw_piece_icon(renderer, cx, cy, icon_size, piece.piece_type, text_color);
         
         // Selection highlight
         if is_selected {
-            renderer.draw_iso_hexagon(cx, cy, size + 4.0, ISO_TILT, Colors::BUTTON_SELECTED, 3.0);
+            renderer.draw_iso_hexagon(cx, cy, size + 4.0, Colors::BUTTON_SELECTED, 3.0);
         }
         
         // Last move indicator
         if is_last_move {
-            renderer.fill_iso_hexagon(cx, cy, size * 0.25, ISO_TILT, Colors::LAST_MOVE);
+            renderer.fill_iso_hexagon(cx, cy, size * 0.25, Colors::LAST_MOVE);
         }
     }
 
     /// Draw the icon for a specific piece type using native D2D SVG
+    /// Note: Tilt is applied via D2D transform
     fn draw_piece_icon(&self, renderer: &Renderer, cx: f32, cy: f32, size: f32, piece_type: PieceType, _text_color: D2D1_COLOR_F) {
-        self.draw_piece_icon_tilted(renderer, cx, cy, size, piece_type, _text_color, ISO_TILT)
-    }
-    
-    /// Draw the icon for a specific piece type with optional isometric tilt
-    fn draw_piece_icon_tilted(&self, renderer: &Renderer, cx: f32, cy: f32, size: f32, piece_type: PieceType, _text_color: D2D1_COLOR_F, tilt: f32) {
         let svg_name = match piece_type {
             PieceType::Queen => "hive_queen",
             PieceType::Beetle => "hive_beetle",
@@ -242,9 +256,9 @@ impl HiveRenderer {
             PieceType::Ant => "hive_ant",
         };
         
-        // Draw SVG icon centered at (cx, cy) with the given size and tilt
+        // Draw SVG icon centered at (cx, cy) - tilt handled by D2D transform
         let icon_size = size * 2.0;
-        renderer.draw_svg_tilted(svg_name, cx, cy, icon_size, icon_size, tilt);
+        renderer.draw_svg(svg_name, cx, cy, icon_size, icon_size);
     }
 
     /// Draw valid position indicator
@@ -258,7 +272,7 @@ impl HiveRenderer {
             with_alpha(Colors::HIGHLIGHT, 0.5)
         };
         
-        renderer.fill_iso_hexagon(cx, cy, size, ISO_TILT, color);
+        renderer.fill_iso_hexagon(cx, cy, size, color);
     }
 
     /// Draw hexagonal grid background
@@ -303,9 +317,9 @@ impl HiveRenderer {
                     // Don't draw grid cells where pieces are placed
                     let coord = HexCoord::new(q, r);
                     if !state.get_hex_board().contains_key(&coord) {
-                        // Draw empty hex cell with isometric tilt
-                        renderer.fill_iso_hexagon(cx, cy, layout.hex_size * 0.92, ISO_TILT, HEX_EMPTY_COLOR);
-                        renderer.draw_iso_hexagon(cx, cy, layout.hex_size * 0.92, ISO_TILT, HEX_GRID_COLOR, 1.0);
+                        // Draw empty hex cell (tilt+rotation handled by D2D transform)
+                        renderer.fill_iso_hexagon(cx, cy, layout.hex_size * 0.92, HEX_EMPTY_COLOR);
+                        renderer.draw_iso_hexagon(cx, cy, layout.hex_size * 0.92, HEX_GRID_COLOR, 1.0);
                     }
                 }
             }
@@ -343,11 +357,11 @@ impl HiveRenderer {
             
             renderer.fill_rounded_rect(button_rect, 5.0, bg_color);
             
-            // Draw piece icon on the left side (no tilt for UI panel)
+            // Draw piece icon on the left side
             let icon_size = button_height * 0.35;
             let icon_cx = button_rect.x + 30.0;
             let icon_cy = button_rect.y + button_height / 2.0;
-            self.draw_piece_icon_tilted(renderer, icon_cx, icon_cy, icon_size, *piece_type, Colors::TEXT_PRIMARY, 1.0);
+            self.draw_piece_icon(renderer, icon_cx, icon_cy, icon_size, *piece_type, Colors::TEXT_PRIMARY);
             
             // Draw count on the right side
             let count_text = format!("x{}", count);
@@ -467,8 +481,11 @@ impl GameRenderer for HiveRenderer {
         // Draw board background
         renderer.fill_rect(board_area, HEX_BG_COLOR);
         
-        // Calculate layout
-        let layout = HexLayout::calculate(board_area, state);
+        // Calculate layout using board_view tilt/rotation
+        let layout = HexLayout::calculate(board_area, state, self.board_view.tilt(), self.board_view.rotation());
+        
+        // Set board transform (tilt + rotation around center)
+        self.board_view.begin_draw(renderer, layout.center_x, layout.center_y);
         
         // Draw hexagonal grid background
         self.draw_hex_grid(renderer, &layout, state, board_area);
@@ -528,9 +545,12 @@ impl GameRenderer for HiveRenderer {
             if !self.valid_positions.contains(hover) && !state.get_hex_board().contains_key(hover) {
                 // Just show a subtle hover on empty space
                 let (cx, cy) = layout.hex_to_screen(hover.q, hover.r);
-                renderer.draw_iso_hexagon(cx, cy, layout.hex_size * 0.3, ISO_TILT, with_alpha(Colors::TEXT_SECONDARY, 0.3), 1.0);
+                renderer.draw_iso_hexagon(cx, cy, layout.hex_size * 0.3, with_alpha(Colors::TEXT_SECONDARY, 0.3), 1.0);
             }
         }
+        
+        // Reset transform before drawing UI elements
+        self.board_view.end_draw(renderer);
         
         // Draw piece selection panel
         self.draw_piece_panel(renderer, state, panel_area);
@@ -558,7 +578,12 @@ impl GameRenderer for HiveRenderer {
         // Calculate layout for coordinate conversion
         let panel_width = (area.width * 0.2).max(150.0).min(200.0);
         let board_area = Rect::new(area.x, area.y, area.width - panel_width - 10.0, area.height);
-        let layout = HexLayout::calculate(board_area, state);
+        let layout = HexLayout::calculate(board_area, state, self.board_view.tilt(), self.board_view.rotation());
+
+        // Let board_view handle drag inputs for tilt/rotation
+        if let Some(result) = self.board_view.handle_input(&input) {
+            return result;
+        }
 
         match input {
             GameInput::Click { x, y } => {
@@ -672,6 +697,11 @@ impl GameRenderer for HiveRenderer {
                 }
                 InputResult::None
             }
+            
+            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } => {
+                // Handled by board_view.handle_input above
+                InputResult::None
+            }
         }
     }
 
@@ -696,5 +726,6 @@ impl GameRenderer for HiveRenderer {
         self.hover_hex = None;
         self.valid_positions.clear();
         self.last_layout = None;
+        self.board_view.reset_view();
     }
 }

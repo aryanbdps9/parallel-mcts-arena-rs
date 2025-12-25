@@ -285,6 +285,10 @@ pub struct GuiApp {
     pub info_panel_ratio: f32,
     /// Whether we're currently dragging the splitter
     pub is_dragging_splitter: bool,
+    /// Whether we're currently right-click dragging (for tilt adjustment)
+    pub is_right_dragging: bool,
+    /// Last mouse position for drag delta calculation
+    pub last_drag_pos: Option<(f32, f32)>,
     /// Minimum panel width in pixels
     pub min_panel_width: f32,
     /// Maximum panel ratio
@@ -344,6 +348,8 @@ impl GuiApp {
             selected_how_to_play_game: 0,
             info_panel_ratio: 0.25, // Default 25% of game area width
             is_dragging_splitter: false,
+            is_right_dragging: false,
+            last_drag_pos: None,
             min_panel_width: 200.0,
             max_panel_ratio: 0.5,
         }

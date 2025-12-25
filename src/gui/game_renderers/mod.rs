@@ -14,6 +14,7 @@ mod gomoku;
 mod hive;
 mod othello;
 mod blokus;
+mod rotatable_board;
 
 use crate::game_wrapper::{GameWrapper, MoveWrapper};
 use crate::gui::renderer::{Rect, Renderer};
@@ -23,6 +24,7 @@ pub use gomoku::GomokuRenderer;
 pub use hive::HiveRenderer;
 pub use othello::OthelloRenderer;
 pub use blokus::BlokusRenderer;
+pub use rotatable_board::RotatableBoard;
 
 /// Input event for game interaction
 #[derive(Debug, Clone)]
@@ -33,6 +35,12 @@ pub enum GameInput {
     Hover { x: f32, y: f32 },
     /// Keyboard input
     Key { code: u32, pressed: bool },
+    /// Right mouse button down (start drag)
+    RightDown { x: f32, y: f32 },
+    /// Right mouse button up (end drag)
+    RightUp { x: f32, y: f32 },
+    /// Drag delta (for camera/tilt adjustment)
+    Drag { dx: f32, dy: f32 },
 }
 
 /// Result of processing game input

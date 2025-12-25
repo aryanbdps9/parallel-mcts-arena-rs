@@ -59,6 +59,20 @@ pub struct Rect {
     pub height: f32,
 }
 
+/// Matrix type for D2D transforms (matches D2D1_MATRIX_3X2_F layout)
+#[repr(C)]
+struct Matrix3x2 {
+    m11: f32, m12: f32,
+    m21: f32, m22: f32,
+    m31: f32, m32: f32,
+}
+
+impl Matrix3x2 {
+    fn identity() -> Self {
+        Self { m11: 1.0, m12: 0.0, m21: 0.0, m22: 1.0, m31: 0.0, m32: 0.0 }
+    }
+}
+
 impl Rect {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
         Self { x, y, width, height }
@@ -553,26 +567,64 @@ impl Renderer {
         }
     }
     
-    /// Get hexagon corner points for a pointy-top hexagon with isometric tilt
-    pub fn get_iso_hexagon_points(center_x: f32, center_y: f32, size: f32, y_scale: f32) -> [(f32, f32); 6] {
+    // ========== Transform Support ==========
+    
+    /// Set a combined tilt+rotation transform centered at (cx, cy)
+    /// tilt: Y-axis compression factor (1.0 = no tilt, 0.5 = 50% Y compression)
+    /// rotation: rotation angle in radians
+    pub fn set_board_transform(&self, cx: f32, cy: f32, tilt: f32, rotation: f32) {
+        let cos_r = rotation.cos();
+        let sin_r = rotation.sin();
+        
+        // Combined matrix: translate to origin, apply tilt, rotate, translate back
+        // M = T(cx,cy) * R(rotation) * S(1, tilt) * T(-cx,-cy)
+        // This simplifies to:
+        let transform = Matrix3x2 {
+            m11: cos_r,
+            m12: sin_r,
+            m21: -sin_r * tilt,
+            m22: cos_r * tilt,
+            m31: cx - cx * cos_r + cy * sin_r * tilt,
+            m32: cy - cx * sin_r - cy * cos_r * tilt,
+        };
+        
+        unsafe {
+            self.device_context.SetTransform(&transform as *const _ as *const _);
+        }
+    }
+    
+    /// Reset transform to identity
+    pub fn reset_transform(&self) {
+        let identity = Matrix3x2::identity();
+        unsafe {
+            self.device_context.SetTransform(&identity as *const _ as *const _);
+        }
+    }
+    
+    // ========== Isometric Hexagon Support ==========
+    
+    /// Get hexagon corner points for a pointy-top hexagon
+    /// Note: Tilt is applied via D2D transform, not here
+    pub fn get_iso_hexagon_points(center_x: f32, center_y: f32, size: f32) -> [(f32, f32); 6] {
         let mut points = [(0.0f32, 0.0f32); 6];
         for i in 0..6 {
             let angle_deg = 60.0 * i as f32 - 30.0;
             let angle_rad = std::f32::consts::PI / 180.0 * angle_deg;
             points[i] = (
                 center_x + size * angle_rad.cos(),
-                center_y + size * angle_rad.sin() * y_scale,
+                center_y + size * angle_rad.sin(),
             );
         }
         points
     }
     
-    /// Fill an isometric hexagon (pointy-top orientation, compressed Y)
-    pub fn fill_iso_hexagon(&self, center_x: f32, center_y: f32, size: f32, y_scale: f32, color: D2D1_COLOR_F) {
+    /// Fill an isometric hexagon (pointy-top orientation)
+    /// Note: Tilt is applied via D2D transform
+    pub fn fill_iso_hexagon(&self, center_x: f32, center_y: f32, size: f32, color: D2D1_COLOR_F) {
         if let Ok(brush) = self.create_brush(color) {
             if let Ok(path_geometry) = unsafe { self.factory.CreatePathGeometry() } {
                 if let Ok(sink) = unsafe { path_geometry.Open() } {
-                    let points = Self::get_iso_hexagon_points(center_x, center_y, size, y_scale);
+                    let points = Self::get_iso_hexagon_points(center_x, center_y, size);
                     
                     unsafe {
                         sink.BeginFigure(
@@ -594,12 +646,13 @@ impl Renderer {
         }
     }
     
-    /// Draw an isometric hexagon outline (pointy-top orientation, compressed Y)
-    pub fn draw_iso_hexagon(&self, center_x: f32, center_y: f32, size: f32, y_scale: f32, color: D2D1_COLOR_F, stroke_width: f32) {
+    /// Draw an isometric hexagon outline (pointy-top orientation)
+    /// Note: Tilt is applied via D2D transform
+    pub fn draw_iso_hexagon(&self, center_x: f32, center_y: f32, size: f32, color: D2D1_COLOR_F, stroke_width: f32) {
         if let Ok(brush) = self.create_brush(color) {
             if let Ok(path_geometry) = unsafe { self.factory.CreatePathGeometry() } {
                 if let Ok(sink) = unsafe { path_geometry.Open() } {
-                    let points = Self::get_iso_hexagon_points(center_x, center_y, size, y_scale);
+                    let points = Self::get_iso_hexagon_points(center_x, center_y, size);
                     
                     unsafe {
                         sink.BeginFigure(
@@ -656,12 +709,66 @@ impl Renderer {
     }
     
     /// Draw a cached SVG document at the specified position and size
+    /// Composes with the current transform (e.g., board transform)
     pub fn draw_svg(&self, name: &str, center_x: f32, center_y: f32, width: f32, height: f32) {
-        self.draw_svg_tilted(name, center_x, center_y, width, height, 1.0)
+        if let Some(svg_doc) = self.svg_cache.get(name) {
+            // Get the viewport size of the SVG
+            let viewport = unsafe { svg_doc.GetViewportSize() };
+            
+            // Calculate scale
+            let scale_x = width / viewport.width;
+            let scale_y = height / viewport.height;
+            
+            // Calculate offset - center the SVG
+            let offset_x = center_x - width / 2.0;
+            let offset_y = center_y - height / 2.0;
+            
+            // Get current transform
+            let mut current = Matrix3x2::identity();
+            unsafe { 
+                self.device_context.GetTransform(&mut current as *mut Matrix3x2 as *mut _); 
+            }
+            
+            // Create SVG local transform (scale + translate)
+            let svg_local = Matrix3x2 {
+                m11: scale_x,
+                m12: 0.0,
+                m21: 0.0,
+                m22: scale_y,
+                m31: offset_x,
+                m32: offset_y,
+            };
+            
+            // Compose: apply SVG transform first, then current board transform
+            // Result = svg_local * current
+            let composed = Matrix3x2 {
+                m11: svg_local.m11 * current.m11 + svg_local.m12 * current.m21,
+                m12: svg_local.m11 * current.m12 + svg_local.m12 * current.m22,
+                m21: svg_local.m21 * current.m11 + svg_local.m22 * current.m21,
+                m22: svg_local.m21 * current.m12 + svg_local.m22 * current.m22,
+                m31: svg_local.m31 * current.m11 + svg_local.m32 * current.m21 + current.m31,
+                m32: svg_local.m31 * current.m12 + svg_local.m32 * current.m22 + current.m32,
+            };
+            
+            // Apply composed transform
+            unsafe { 
+                self.device_context.SetTransform(&composed as *const Matrix3x2 as *const _); 
+            }
+            
+            // Draw the SVG
+            unsafe { self.device_context.DrawSvgDocument(svg_doc); }
+            
+            // Restore original transform
+            unsafe { 
+                self.device_context.SetTransform(&current as *const Matrix3x2 as *const _); 
+            }
+        }
     }
     
     /// Draw a cached SVG document with isometric tilt (Y-axis compression)
     /// tilt: 1.0 = no tilt, 0.5 = 50% Y compression, etc.
+    /// Note: This does NOT compose with board transform - use for UI elements only
+    #[allow(dead_code)]
     pub fn draw_svg_tilted(&self, name: &str, center_x: f32, center_y: f32, width: f32, height: f32, tilt: f32) {
         if let Some(svg_doc) = self.svg_cache.get(name) {
             // Get the viewport size of the SVG
@@ -675,30 +782,17 @@ impl Renderer {
             let offset_x = center_x - width / 2.0;
             let offset_y = center_y - (height * tilt) / 2.0;
             
-            // Create transform matrix - use the type from windows crate's re-export
-            #[repr(C)]
-            #[allow(non_snake_case)]
-            struct Matrix3x2 {
-                M11: f32, M12: f32,
-                M21: f32, M22: f32,
-                M31: f32, M32: f32,
-            }
-            
             let transform = Matrix3x2 {
-                M11: scale_x,
-                M12: 0.0,
-                M21: 0.0,
-                M22: scale_y,
-                M31: offset_x,
-                M32: offset_y,
+                m11: scale_x,
+                m12: 0.0,
+                m21: 0.0,
+                m22: scale_y,
+                m31: offset_x,
+                m32: offset_y,
             };
             
             // Save current transform
-            let mut old_transform = Matrix3x2 {
-                M11: 1.0, M12: 0.0,
-                M21: 0.0, M22: 1.0,
-                M31: 0.0, M32: 0.0,
-            };
+            let mut old_transform = Matrix3x2::identity();
             unsafe { 
                 self.device_context.GetTransform(
                     &mut old_transform as *mut Matrix3x2 as *mut _

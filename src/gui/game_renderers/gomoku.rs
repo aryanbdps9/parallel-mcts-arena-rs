@@ -7,16 +7,20 @@ use crate::games::gomoku::GomokuMove;
 use crate::gui::colors::Colors;
 use crate::gui::renderer::{Rect, Renderer};
 use mcts::GameState;
-use super::{GameInput, GameRenderer, InputResult, grid};
+use super::{GameInput, GameRenderer, InputResult, grid, RotatableBoard};
 
 /// Renderer for Gomoku game
 pub struct GomokuRenderer {
     hover_cell: Option<(usize, usize)>,
+    board_view: RotatableBoard,
 }
 
 impl GomokuRenderer {
     pub fn new() -> Self {
-        Self { hover_cell: None }
+        Self {
+            hover_cell: None,
+            board_view: RotatableBoard::new(),
+        }
     }
 }
 
@@ -28,9 +32,13 @@ impl GameRenderer for GomokuRenderer {
         
         // Calculate grid layout
         let layout = grid::calculate_grid_layout(area, board_size, 20.0);
+        let board_rect = layout.board_rect();
+        let (center_x, center_y) = board_rect.center();
+        
+        // Apply board rotation/tilt transforms
+        self.board_view.begin_draw(renderer, center_x, center_y);
         
         // Draw board background
-        let board_rect = layout.board_rect();
         renderer.fill_rect(board_rect.inset(-5.0), Colors::BOARD_BG);
         
         // Draw grid lines
@@ -73,6 +81,9 @@ impl GameRenderer for GomokuRenderer {
                 grid::draw_hover(renderer, &layout, row, col);
             }
         }
+        
+        // End board transform
+        self.board_view.end_draw(renderer);
     }
 
     fn handle_input(
@@ -85,10 +96,21 @@ impl GameRenderer for GomokuRenderer {
         let board = state.get_board();
         let board_size = board.len();
         let layout = grid::calculate_grid_layout(area, board_size, 20.0);
+        let board_rect = layout.board_rect();
+        let (center_x, center_y) = board_rect.center();
+
+        // Handle board rotation/tilt drag
+        if let Some(result) = self.board_view.handle_input(&input) {
+            return result;
+        }
 
         match input {
             GameInput::Click { x, y } => {
-                if let Some((row, col)) = layout.screen_to_cell(x, y) {
+                // Transform screen coordinates to local board coordinates
+                let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
+                let board_x = center_x + lx;
+                let board_y = center_y + ly;
+                if let Some((row, col)) = layout.screen_to_cell(board_x, board_y) {
                     let mv = MoveWrapper::Gomoku(GomokuMove(row, col));
                     if game.is_legal(&mv) {
                         return InputResult::Move(mv);
@@ -97,7 +119,11 @@ impl GameRenderer for GomokuRenderer {
                 InputResult::None
             }
             GameInput::Hover { x, y } => {
-                let new_hover = layout.screen_to_cell(x, y);
+                // Transform screen coordinates to local board coordinates
+                let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
+                let board_x = center_x + lx;
+                let board_y = center_y + ly;
+                let new_hover = layout.screen_to_cell(board_x, board_y);
                 if new_hover != self.hover_cell {
                     self.hover_cell = new_hover;
                     return InputResult::Redraw;
@@ -105,6 +131,7 @@ impl GameRenderer for GomokuRenderer {
                 InputResult::None
             }
             GameInput::Key { .. } => InputResult::None,
+            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } => InputResult::None,
         }
     }
 
@@ -118,5 +145,6 @@ impl GameRenderer for GomokuRenderer {
 
     fn reset(&mut self) {
         self.hover_cell = None;
+        self.board_view.reset_view();
     }
 }
