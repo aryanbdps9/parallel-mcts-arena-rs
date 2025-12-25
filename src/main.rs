@@ -11,19 +11,14 @@
 //! and adaptive time management.
 //!
 //! ## Architecture Overview
-//! - **Component-based UI**: Modular TUI components using Ratatui
 //! - **Game Abstraction**: Unified interface for all game types
 //! - **Parallel AI**: Multi-threaded MCTS with configurable parameters
-//! - **Event System**: Centralized event handling for user interactions
 //! - **State Management**: Comprehensive application state tracking
 //!
 //! ## Key Features
 //! - Multiple game support with unified AI engine
 //! - Parallel MCTS with virtual losses and tree reuse
-//! - Interactive terminal UI with full mouse support
 //! - Real-time AI analysis and move statistics
-//! - Complete move history with replay capability
-//! - Responsive layout adapting to terminal size
 //! - Configurable AI difficulty and time limits
 //! - Background AI computation with progressive updates
 //!
@@ -35,28 +30,18 @@
 //!
 //! ## Usage Examples
 //! ```bash
-//! # Basic usage with menu selection
-//! cargo run --release
-//!
-//! # Start specific game with custom AI settings
-//! cargo run --release -- --game Gomoku --exploration-factor 1.4 --timeout-secs 30
-//!
-//! # AI vs AI tournament mode
-//! cargo run --release -- --ai-only --num-threads 16 --search-iterations 10000000
-//!
-//! # Debug mode with detailed statistics
-//! cargo run -- --stats-interval-secs 5 --timeout-secs 10
+//! # Launch with graphical user interface (Windows only)
+//! cargo run --release --features gui -- --gui
 //! ```
 
 // Import the main application modules
 // Each module handles a specific aspect of the application:
-pub mod app; // Core application state and configuration
-pub mod components;
 pub mod game_wrapper; // Unified interface for all games
+pub mod game_controller; // Central game state management
 pub mod games; // Game implementations (Gomoku, Connect4, Othello, Blokus)
-pub mod tui; // Terminal user interface implementation // Modular UI components and event system
-
-use crate::app::App;
+#[cfg(feature = "gui")]
+pub mod gui; // Windows GUI implementation
+pub mod clipboard; // Cross-platform clipboard support
 use clap::Parser;
 use std::io;
 
@@ -208,7 +193,7 @@ struct Args {
 /// 2. **Game-Specific Configuration**: Applies optimal defaults for each game type
 /// 3. **Parameter Validation**: Ensures thread count and other values are sensible
 /// 4. **App Initialization**: Creates the main application instance with all settings
-/// 5. **TUI Launch**: Transfers control to the terminal user interface
+/// 5. **GUI Launch**: Transfers control to the graphical user interface
 ///
 /// # Game-Specific Defaults
 /// The function applies intelligent defaults based on the selected game:
@@ -218,8 +203,8 @@ struct Args {
 /// - **Blokus**: 20×20 board (fixed), area maximization
 ///
 /// # Error Handling
-/// Returns `io::Result<()>` to propagate any terminal initialization
-/// or rendering errors from the TUI layer.
+/// Returns `io::Result<()>` to propagate any initialization
+/// or rendering errors from the GUI layer.
 ///
 /// # Thread Safety
 /// The function ensures at least one thread is allocated for AI computation
@@ -227,17 +212,17 @@ struct Args {
 ///
 /// # Examples
 /// ```bash
-/// # Interactive menu selection
-/// cargo run --release
+/// # Launch with graphical user interface
+/// cargo run --release --features gui
 ///
 /// # Quick Gomoku game with strong AI
-/// cargo run --release -- --game Gomoku --exploration-factor 1.4 --timeout-secs 30
+/// cargo run --release --features gui -- --game Gomoku --exploration-factor 1.4 --timeout-secs 30
 ///
 /// # AI tournament mode with detailed logging
-/// cargo run --release -- --ai-only --num-threads 16 --stats-interval-secs 5
+/// cargo run --release --features gui -- --ai-only --num-threads 16 --stats-interval-secs 5
 ///
 /// # Custom Connect4 with larger board
-/// cargo run --release -- --game Connect4 --board-size 9 --line-size 4
+/// cargo run --release --features gui -- --game Connect4 --board-size 9 --line-size 4
 /// ```
 fn main() -> io::Result<()> {
     let mut args = Args::parse();
@@ -301,23 +286,30 @@ fn main() -> io::Result<()> {
         8 // Safe default that works well on most systems
     };
 
-    // Create the main application instance with all configuration
-    // This constructor validates parameters and sets up initial state
-    let mut app = App::new(
-        args.exploration_factor,  // MCTS exploration parameter
-        num_threads,              // Parallel search threads
-        args.search_iterations,   // Maximum iterations per search
-        args.max_nodes,           // Memory limit for search tree
-        args.game,                // Pre-selected game (optional)
-        args.board_size,          // Board dimensions
-        args.line_size,           // Win condition
-        args.timeout_secs,        // AI thinking time limit
-        args.stats_interval_secs, // UI update frequency
-        args.ai_only,             // AI vs AI mode
-        args.shared_tree,         // Tree reuse between moves
-    );
+    // Check if GUI mode is requested
+    #[cfg(feature = "gui")]
+    {
+        // Launch Windows GUI with all configuration options
+        let gui_app = gui::GuiApp::new(
+            args.exploration_factor,
+            num_threads,
+            args.search_iterations,
+            args.max_nodes,
+            args.board_size,
+            args.line_size,
+            args.timeout_secs,
+            args.stats_interval_secs,
+            args.ai_only,
+            args.shared_tree,
+        );
+        
+        return gui::run_gui(gui_app)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+    }
 
-    // Launch the terminal user interface
-    // This transfers control to the TUI event loop until the user exits
-    tui::run(&mut app)
+    #[cfg(not(feature = "gui"))]
+    {
+        eprintln!("No UI available. Compile with --features gui");
+        Ok(())
+    }
 }

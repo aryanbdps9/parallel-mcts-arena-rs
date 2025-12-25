@@ -1,0 +1,76 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                           HOW TO PLAY: BLOKUS                                ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+OBJECTIVE
+─────────
+Place as many of your pieces on the board as possible. The player who
+places the most squares (lowest remaining) wins!
+
+GAMEPLAY
+────────
+• 4 players: 🟥 Red, 🟦 Blue, 🟩 Green, 🟨 Yellow
+• Each player has 21 uniquely-shaped pieces (1-5 squares each)
+• First piece MUST cover your starting corner
+• After that, pieces must touch your own color CORNER-TO-CORNER
+• Pieces may NOT share edges with your own color
+• Pieces CAN share edges with other players' pieces
+
+PLACEMENT RULES
+───────────────
+  ✓ Your pieces must touch at corners (diagonally)
+  ✗ Your pieces cannot touch at edges (orthogonally)
+  ✓ You can touch other players' pieces at edges
+  ✓ First move must include your corner square
+
+SCORING
+───────
+• When no player can move, the game ends
+• Count squares in your remaining (unplayed) pieces
+• LOWEST remaining squares wins!
+• Bonus: -15 if you placed all pieces, -5 more if monomino was last
+
+CONTROLS - BOARD
+────────────────
+  ↑ ↓ ← →     Move piece/cursor on the board
+  Enter/Space  Place the selected piece
+  R            Rotate piece 90° clockwise
+  X            Flip piece horizontally
+  P            Pass your turn (when no moves available)
+
+CONTROLS - PIECE SELECTION
+──────────────────────────
+  1-9, 0       Select pieces 1-10
+  A-K          Select pieces 11-21 (A=11, B=12, ... K=21)
+  Mouse click  Click on a piece to select it
+  Scroll       Scroll through pieces in the panel
+  Z            Toggle expand/collapse current player's pieces
+  +/-          Expand/collapse all player sections
+
+CONTROLS - GENERAL
+──────────────────
+  H            Show this help screen
+  Tab          Switch between Debug Stats and Move History
+  PgUp/PgDn    Scroll the stats/history panel
+  Esc          Return to game selection menu
+  Q            Quit the application
+
+THE 21 PIECES (by size)
+───────────────────────
+  1 square:  ▪ (monomino)
+  2 squares: ▪▪ (domino)
+  3 squares: 3 different triominoes
+  4 squares: 5 different tetrominoes (like Tetris pieces!)
+  5 squares: 12 different pentominoes
+
+STRATEGY TIPS
+─────────────
+• Play BIG pieces early - they're harder to fit later!
+• Expand toward the center for more opportunities
+• Block opponents by occupying key spaces
+• Keep small pieces for tight endgame situations
+• Create multiple "branches" from your corners
+• Watch for diagonal paths - your lifeline for expansion
+• Sometimes passing strategically can help
+
+Press ESC or H to return to the game

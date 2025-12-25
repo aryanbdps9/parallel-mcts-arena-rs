@@ -1,0 +1,42 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                           HOW TO PLAY: GOMOKU                                ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+OBJECTIVE
+─────────
+Be the first player to get {LINE_SIZE} (or more) of your pieces in a row - 
+horizontally, vertically, or diagonally.
+
+GAMEPLAY
+────────
+• Players take turns placing their piece on the board
+• Player 1 uses X (red), Player 2 uses O (blue)
+• Pieces cannot be moved once placed
+• Current board size: {BOARD_SIZE}x{BOARD_SIZE}
+
+WINNING
+───────
+• Form an unbroken line of {LINE_SIZE} or more pieces in any direction
+• The game ends immediately when a player achieves this
+• If the board fills up with no winner, the game is a draw
+
+CONTROLS
+────────
+  ↑ ↓ ← →     Move cursor on the board
+  Enter/Space  Place your piece at the cursor position
+  R            Restart the game
+  H            Show this help screen
+  Tab          Switch between Debug Stats and Move History
+  PgUp/PgDn    Scroll the stats/history panel
+  Esc          Return to game selection menu
+  Q            Quit the application
+
+STRATEGY TIPS
+─────────────
+• Control the center - it offers the most directions for winning
+• Create "open fours" (four in a row with both ends open)
+• Block your opponent's three-in-a-row formations
+• Try to create multiple threats simultaneously
+• Watch for diagonal threats - they're easy to miss!
+
+Press ESC or H to return to the game
