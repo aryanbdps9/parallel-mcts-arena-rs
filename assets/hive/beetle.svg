@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Beetle - Rounded shell with line down middle -->
+  <!-- Shell -->
+  <ellipse cx="50" cy="55" rx="30" ry="28" fill="#8B4513"/>
+  <!-- Shell highlight -->
+  <ellipse cx="45" cy="48" rx="12" ry="10" fill="#A0522D" opacity="0.5"/>
+  <!-- Shell line -->
+  <line x1="50" y1="28" x2="50" y2="82" stroke="#3d1f0a" stroke-width="3"/>
+  <!-- Head -->
+  <ellipse cx="50" cy="25" rx="15" ry="12" fill="#5D3A1A"/>
+  <!-- Eyes -->
+  <circle cx="42" cy="22" r="4" fill="#1a1a1a"/>
+  <circle cx="58" cy="22" r="4" fill="#1a1a1a"/>
+  <!-- Pincers/Mandibles -->
+  <path d="M40 15 Q35 8 30 10" fill="none" stroke="#3d1f0a" stroke-width="3" stroke-linecap="round"/>
+  <path d="M60 15 Q65 8 70 10" fill="none" stroke="#3d1f0a" stroke-width="3" stroke-linecap="round"/>
+  <!-- Legs -->
+  <path d="M25 45 L10 38" stroke="#8B4513" stroke-width="3" stroke-linecap="round"/>
+  <path d="M22 58 L8 55" stroke="#8B4513" stroke-width="3" stroke-linecap="round"/>
+  <path d="M25 72 L12 78" stroke="#8B4513" stroke-width="3" stroke-linecap="round"/>
+  <path d="M75 45 L90 38" stroke="#8B4513" stroke-width="3" stroke-linecap="round"/>
+  <path d="M78 58 L92 55" stroke="#8B4513" stroke-width="3" stroke-linecap="round"/>
+  <path d="M75 72 L88 78" stroke="#8B4513" stroke-width="3" stroke-linecap="round"/>
+</svg>

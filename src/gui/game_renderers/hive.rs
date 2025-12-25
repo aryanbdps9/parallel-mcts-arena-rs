@@ -22,13 +22,6 @@ const HEX_BG_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.76, g: 0.60, b: 0.42, a: 
 const HEX_GRID_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.60, g: 0.45, b: 0.30, a: 0.4 }; // Grid lines
 const HEX_EMPTY_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.85, g: 0.72, b: 0.55, a: 0.3 }; // Empty hex fill
 
-/// Piece icon colors
-const QUEEN_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 0.84, b: 0.0, a: 1.0 }; // Gold
-const BEETLE_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.55, g: 0.27, b: 0.07, a: 1.0 }; // Brown
-const SPIDER_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.5, g: 0.0, b: 0.5, a: 1.0 }; // Purple
-const GRASSHOPPER_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.13, g: 0.55, b: 0.13, a: 1.0 }; // Green
-const ANT_COLOR: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.0, g: 0.5, b: 0.8, a: 1.0 }; // Blue
-
 /// Isometric tilt factor (0.0 = top-down, 1.0 = full tilt)
 /// This compresses the Y axis to give a 3D perspective
 const ISO_TILT: f32 = 0.55;
@@ -234,173 +227,24 @@ impl HiveRenderer {
         }
     }
 
-    /// Draw the icon for a specific piece type
+    /// Draw the icon for a specific piece type using native D2D SVG
     fn draw_piece_icon(&self, renderer: &Renderer, cx: f32, cy: f32, size: f32, piece_type: PieceType, _text_color: D2D1_COLOR_F) {
-        match piece_type {
-            PieceType::Queen => self.draw_queen_icon(renderer, cx, cy, size),
-            PieceType::Beetle => self.draw_beetle_icon(renderer, cx, cy, size),
-            PieceType::Spider => self.draw_spider_icon(renderer, cx, cy, size),
-            PieceType::Grasshopper => self.draw_grasshopper_icon(renderer, cx, cy, size),
-            PieceType::Ant => self.draw_ant_icon(renderer, cx, cy, size),
-        }
+        self.draw_piece_icon_tilted(renderer, cx, cy, size, piece_type, _text_color, ISO_TILT)
     }
-
-    /// Draw Queen Bee icon - a bee with wings and stripes
-    fn draw_queen_icon(&self, renderer: &Renderer, cx: f32, cy: f32, size: f32) {
-        let s = size * ISO_TILT;
+    
+    /// Draw the icon for a specific piece type with optional isometric tilt
+    fn draw_piece_icon_tilted(&self, renderer: &Renderer, cx: f32, cy: f32, size: f32, piece_type: PieceType, _text_color: D2D1_COLOR_F, tilt: f32) {
+        let svg_name = match piece_type {
+            PieceType::Queen => "hive_queen",
+            PieceType::Beetle => "hive_beetle",
+            PieceType::Spider => "hive_spider",
+            PieceType::Grasshopper => "hive_grasshopper",
+            PieceType::Ant => "hive_ant",
+        };
         
-        // Body (oval)
-        renderer.fill_ellipse(cx, cy, size * 0.5, s * 0.65, QUEEN_COLOR);
-        
-        // Stripes on body
-        let stripe_color = D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0 };
-        renderer.fill_ellipse(cx, cy - s * 0.2, size * 0.45, s * 0.12, stripe_color);
-        renderer.fill_ellipse(cx, cy + s * 0.2, size * 0.45, s * 0.12, stripe_color);
-        
-        // Head
-        renderer.fill_ellipse(cx, cy - s * 0.55, size * 0.25, s * 0.25, QUEEN_COLOR);
-        
-        // Crown points
-        let crown_color = D2D1_COLOR_F { r: 1.0, g: 0.65, b: 0.0, a: 1.0 };
-        let crown_y = cy - s * 0.85;
-        renderer.fill_ellipse(cx - size * 0.15, crown_y, size * 0.08, s * 0.15, crown_color);
-        renderer.fill_ellipse(cx, crown_y - s * 0.1, size * 0.08, s * 0.18, crown_color);
-        renderer.fill_ellipse(cx + size * 0.15, crown_y, size * 0.08, s * 0.15, crown_color);
-        
-        // Wings (translucent)
-        let wing_color = D2D1_COLOR_F { r: 0.9, g: 0.95, b: 1.0, a: 0.6 };
-        renderer.fill_ellipse(cx - size * 0.45, cy - s * 0.1, size * 0.35, s * 0.5, wing_color);
-        renderer.fill_ellipse(cx + size * 0.45, cy - s * 0.1, size * 0.35, s * 0.5, wing_color);
-    }
-
-    /// Draw Beetle icon - a rounded beetle shape
-    fn draw_beetle_icon(&self, renderer: &Renderer, cx: f32, cy: f32, size: f32) {
-        let s = size * ISO_TILT;
-        
-        // Shell (large oval)
-        renderer.fill_ellipse(cx, cy + s * 0.1, size * 0.55, s * 0.55, BEETLE_COLOR);
-        
-        // Shell line down the middle
-        let line_color = D2D1_COLOR_F { r: 0.3, g: 0.15, b: 0.05, a: 1.0 };
-        renderer.draw_line(cx, cy - s * 0.4, cx, cy + s * 0.6, line_color, 2.0);
-        
-        // Head
-        let head_color = D2D1_COLOR_F { r: 0.35, g: 0.18, b: 0.05, a: 1.0 };
-        renderer.fill_ellipse(cx, cy - s * 0.5, size * 0.3, s * 0.25, head_color);
-        
-        // Pincers
-        renderer.draw_line(cx - size * 0.15, cy - s * 0.7, cx - size * 0.25, cy - s * 0.9, head_color, 2.0);
-        renderer.draw_line(cx + size * 0.15, cy - s * 0.7, cx + size * 0.25, cy - s * 0.9, head_color, 2.0);
-        
-        // Legs
-        let leg_positions = [-0.4, 0.0, 0.35];
-        for &y_off in &leg_positions {
-            renderer.draw_line(cx - size * 0.5, cy + s * y_off, cx - size * 0.75, cy + s * (y_off + 0.15), BEETLE_COLOR, 2.0);
-            renderer.draw_line(cx + size * 0.5, cy + s * y_off, cx + size * 0.75, cy + s * (y_off + 0.15), BEETLE_COLOR, 2.0);
-        }
-    }
-
-    /// Draw Spider icon - body with 8 legs
-    fn draw_spider_icon(&self, renderer: &Renderer, cx: f32, cy: f32, size: f32) {
-        let s = size * ISO_TILT;
-        
-        // Abdomen (large)
-        renderer.fill_ellipse(cx, cy + s * 0.25, size * 0.4, s * 0.45, SPIDER_COLOR);
-        
-        // Cephalothorax (smaller, front)
-        renderer.fill_ellipse(cx, cy - s * 0.35, size * 0.3, s * 0.3, SPIDER_COLOR);
-        
-        // 8 Legs (4 on each side)
-        let leg_color = SPIDER_COLOR;
-        let leg_angles: [(f32, f32, f32); 4] = [
-            (-0.3, -0.5, -0.7),  // front legs point forward
-            (-0.15, -0.2, -0.1),
-            (0.05, 0.15, 0.3),
-            (0.25, 0.45, 0.6),   // back legs point backward
-        ];
-        
-        for (y_start, y_mid, y_end) in leg_angles {
-            // Left legs
-            renderer.draw_line(cx - size * 0.25, cy + s * y_start, cx - size * 0.55, cy + s * y_mid, leg_color, 2.0);
-            renderer.draw_line(cx - size * 0.55, cy + s * y_mid, cx - size * 0.7, cy + s * y_end, leg_color, 2.0);
-            // Right legs
-            renderer.draw_line(cx + size * 0.25, cy + s * y_start, cx + size * 0.55, cy + s * y_mid, leg_color, 2.0);
-            renderer.draw_line(cx + size * 0.55, cy + s * y_mid, cx + size * 0.7, cy + s * y_end, leg_color, 2.0);
-        }
-        
-        // Eyes
-        let eye_color = D2D1_COLOR_F { r: 1.0, g: 0.2, b: 0.2, a: 1.0 };
-        renderer.fill_ellipse(cx - size * 0.1, cy - s * 0.45, size * 0.08, s * 0.08, eye_color);
-        renderer.fill_ellipse(cx + size * 0.1, cy - s * 0.45, size * 0.08, s * 0.08, eye_color);
-    }
-
-    /// Draw Grasshopper icon - elongated body with big back legs
-    fn draw_grasshopper_icon(&self, renderer: &Renderer, cx: f32, cy: f32, size: f32) {
-        let s = size * ISO_TILT;
-        
-        // Body (elongated)
-        renderer.fill_ellipse(cx, cy, size * 0.55, s * 0.35, GRASSHOPPER_COLOR);
-        
-        // Head
-        renderer.fill_ellipse(cx - size * 0.45, cy - s * 0.1, size * 0.22, s * 0.25, GRASSHOPPER_COLOR);
-        
-        // Eye
-        let eye_color = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-        renderer.fill_ellipse(cx - size * 0.5, cy - s * 0.2, size * 0.08, s * 0.1, eye_color);
-        
-        // Antennae
-        renderer.draw_line(cx - size * 0.55, cy - s * 0.3, cx - size * 0.75, cy - s * 0.65, GRASSHOPPER_COLOR, 1.5);
-        renderer.draw_line(cx - size * 0.5, cy - s * 0.3, cx - size * 0.65, cy - s * 0.7, GRASSHOPPER_COLOR, 1.5);
-        
-        // Big jumping back legs (bent)
-        let leg_color = D2D1_COLOR_F { r: 0.1, g: 0.4, b: 0.1, a: 1.0 };
-        // Left back leg
-        renderer.draw_line(cx + size * 0.2, cy + s * 0.2, cx + size * 0.1, cy - s * 0.5, leg_color, 3.0);
-        renderer.draw_line(cx + size * 0.1, cy - s * 0.5, cx + size * 0.55, cy + s * 0.5, leg_color, 2.5);
-        // Right back leg  
-        renderer.draw_line(cx + size * 0.35, cy + s * 0.25, cx + size * 0.3, cy - s * 0.4, leg_color, 3.0);
-        renderer.draw_line(cx + size * 0.3, cy - s * 0.4, cx + size * 0.7, cy + s * 0.55, leg_color, 2.5);
-        
-        // Front/middle legs (small)
-        renderer.draw_line(cx - size * 0.2, cy + s * 0.25, cx - size * 0.35, cy + s * 0.55, leg_color, 1.5);
-        renderer.draw_line(cx, cy + s * 0.3, cx - size * 0.1, cy + s * 0.6, leg_color, 1.5);
-    }
-
-    /// Draw Ant icon - three body segments with 6 legs
-    fn draw_ant_icon(&self, renderer: &Renderer, cx: f32, cy: f32, size: f32) {
-        let s = size * ISO_TILT;
-        
-        // Abdomen (back, largest)
-        renderer.fill_ellipse(cx + size * 0.25, cy + s * 0.15, size * 0.28, s * 0.35, ANT_COLOR);
-        
-        // Thorax (middle)
-        renderer.fill_ellipse(cx - size * 0.05, cy, size * 0.2, s * 0.22, ANT_COLOR);
-        
-        // Head (front)
-        renderer.fill_ellipse(cx - size * 0.35, cy - s * 0.05, size * 0.22, s * 0.25, ANT_COLOR);
-        
-        // Eyes
-        let eye_color = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-        renderer.fill_ellipse(cx - size * 0.42, cy - s * 0.15, size * 0.06, s * 0.08, eye_color);
-        
-        // Antennae
-        let antenna_color = D2D1_COLOR_F { r: 0.0, g: 0.35, b: 0.6, a: 1.0 };
-        renderer.draw_line(cx - size * 0.45, cy - s * 0.25, cx - size * 0.55, cy - s * 0.55, antenna_color, 1.5);
-        renderer.draw_line(cx - size * 0.55, cy - s * 0.55, cx - size * 0.7, cy - s * 0.5, antenna_color, 1.5);
-        renderer.draw_line(cx - size * 0.4, cy - s * 0.25, cx - size * 0.45, cy - s * 0.55, antenna_color, 1.5);
-        renderer.draw_line(cx - size * 0.45, cy - s * 0.55, cx - size * 0.55, cy - s * 0.45, antenna_color, 1.5);
-        
-        // 6 Legs (3 pairs)
-        let leg_color = ANT_COLOR;
-        // Front legs
-        renderer.draw_line(cx - size * 0.15, cy + s * 0.1, cx - size * 0.35, cy + s * 0.5, leg_color, 1.5);
-        renderer.draw_line(cx - size * 0.15, cy + s * 0.1, cx - size * 0.4, cy + s * 0.35, leg_color, 1.5);
-        // Middle legs
-        renderer.draw_line(cx, cy + s * 0.15, cx - size * 0.15, cy + s * 0.55, leg_color, 1.5);
-        renderer.draw_line(cx, cy + s * 0.15, cx + size * 0.15, cy + s * 0.55, leg_color, 1.5);
-        // Back legs
-        renderer.draw_line(cx + size * 0.15, cy + s * 0.2, cx + size * 0.05, cy + s * 0.6, leg_color, 1.5);
-        renderer.draw_line(cx + size * 0.15, cy + s * 0.2, cx + size * 0.35, cy + s * 0.55, leg_color, 1.5);
+        // Draw SVG icon centered at (cx, cy) with the given size and tilt
+        let icon_size = size * 2.0;
+        renderer.draw_svg_tilted(svg_name, cx, cy, icon_size, icon_size, tilt);
     }
 
     /// Draw valid position indicator
@@ -499,11 +343,11 @@ impl HiveRenderer {
             
             renderer.fill_rounded_rect(button_rect, 5.0, bg_color);
             
-            // Draw piece icon on the left side
+            // Draw piece icon on the left side (no tilt for UI panel)
             let icon_size = button_height * 0.35;
             let icon_cx = button_rect.x + 30.0;
             let icon_cy = button_rect.y + button_height / 2.0;
-            self.draw_piece_icon(renderer, icon_cx, icon_cy, icon_size, *piece_type, Colors::TEXT_PRIMARY);
+            self.draw_piece_icon_tilted(renderer, icon_cx, icon_cy, icon_size, *piece_type, Colors::TEXT_PRIMARY, 1.0);
             
             // Draw count on the right side
             let count_text = format!("x{}", count);

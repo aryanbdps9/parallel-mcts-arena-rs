@@ -83,7 +83,11 @@ pub fn run_gui(app: GuiApp) -> windows::core::Result<()> {
         )?;
 
         // Create renderer
-        let renderer = Renderer::new(hwnd)?;
+        let mut renderer = Renderer::new(hwnd)?;
+        
+        // Load Hive SVG icons
+        load_hive_svgs(&mut renderer);
+        
         RENDERER.with(|r| {
             *r.borrow_mut() = Some(renderer);
         });
@@ -1269,6 +1273,23 @@ fn get_info_area(app: &GuiApp, width: f32, height: f32) -> Rect {
 fn get_tab_area(app: &GuiApp, width: f32, height: f32) -> Rect {
     let info_area = get_info_area(app, width, height);
     Rect::new(info_area.x, info_area.y, info_area.width, 35.0)
+}
+
+/// Load all Hive SVG icons into the renderer cache
+fn load_hive_svgs(renderer: &mut Renderer) {
+    // SVG content for each Hive piece
+    const QUEEN_SVG: &str = include_str!("../../assets/hive/queen.svg");
+    const BEETLE_SVG: &str = include_str!("../../assets/hive/beetle.svg");
+    const SPIDER_SVG: &str = include_str!("../../assets/hive/spider.svg");
+    const GRASSHOPPER_SVG: &str = include_str!("../../assets/hive/grasshopper.svg");
+    const ANT_SVG: &str = include_str!("../../assets/hive/ant.svg");
+    
+    // Load each SVG with a 100x100 viewport (matching the SVG viewBox)
+    let _ = renderer.load_svg("hive_queen", QUEEN_SVG, 100.0, 100.0);
+    let _ = renderer.load_svg("hive_beetle", BEETLE_SVG, 100.0, 100.0);
+    let _ = renderer.load_svg("hive_spider", SPIDER_SVG, 100.0, 100.0);
+    let _ = renderer.load_svg("hive_grasshopper", GRASSHOPPER_SVG, 100.0, 100.0);
+    let _ = renderer.load_svg("hive_ant", ANT_SVG, 100.0, 100.0);
 }
 
 
