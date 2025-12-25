@@ -50,13 +50,22 @@ struct GpuParams {
     _reserved: [u32; 3],
 }
 
-/// Parameters for Gomoku evaluation
+/// Parameters for game board evaluation
+/// 
+/// The current_player field is overloaded:
+/// - Bits 0-7: current player (1 or -1, normalized to 1 in board data)
+/// - Bits 8-15: game-specific parameter (e.g., line_size for Connect4)
+/// 
+/// Game types (determined by board dimensions and context):
+/// - Gomoku: 15x15 or 19x19, win with 5-in-a-row
+/// - Connect4: 7x6 typically, win with N-in-a-row (default 4), gravity-based
+/// - Othello: 8x8, flip-based, count-based winner
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct GpuSimulationParams {
     pub board_width: u32,
     pub board_height: u32,
-    pub current_player: i32,
+    pub current_player: i32,  // Lower 8 bits: player, bits 8-15: line_size for Connect4
     pub use_heuristic: u32,
     pub seed: u32,
 }

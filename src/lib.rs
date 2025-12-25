@@ -573,7 +573,8 @@ impl<S: GameState> MCTS<S> {
                         if batch_requests.is_empty() { continue; }
                         
                         let mut flat_data = Vec::new();
-                        let mut valid_indices = Vec::new();
+                        let mut gpu_indices = Vec::new();
+                        let mut cpu_indices = Vec::new();
                         let mut params = None;
                         
                         // Generate a unique base seed for this batch using high-resolution timing
@@ -595,19 +596,65 @@ impl<S: GameState> MCTS<S> {
                                     });
                                 }
                                 flat_data.extend(data);
-                                valid_indices.push(i);
+                                gpu_indices.push(i);
+                            } else {
+                                // This game doesn't support GPU simulation, needs CPU rollout
+                                cpu_indices.push(i);
                             }
                         }
                         
-                        let mut scores = vec![0.0; batch_requests.len()];
+                        let mut scores = vec![0.0f32; batch_requests.len()];
 
+                        // GPU evaluation for supported games
                         if let Some(p) = params {
                             let mut acc = accelerator.lock();
                             if let Ok(gpu_scores) = acc.simulate_batch(&flat_data, p) {
-                                for (idx, score) in valid_indices.into_iter().zip(gpu_scores.into_iter()) {
+                                for (idx, score) in gpu_indices.into_iter().zip(gpu_scores.into_iter()) {
                                     scores[idx] = score;
                                 }
                             }
+                        }
+                        
+                        // CPU random rollout for games that don't support GPU simulation
+                        // This ensures all games work, even without custom GPU shaders
+                        for idx in cpu_indices {
+                            let mut sim_state = batch_requests[idx].state.clone();
+                            let leaf_player = sim_state.get_current_player();
+                            
+                            // Run random rollout on CPU
+                            let winner = if sim_state.is_terminal() {
+                                sim_state.get_winner()
+                            } else {
+                                let mut moves_cache = Vec::new();
+                                let mut simulation_moves = 0;
+                                const MAX_SIMULATION_MOVES: usize = 500;
+                                
+                                while !sim_state.is_terminal() && simulation_moves < MAX_SIMULATION_MOVES {
+                                    moves_cache.clear();
+                                    moves_cache.extend(sim_state.get_possible_moves());
+                                    if moves_cache.is_empty() {
+                                        break;
+                                    }
+                                    let move_index = random_range(0, moves_cache.len());
+                                    let mv = &moves_cache[move_index];
+                                    sim_state.make_move(mv);
+                                    simulation_moves += 1;
+                                }
+                                
+                                if simulation_moves >= MAX_SIMULATION_MOVES {
+                                    None // Treat as draw
+                                } else {
+                                    sim_state.get_winner()
+                                }
+                            };
+                            
+                            // Convert winner to score (from leaf_player's perspective)
+                            // Use special values to distinguish win/loss/draw
+                            scores[idx] = match winner {
+                                Some(w) if w == leaf_player => 4000.0,
+                                Some(_) => -4000.0,
+                                None => 0.0, // Draw
+                            };
                         }
 
                         // Process results: Expand and Backpropagate in parallel

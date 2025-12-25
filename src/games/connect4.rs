@@ -73,6 +73,22 @@ impl GameState for Connect4State {
         self.last_move.map(|(r, c)| vec![(r, c)])
     }
 
+    fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {
+        let mut data = Vec::with_capacity(self.height * self.width);
+        // Normalize board so current player is always 1
+        // This allows batching states with different current players
+        let multiplier = if self.current_player == 1 { 1 } else { -1 };
+        for row in &self.board {
+            for &cell in row {
+                data.push(cell * multiplier);
+            }
+        }
+        // Encode line_size in the player field (upper bits)
+        // Format: player in bits 0-7, line_size in bits 8-15
+        let encoded_params = 1 | ((self.line_size as i32) << 8);
+        Some((data, self.width, self.height, encoded_params))
+    }
+
     fn get_possible_moves(&self) -> Vec<Self::Move> {
         (0..self.width)
             .filter(|&c| self.board[0][c] == 0)

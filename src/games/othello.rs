@@ -108,6 +108,22 @@ impl GameState for OthelloState {
         self.last_move.map(|(r, c)| vec![(r, c)])
     }
 
+    fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {
+        let mut data = Vec::with_capacity(self.board_size * self.board_size);
+        // Normalize board so current player is always 1
+        // This allows batching states with different current players
+        let multiplier = if self.current_player == 1 { 1 } else { -1 };
+        for row in &self.board {
+            for &cell in row {
+                data.push(cell * multiplier);
+            }
+        }
+        // Encode game type: use a special marker in upper bits to identify Othello
+        // Bits 0-7: player (1), Bits 8-15: 0 (no line_size), Bits 16-23: game_type (2 = Othello)
+        let encoded_params = 1 | (2 << 16); // game_type 2 = Othello
+        Some((data, self.board_size, self.board_size, encoded_params))
+    }
+
     fn get_winner(&self) -> Option<i32> {
         if !self.is_terminal() {
             return None;
