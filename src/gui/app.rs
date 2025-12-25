@@ -30,7 +30,8 @@ use super::game_renderers::{GameRenderer, create_renderer_for_game};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerType {
     Human,
-    AI,
+    AiCpu,
+    AiGpu,
 }
 
 /// Current screen/mode of the GUI
@@ -121,7 +122,7 @@ pub struct MoveEntry {
 /// AI worker messages
 #[derive(Debug)]
 pub enum AIRequest {
-    Search(GameWrapper, u64),
+    Search(GameWrapper, u64, PlayerType, i32),
     AdvanceRoot(MoveWrapper),
     Stop,
 }
@@ -141,12 +142,17 @@ pub struct AIWorker {
 
 impl AIWorker {
     pub fn new(
-        exploration_constant: f64,
+        cpu_exploration_constant: f64,
+        gpu_exploration_constant: f64,
         num_threads: usize,
         max_nodes: usize,
         search_iterations: u32,
+        shared_tree: bool,
+        gpu_threads: usize,
+        gpu_use_heuristic: bool,
     ) -> Self {
         use std::sync::mpsc::channel;
+        use std::collections::HashMap;
 
         let (tx_req, rx_req) = channel();
         let (tx_resp, rx_resp) = channel();
@@ -154,45 +160,71 @@ impl AIWorker {
         let stop_clone = stop_flag.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut mcts: Option<MCTS<GameWrapper>> = None;
+            let mut mcts_cpu_map: HashMap<i32, MCTS<GameWrapper>> = HashMap::new();
+            let mut mcts_gpu_map: HashMap<i32, MCTS<GameWrapper>> = HashMap::new();
 
             for request in rx_req {
                 match request {
-                    AIRequest::Search(state, timeout) => {
+                    AIRequest::Search(state, timeout, player_type, player_id) => {
                         if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                             break;
                         }
 
-                        if mcts.is_none() {
-                            #[cfg(feature = "gpu")]
-                            {
-                                let (new_mcts, gpu_msg) = MCTS::with_gpu(exploration_constant, num_threads, max_nodes);
-                                if let Some(msg) = gpu_msg {
-                                    eprintln!("[AI] {}", msg);
+                        let key = if shared_tree { 0 } else { player_id };
+
+                        let mcts_opt = match player_type {
+                            PlayerType::AiCpu => {
+                                Some(mcts_cpu_map.entry(key).or_insert_with(|| {
+                                    MCTS::new(cpu_exploration_constant, num_threads, max_nodes)
+                                }))
+                            },
+                            PlayerType::AiGpu => {
+                                #[cfg(feature = "gpu")]
+                                {
+                                    if !mcts_gpu_map.contains_key(&key) {
+                                        let gpu_config = mcts::gpu::GpuConfig {
+                                            max_batch_size: gpu_threads,
+                                            ..Default::default()
+                                        };
+                                        let (new_mcts, gpu_msg) = MCTS::with_gpu_config(gpu_exploration_constant, num_threads, max_nodes, gpu_config, gpu_use_heuristic);
+                                        if let Some(msg) = gpu_msg {
+                                            eprintln!("[AI] {}", msg);
+                                        }
+                                        mcts_gpu_map.insert(key, new_mcts);
+                                    }
+                                    mcts_gpu_map.get_mut(&key)
                                 }
-                                mcts = Some(new_mcts);
-                            }
-                            #[cfg(not(feature = "gpu"))]
-                            {
-                                mcts = Some(MCTS::new(exploration_constant, num_threads, max_nodes));
-                            }
-                        }
+                                #[cfg(not(feature = "gpu"))]
+                                {
+                                    eprintln!("[AI] GPU not available, falling back to CPU");
+                                    Some(mcts_cpu_map.entry(key).or_insert_with(|| {
+                                        MCTS::new(cpu_exploration_constant, num_threads, max_nodes)
+                                    }))
+                                }
+                            },
+                            _ => None,
+                        };
 
-                        let (best_move, stats) = mcts.as_mut().unwrap().search_with_stop(
-                            &state,
-                            search_iterations as i32,
-                            1,
-                            timeout,
-                            Some(stop_clone.clone()),
-                        );
+                        if let Some(mcts) = mcts_opt {
+                            let (best_move, stats) = mcts.search_with_stop(
+                                &state,
+                                search_iterations as i32,
+                                1,
+                                timeout,
+                                Some(stop_clone.clone()),
+                            );
 
-                        if !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                            let _ = tx_resp.send(AIResponse::BestMove(best_move, stats));
+                            if !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                                let _ = tx_resp.send(AIResponse::BestMove(best_move, stats));
+                            }
                         }
                     }
                     AIRequest::AdvanceRoot(move_made) => {
-                        if let Some(mcts_ref) = mcts.as_mut() {
-                            mcts_ref.advance_root(&move_made);
+                        for mcts in mcts_cpu_map.values_mut() {
+                            mcts.advance_root(&move_made);
+                        }
+                        for mcts in mcts_gpu_map.values_mut() {
+                            mcts.advance_root(&move_made);
                         }
                     }
                     AIRequest::Stop => break,
@@ -208,8 +240,8 @@ impl AIWorker {
         }
     }
 
-    pub fn start_search(&self, state: GameWrapper, timeout: u64) {
-        let _ = self.tx.send(AIRequest::Search(state, timeout));
+    pub fn start_search(&self, state: GameWrapper, timeout: u64, player_type: PlayerType, player_id: i32) {
+        let _ = self.tx.send(AIRequest::Search(state, timeout, player_type, player_id));
     }
 
     pub fn try_recv(&self) -> Option<AIResponse> {
@@ -274,12 +306,15 @@ pub struct GuiApp {
     pub line_size: usize,
     pub timeout_secs: u64,
     pub ai_threads: usize,
+    pub gpu_threads: usize,
     pub max_nodes: usize,
     pub search_iterations: u32,
-    pub exploration_constant: f64,
+    pub cpu_exploration_constant: f64,
+    pub gpu_exploration_constant: f64,
     pub stats_interval_secs: u64,
     pub ai_only: bool,
     pub shared_tree: bool,
+    pub gpu_use_heuristic: bool,
     pub selected_settings_index: usize,
 
     // UI state
@@ -308,16 +343,19 @@ pub struct GuiApp {
 
 impl GuiApp {
     pub fn new(
-        exploration_constant: f64,
+        cpu_exploration_constant: f64,
+        gpu_exploration_constant: f64,
         num_threads: usize,
-        search_iterations: u32,
         max_nodes: usize,
+        search_iterations: u32,
+        shared_tree: bool,
+        gpu_threads: usize,
+        gpu_use_heuristic: bool,
         board_size: usize,
         line_size: usize,
         timeout_secs: u64,
         stats_interval_secs: u64,
         ai_only: bool,
-        shared_tree: bool,
     ) -> Self {
         let default_game = GameWrapper::Gomoku(GomokuState::new(board_size, line_size));
         let game_controller = GameController::new(default_game.clone());
@@ -328,14 +366,14 @@ impl GuiApp {
             should_quit: false,
             selected_game_index: 0,
             selected_game_type: GameType::Gomoku,
-            player_types: vec![(1, PlayerType::Human), (-1, PlayerType::AI)],
+            player_types: vec![(1, PlayerType::Human), (-1, PlayerType::AiCpu)],
             selected_player_index: 0,
             game_controller,
             game: default_game,
             game_status: GameStatus::InProgress,
             move_history: Vec::new(),
             game_renderer: renderer,
-            ai_worker: AIWorker::new(exploration_constant, num_threads, max_nodes, search_iterations),
+            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic),
             ai_thinking: false,
             ai_thinking_start: None,
             last_search_stats: None,
@@ -343,12 +381,15 @@ impl GuiApp {
             line_size,
             timeout_secs,
             ai_threads: num_threads,
+            gpu_threads,
             max_nodes,
             search_iterations,
-            exploration_constant,
+            cpu_exploration_constant,
+            gpu_exploration_constant,
             stats_interval_secs,
             ai_only,
             shared_tree,
+            gpu_use_heuristic,
             selected_settings_index: 0,
             needs_redraw: true,
             hover_button: None,
@@ -371,7 +412,9 @@ impl GuiApp {
         // If AI-only mode, set all players to AI
         if self.ai_only {
             for (_, pt) in &mut self.player_types {
-                *pt = PlayerType::AI;
+                if *pt == PlayerType::Human {
+                    *pt = PlayerType::AiCpu;
+                }
             }
         }
 
@@ -399,10 +442,14 @@ impl GuiApp {
 
         // Create a new AI worker (the old one may have been stopped when going back to menu)
         self.ai_worker = AIWorker::new(
-            self.exploration_constant,
+            self.cpu_exploration_constant,
+            self.gpu_exploration_constant,
             self.ai_threads,
             self.max_nodes,
             self.search_iterations,
+            self.shared_tree,
+            self.gpu_threads,
+            self.gpu_use_heuristic,
         );
 
         // Check if AI should move first
@@ -416,16 +463,18 @@ impl GuiApp {
         }
 
         let current_player = self.game.get_current_player();
-        let is_ai = self.player_types
+        let player_type = self.player_types
             .iter()
             .find(|(id, _)| *id == current_player)
-            .map(|(_, pt)| *pt == PlayerType::AI)
-            .unwrap_or(false);
+            .map(|(_, pt)| *pt)
+            .unwrap_or(PlayerType::Human);
+
+        let is_ai = matches!(player_type, PlayerType::AiCpu | PlayerType::AiGpu);
 
         if is_ai && !self.ai_thinking {
             self.ai_thinking = true;
             self.ai_thinking_start = Some(Instant::now());
-            self.ai_worker.start_search(self.game.clone(), self.timeout_secs);
+            self.ai_worker.start_search(self.game.clone(), self.timeout_secs, player_type, current_player);
             self.needs_redraw = true;
         }
     }
@@ -574,13 +623,13 @@ impl GuiApp {
             self.player_types = match self.selected_game_type {
                 GameType::Blokus => vec![
                     (1, PlayerType::Human),
-                    (2, PlayerType::AI),
-                    (3, PlayerType::AI),
-                    (4, PlayerType::AI),
+                    (2, PlayerType::AiCpu),
+                    (3, PlayerType::AiCpu),
+                    (4, PlayerType::AiCpu),
                 ],
                 _ => vec![
                     (1, PlayerType::Human),
-                    (-1, PlayerType::AI),
+                    (-1, PlayerType::AiCpu),
                 ],
             };
             
@@ -599,8 +648,9 @@ impl GuiApp {
         if index < self.player_types.len() {
             let (id, pt) = &self.player_types[index];
             self.player_types[index] = (*id, match pt {
-                PlayerType::Human => PlayerType::AI,
-                PlayerType::AI => PlayerType::Human,
+                PlayerType::Human => PlayerType::AiCpu,
+                PlayerType::AiCpu => PlayerType::AiGpu,
+                PlayerType::AiGpu => PlayerType::Human,
             });
             self.needs_redraw = true;
         }
@@ -682,21 +732,29 @@ impl GuiApp {
                 let step = if delta > 0 { 100000 } else { -100000 };
                 self.search_iterations = ((self.search_iterations as i64 + step).max(10000).min(100000000)) as u32;
             }
-            5 => { // Exploration Constant
+            5 => { // CPU Exploration Constant
                 let step = if delta > 0 { 0.1 } else { -0.1 };
-                self.exploration_constant = (self.exploration_constant + step).max(0.1).min(10.0);
+                self.cpu_exploration_constant = (self.cpu_exploration_constant + step).max(0.1).min(10.0);
             }
-            6 => { // Timeout
+            6 => { // GPU Exploration Constant
+                let step = if delta > 0 { 0.1 } else { -0.1 };
+                self.gpu_exploration_constant = (self.gpu_exploration_constant + step).max(0.1).min(10.0);
+            }
+            7 => { // Timeout
                 self.timeout_secs = ((self.timeout_secs as i64 + delta as i64).max(1).min(600)) as u64;
             }
-            7 => { // Stats Interval
+            8 => { // Stats Interval
                 self.stats_interval_secs = ((self.stats_interval_secs as i64 + delta as i64).max(1).min(120)) as u64;
             }
-            8 => { // AI Only
+            9 => { // AI Only
                 self.ai_only = !self.ai_only;
             }
-            9 => { // Shared Tree
+            10 => { // Shared Tree
                 self.shared_tree = !self.shared_tree;
+            }
+            11 => { // GPU Threads
+                let step = if delta > 0 { 256 } else { -256 };
+                self.gpu_threads = ((self.gpu_threads as i32 + step).max(256).min(16384)) as usize;
             }
             _ => {}
         }
@@ -711,11 +769,13 @@ impl GuiApp {
             ("AI Threads".to_string(), self.ai_threads.to_string()),
             ("Max Nodes".to_string(), format!("{}K", self.max_nodes / 1000)),
             ("Search Iterations".to_string(), format!("{}K", self.search_iterations / 1000)),
-            ("Exploration Constant".to_string(), format!("{:.2}", self.exploration_constant)),
+            ("CPU Exploration".to_string(), format!("{:.2}", self.cpu_exploration_constant)),
+            ("GPU Exploration".to_string(), format!("{:.2}", self.gpu_exploration_constant)),
             ("Timeout (secs)".to_string(), self.timeout_secs.to_string()),
             ("Stats Interval (secs)".to_string(), self.stats_interval_secs.to_string()),
             ("AI Only Mode".to_string(), if self.ai_only { "Yes" } else { "No" }.to_string()),
             ("Shared Tree".to_string(), if self.shared_tree { "Yes" } else { "No" }.to_string()),
+            ("GPU Threads".to_string(), self.gpu_threads.to_string()),
         ]
     }
 
@@ -725,7 +785,7 @@ impl GuiApp {
         self.player_types
             .iter()
             .find(|(id, _)| *id == current_player)
-            .map(|(_, pt)| *pt == PlayerType::AI)
+            .map(|(_, pt)| matches!(pt, PlayerType::AiCpu | PlayerType::AiGpu))
             .unwrap_or(false)
     }
 

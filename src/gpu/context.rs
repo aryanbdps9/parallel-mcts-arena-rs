@@ -67,11 +67,14 @@ pub struct GpuContext {
     backprop_pipeline: ComputePipeline,
     /// Pre-compiled max reduction pipeline
     max_reduction_pipeline: ComputePipeline,
+    /// Pre-compiled Gomoku evaluation pipeline
+    pub gomoku_eval_pipeline: ComputePipeline,
     /// Bind group layouts for each pipeline
     puct_bind_group_layout: BindGroupLayout,
     expansion_bind_group_layout: BindGroupLayout,
     backprop_bind_group_layout: BindGroupLayout,
     max_reduction_bind_group_layout: BindGroupLayout,
+    pub gomoku_eval_bind_group_layout: BindGroupLayout,
     /// Configuration
     config: GpuConfig,
     /// Maximum buffer size supported
@@ -158,11 +161,17 @@ impl GpuContext {
             source: wgpu::ShaderSource::Wgsl(shaders::MAX_REDUCTION_SHADER.into()),
         });
 
+        let gomoku_eval_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Gomoku Eval Shader"),
+            source: wgpu::ShaderSource::Wgsl(shaders::GOMOKU_EVAL_SHADER.into()),
+        });
+
         // Create bind group layouts
         let puct_bind_group_layout = Self::create_puct_bind_group_layout(&device);
         let expansion_bind_group_layout = Self::create_expansion_bind_group_layout(&device);
         let backprop_bind_group_layout = Self::create_backprop_bind_group_layout(&device);
         let max_reduction_bind_group_layout = Self::create_max_reduction_bind_group_layout(&device);
+        let gomoku_eval_bind_group_layout = Self::create_gomoku_eval_bind_group_layout(&device);
 
         // Create pipelines
         let puct_pipeline = Self::create_compute_pipeline(
@@ -197,6 +206,14 @@ impl GpuContext {
             "Max Reduction Pipeline",
         );
 
+        let gomoku_eval_pipeline = Self::create_compute_pipeline(
+            &device,
+            &gomoku_eval_shader,
+            "evaluate_board",
+            &gomoku_eval_bind_group_layout,
+            "Gomoku Eval Pipeline",
+        );
+
         Ok(Self {
             device,
             queue,
@@ -205,12 +222,53 @@ impl GpuContext {
             expansion_pipeline,
             backprop_pipeline,
             max_reduction_pipeline,
+            gomoku_eval_pipeline,
             puct_bind_group_layout,
             expansion_bind_group_layout,
             backprop_bind_group_layout,
             max_reduction_bind_group_layout,
+            gomoku_eval_bind_group_layout,
             config: config.clone(),
             max_buffer_size,
+        })
+    }
+
+    /// Creates the bind group layout for Gomoku evaluation
+    fn create_gomoku_eval_bind_group_layout(device: &Device) -> BindGroupLayout {
+        device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Gomoku Eval Bind Group Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         })
     }
 

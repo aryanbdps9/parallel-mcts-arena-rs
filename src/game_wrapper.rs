@@ -253,6 +253,12 @@ macro_rules! impl_game_dispatch {
                     $(GameWrapper::$variant(g) => g.get_board(),)*
                 }
             }
+
+            fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {
+                match self {
+                    $(GameWrapper::$variant(g) => g.get_gpu_simulation_data(),)*
+                }
+            }
         }
 
         impl GameWrapper {

@@ -141,6 +141,22 @@ pub struct GpuParams {
     pub param3: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+pub struct GpuSimulationParams {
+    pub board_width: u32,
+    pub board_height: u32,
+    pub current_player: i32,
+    pub use_heuristic: u32,
+    pub seed: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+pub struct GpuSimulationResult {
+    pub score: f32,
+}
+
 /// Result of batch expansion decision
 #[derive(Debug)]
 pub struct BatchExpansionResult {
@@ -165,6 +181,15 @@ pub struct GpuMctsAccelerator {
     puct_staging_buffer: Option<Buffer>,
     /// Current capacity of pre-allocated buffers
     current_capacity: usize,
+    
+    // Reusable buffers for simulation
+    sim_input_buffer: Option<Buffer>,
+    sim_output_buffer: Option<Buffer>,
+    sim_staging_buffer: Option<Buffer>,
+    sim_params_buffer: Option<Buffer>,
+    sim_bind_group: Option<wgpu::BindGroup>,
+    sim_current_capacity: usize,
+
     /// Statistics: total GPU compute time in microseconds
     total_gpu_time_us: u64,
     /// Statistics: number of GPU dispatches
@@ -183,6 +208,12 @@ impl GpuMctsAccelerator {
             puct_output_buffer: None,
             puct_staging_buffer: None,
             current_capacity: 0,
+            sim_input_buffer: None,
+            sim_output_buffer: None,
+            sim_staging_buffer: None,
+            sim_params_buffer: None,
+            sim_bind_group: None,
+            sim_current_capacity: 0,
             total_gpu_time_us: 0,
             dispatch_count: 0,
         }
@@ -716,6 +747,139 @@ impl GpuMctsAccelerator {
         }
 
         Ok(current_results[0])
+    }
+
+    /// Computes Gomoku heuristic evaluation for a batch of boards
+    pub fn simulate_batch(
+        &mut self,
+        board_data: &[i32],
+        params: GpuSimulationParams,
+    ) -> Result<Vec<f32>, GpuError> {
+        let start_time = std::time::Instant::now();
+        let num_boards = board_data.len() as u32 / (params.board_width * params.board_height);
+        
+        if num_boards == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Ensure buffers are large enough
+        let required_capacity = num_boards as usize;
+        if self.sim_current_capacity < required_capacity || self.sim_input_buffer.is_none() {
+            let new_capacity = required_capacity.next_power_of_two().max(256);
+            let board_size = (params.board_width * params.board_height) as usize;
+            
+            let input_size = (new_capacity * board_size * std::mem::size_of::<i32>()) as u64;
+            let output_size = (new_capacity * std::mem::size_of::<GpuSimulationResult>()) as u64;
+
+            self.sim_input_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Gomoku Input Buffer"),
+                size: input_size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+            self.sim_output_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Gomoku Output Buffer"),
+                size: output_size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+
+            self.sim_staging_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Gomoku Staging Buffer"),
+                size: output_size,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+            self.sim_params_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Gomoku Params Buffer"),
+                size: std::mem::size_of::<GpuSimulationParams>() as u64,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+            // Create bind group
+            self.sim_bind_group = Some(self.context.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Gomoku Bind Group"),
+                layout: &self.context.gomoku_eval_bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: self.sim_input_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: self.sim_output_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: self.sim_params_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                ],
+            }));
+            
+            self.sim_current_capacity = new_capacity;
+        }
+
+        // Upload data
+        self.context.queue().write_buffer(
+            self.sim_input_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(board_data),
+        );
+        
+        self.context.queue().write_buffer(
+            self.sim_params_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::bytes_of(&params),
+        );
+
+        // Dispatch
+        let mut encoder = self.context.device().create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Gomoku Eval Encoder"),
+        });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Gomoku Eval Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.context.gomoku_eval_pipeline);
+            compute_pass.set_bind_group(0, self.sim_bind_group.as_ref().unwrap(), &[]);
+            let workgroups = (num_boards + 63) / 64;
+            compute_pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        let output_size = (num_boards as usize * std::mem::size_of::<GpuSimulationResult>()) as u64;
+        encoder.copy_buffer_to_buffer(
+            self.sim_output_buffer.as_ref().unwrap(),
+            0,
+            self.sim_staging_buffer.as_ref().unwrap(),
+            0,
+            output_size,
+        );
+        
+        self.context.submit_and_wait(encoder.finish());
+
+        // Read results
+        let staging_buffer = self.sim_staging_buffer.as_ref().unwrap();
+        let buffer_slice = staging_buffer.slice(..output_size);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        self.context.device().poll(wgpu::Maintain::Wait);
+        receiver.recv().unwrap().map_err(|e| GpuError::BufferError(e.to_string()))?;
+
+        let data = buffer_slice.get_mapped_range();
+        let results: &[GpuSimulationResult] = bytemuck::cast_slice(&data);
+        let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+        drop(data);
+        staging_buffer.unmap();
+
+        self.total_gpu_time_us += start_time.elapsed().as_micros() as u64;
+        self.dispatch_count += 1;
+
+        Ok(scores)
     }
 
     /// Returns the GPU context
