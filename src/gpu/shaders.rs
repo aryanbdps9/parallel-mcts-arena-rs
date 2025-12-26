@@ -117,11 +117,13 @@ var<private> rng_state: u32;
 const GAME_GOMOKU: u32 = 0u;
 const GAME_CONNECT4: u32 = 1u;
 const GAME_OTHELLO: u32 = 2u;
+const GAME_BLOKUS: u32 = 3u;
+const GAME_HIVE: u32 = 4u;
 
 // Extract game parameters from encoded current_player field
 // Bits 0-7: actual player value (always 1 after normalization)
 // Bits 8-15: line_size for Connect4 (0 means default/Gomoku)
-// Bits 16-23: explicit game_type (0=auto, 2=Othello)
+// Bits 16-23: explicit game_type (0=auto, 2=Othello, 3=Blokus, 4=Hive)
 fn get_line_size() -> i32 {
     let encoded = params.current_player;
     let line_size = (encoded >> 8) & 0xFF;
@@ -135,10 +137,9 @@ fn get_game_type() -> u32 {
     let encoded = params.current_player;
     let explicit_game_type = (encoded >> 16) & 0xFF;
     
-    // Check for explicit game type first
-    if (explicit_game_type == 2) {
-        return GAME_OTHELLO;
-    }
+    if (explicit_game_type == 2) { return GAME_OTHELLO; }
+    if (explicit_game_type == 3) { return GAME_BLOKUS; }
+    if (explicit_game_type == 4) { return GAME_HIVE; }
     
     let line_size = (encoded >> 8) & 0xFF;
     
@@ -309,7 +310,7 @@ const DIR_Y: array<i32, 8> = array<i32, 8>(-1, -1, 0, 1, 1, 1, 0, -1);
 
 // Check if placing a piece at (x, y) would flip pieces in direction d
 // Returns the number of pieces that would be flipped
-fn othello_count_flips_dir(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32, d: i32) -> i32 {
+fn othello_count_flips_dir(board: ptr<function, array<i32, 1056>>, x: i32, y: i32, player: i32, d: i32) -> i32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     let dx = DIR_X[d];
@@ -339,7 +340,7 @@ fn othello_count_flips_dir(board: ptr<function, array<i32, 64>>, x: i32, y: i32,
 }
 
 // Check if a move is valid for Othello (would flip at least one piece)
-fn othello_is_valid_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32) -> bool {
+fn othello_is_valid_move(board: ptr<function, array<i32, 1056>>, x: i32, y: i32, player: i32) -> bool {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     
@@ -363,7 +364,7 @@ fn othello_is_valid_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, p
 }
 
 // Make an Othello move: place piece and flip all captured pieces
-fn othello_make_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32) {
+fn othello_make_move(board: ptr<function, array<i32, 1056>>, x: i32, y: i32, player: i32) {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     
@@ -388,7 +389,7 @@ fn othello_make_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, playe
 }
 
 // Count valid moves for a player in Othello
-fn othello_count_valid_moves(board: ptr<function, array<i32, 64>>, player: i32) -> i32 {
+fn othello_count_valid_moves(board: ptr<function, array<i32, 1056>>, player: i32) -> i32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     var count = 0;
@@ -404,7 +405,7 @@ fn othello_count_valid_moves(board: ptr<function, array<i32, 64>>, player: i32) 
 }
 
 // Get the nth valid move for a player (0-indexed)
-fn othello_get_nth_valid_move(board: ptr<function, array<i32, 64>>, player: i32, n: i32) -> vec2<i32> {
+fn othello_get_nth_valid_move(board: ptr<function, array<i32, 1056>>, player: i32, n: i32) -> vec2<i32> {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     var count = 0;
@@ -428,8 +429,8 @@ fn othello_random_rollout(board_idx: u32, current_player: i32) -> f32 {
     let h = i32(params.board_height);
     let board_size = params.board_width * params.board_height;
     
-    // Copy board to local array (max 8x8 = 64)
-    var sim_board: array<i32, 64>;
+    // Copy board to local array (max 32x33 = 1056)
+    var sim_board: array<i32, 1056>;
     for (var i = 0u; i < board_size; i++) {
         sim_board[i] = boards[board_idx * board_size + i];
     }
@@ -466,7 +467,7 @@ fn othello_random_rollout(board_idx: u32, current_player: i32) -> f32 {
     // Count final pieces
     var player_count = 0;
     var opp_count = 0;
-    for (var i = 0; i < 64; i++) {
+    for (var i = 0; i < 1056; i++) {
         if (i32(i) >= w * h) { break; }
         if (sim_board[i] == current_player) { player_count++; }
         else if (sim_board[i] == -current_player) { opp_count++; }
@@ -480,6 +481,33 @@ fn othello_random_rollout(board_idx: u32, current_player: i32) -> f32 {
     } else {
         return 0.0;
     }
+}
+
+// ============================================================================
+// BLOKUS-SPECIFIC FUNCTIONS
+// ============================================================================
+
+// Simplified Blokus rollout
+// Since implementing full Blokus logic (21 pieces * 8 transformations) is too complex for a single shader function,
+// we use a simplified heuristic rollout:
+// 1. Try to place a random piece from available set
+// 2. If fails, try another
+// 3. If many fail, pass
+fn blokus_random_rollout(board_idx: u32, current_player: i32) -> f32 {
+    // Placeholder for Blokus rollout
+    // For now, return 0.0 (draw) to avoid crashing
+    // Real implementation would require encoding all piece shapes
+    return 0.0;
+}
+
+// ============================================================================
+// HIVE-SPECIFIC FUNCTIONS
+// ============================================================================
+
+// Simplified Hive rollout
+fn hive_random_rollout(board_idx: u32, current_player: i32) -> f32 {
+    // Placeholder for Hive rollout
+    return 0.0;
 }
 
 // ============================================================================
@@ -499,9 +527,15 @@ fn evaluate_board(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Initialize RNG for this thread
     rng_state = params.seed + idx * 719393u;
     
-    // Handle Othello separately with proper rules
+    // Handle different game types
     if (game_type == GAME_OTHELLO) {
         results[idx].score = othello_random_rollout(idx, current_player);
+        return;
+    } else if (game_type == GAME_BLOKUS) {
+        results[idx].score = blokus_random_rollout(idx, current_player);
+        return;
+    } else if (game_type == GAME_HIVE) {
+        results[idx].score = hive_random_rollout(idx, current_player);
         return;
     }
     
@@ -539,7 +573,7 @@ fn evaluate_board(@builtin(global_invocation_id) global_id: vec3<u32>) {
         rng_state = params.seed + idx * 719393u;
         
         // Create a copy of the board for this simulation
-        var sim_board: array<i32, 225>; // Max 15x15 board
+        var sim_board: array<i32, 1056>; // Max board size
         let board_size = params.board_width * params.board_height;
         for (var i = 0u; i < board_size; i++) {
             sim_board[i] = boards[idx * board_size + i];

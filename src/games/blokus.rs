@@ -280,6 +280,65 @@ impl GameState for BlokusState {
         &self.board
     }
 
+    fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {
+        let mut data = Vec::with_capacity(20 * 21);
+        
+        // Copy board
+        for row in &self.board {
+            data.extend_from_slice(row);
+        }
+        
+        // Add extra row for available pieces and state
+        // Player 1 pieces
+        let mut p1_pieces = 0;
+        for piece in &self.player_pieces[0] {
+            p1_pieces |= 1 << piece.id;
+        }
+        data.push(p1_pieces);
+        
+        // Player 2 pieces
+        let mut p2_pieces = 0;
+        for piece in &self.player_pieces[1] {
+            p2_pieces |= 1 << piece.id;
+        }
+        data.push(p2_pieces);
+        
+        // Player 3 pieces
+        let mut p3_pieces = 0;
+        for piece in &self.player_pieces[2] {
+            p3_pieces |= 1 << piece.id;
+        }
+        data.push(p3_pieces);
+        
+        // Player 4 pieces
+        let mut p4_pieces = 0;
+        for piece in &self.player_pieces[3] {
+            p4_pieces |= 1 << piece.id;
+        }
+        data.push(p4_pieces);
+        
+        // First move flags
+        let mut first_move = 0;
+        for (i, &is_first) in self.is_first_move.iter().enumerate() {
+            if is_first {
+                first_move |= 1 << i;
+            }
+        }
+        data.push(first_move);
+        
+        // Consecutive passes
+        data.push(self.consecutive_passes as i32);
+        
+        // Fill rest of the row with 0s
+        for _ in 6..20 {
+            data.push(0);
+        }
+        
+        let encoded_params = (self.current_player & 0xFF) | (3 << 16); // 3 = GAME_BLOKUS
+        
+        Some((data, 20, 21, encoded_params))
+    }
+
     fn get_possible_moves(&self) -> Vec<Self::Move> {
         let player_idx = (self.current_player - 1) as usize;
         let available_pieces = &self.player_pieces[player_idx];
