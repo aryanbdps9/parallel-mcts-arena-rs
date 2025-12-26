@@ -650,7 +650,7 @@ impl GameRenderer for HiveRenderer {
         let layout = HexLayout::calculate(board_area, state, self.board_view.tilt(), self.board_view.rotation(), self.board_view.scale());
 
         // Let board_view handle drag inputs for tilt/rotation
-        if let Some(result) = self.board_view.handle_input(&input) {
+        if let Some(result) = self.board_view.handle_input(&input, layout.center_x, layout.center_y) {
             return result;
         }
 

@@ -189,7 +189,7 @@ impl GameRenderer for Connect4Renderer {
         let (center_x, center_y) = board_rect.center();
 
         // Handle board rotation/tilt drag
-        if let Some(result) = self.board_view.handle_input(&input) {
+        if let Some(result) = self.board_view.handle_input(&input, center_x, center_y) {
             return result;
         }
 

@@ -650,7 +650,7 @@ impl GameRenderer for BlokusRenderer {
         let piece_panel_area = Rect::new(panel_x, piece_panel_y, side_panel_width, area.height - 160.0);
 
         // Handle board rotation/tilt drag
-        if let Some(result) = self.board_view.handle_input(&input) {
+        if let Some(result) = self.board_view.handle_input(&input, center_x, center_y) {
             return result;
         }
 

@@ -56,6 +56,10 @@ pub struct RotatableBoard {
     rotation: f32,
     /// Current zoom scale
     scale: f32,
+    /// Pan offset X
+    pan_x: f32,
+    /// Pan offset Y
+    pan_y: f32,
 }
 
 impl Default for RotatableBoard {
@@ -71,6 +75,8 @@ impl RotatableBoard {
             tilt: DEFAULT_TILT,
             rotation: DEFAULT_ROTATION,
             scale: DEFAULT_SCALE,
+            pan_x: 0.0,
+            pan_y: 0.0,
         }
     }
 
@@ -80,6 +86,8 @@ impl RotatableBoard {
             tilt: tilt.clamp(MIN_TILT, MAX_TILT),
             rotation,
             scale: DEFAULT_SCALE,
+            pan_x: 0.0,
+            pan_y: 0.0,
         }
     }
 
@@ -103,11 +111,15 @@ impl RotatableBoard {
         self.tilt = DEFAULT_TILT;
         self.rotation = DEFAULT_ROTATION;
         self.scale = DEFAULT_SCALE;
+        self.pan_x = 0.0;
+        self.pan_y = 0.0;
     }
 
     /// Reset zoom only
     pub fn reset_zoom(&mut self) {
         self.scale = DEFAULT_SCALE;
+        self.pan_x = 0.0;
+        self.pan_y = 0.0;
     }
 
     /// Begin drawing with the board transform applied.
@@ -118,7 +130,7 @@ impl RotatableBoard {
     /// * `center_x` - X coordinate of rotation center
     /// * `center_y` - Y coordinate of rotation center
     pub fn begin_draw(&self, renderer: &Renderer, center_x: f32, center_y: f32) {
-        renderer.set_board_transform(center_x, center_y, self.tilt, self.rotation, self.scale);
+        renderer.set_board_transform(center_x + self.pan_x, center_y + self.pan_y, self.tilt, self.rotation, self.scale);
     }
 
     /// End drawing and reset the transform.
@@ -131,30 +143,68 @@ impl RotatableBoard {
     /// 
     /// Returns `Some(InputResult::Redraw)` if the view was changed,
     /// `None` if the input wasn't handled by this component.
-    pub fn handle_input(&mut self, input: &GameInput) -> Option<InputResult> {
+    pub fn handle_input(&mut self, input: &GameInput, center_x: f32, center_y: f32) -> Option<InputResult> {
         match input {
-            GameInput::Drag { dx, dy } => {
-                // Adjust tilt based on vertical drag
-                // Dragging up = more tilt, down = less tilt
-                let tilt_delta = -dy * TILT_SENSITIVITY;
-                self.tilt = (self.tilt + tilt_delta).clamp(MIN_TILT, MAX_TILT);
+            GameInput::Drag { dx, dy, shift, .. } => {
+                if *shift {
+                    // Shift+Drag: Adjust tilt and rotation
+                    // Adjust tilt based on vertical drag
+                    // Dragging up = more tilt, down = less tilt
+                    let tilt_delta = -dy * TILT_SENSITIVITY;
+                    self.tilt = (self.tilt + tilt_delta).clamp(MIN_TILT, MAX_TILT);
 
-                // Adjust rotation based on horizontal drag
-                // Dragging right = rotate clockwise
-                let rotation_delta = dx * ROTATION_SENSITIVITY;
-                self.rotation += rotation_delta;
+                    // Adjust rotation based on horizontal drag
+                    // Dragging right = rotate clockwise
+                    let rotation_delta = dx * ROTATION_SENSITIVITY;
+                    self.rotation += rotation_delta;
+                } else {
+                    // Normal Drag: Pan the view
+                    self.pan_x += dx;
+                    self.pan_y += dy;
+                }
 
                 Some(InputResult::Redraw)
             }
-            GameInput::Wheel { delta, ctrl, .. } => {
+            GameInput::Wheel { delta, ctrl, x, y } => {
                 if *ctrl {
+                    let old_scale = self.scale;
+                    let mut new_scale = old_scale;
+                    
                     if *delta > 0.0 {
-                        self.scale *= ZOOM_SENSITIVITY;
+                        new_scale *= ZOOM_SENSITIVITY;
                     } else {
-                        self.scale /= ZOOM_SENSITIVITY;
+                        new_scale /= ZOOM_SENSITIVITY;
                     }
-                    self.scale = self.scale.clamp(MIN_SCALE, MAX_SCALE);
-                    Some(InputResult::Redraw)
+                    new_scale = new_scale.clamp(MIN_SCALE, MAX_SCALE);
+                    
+                    if (new_scale - old_scale).abs() > f32::EPSILON {
+                        // Zoom towards mouse pointer
+                        // Formula: new_pan = (mouse - center) * (1 - ratio) + old_pan * ratio
+                        // where ratio = new_scale / old_scale
+                        
+                        let ratio = new_scale / old_scale;
+                        
+                        // Vector from center to mouse
+                        let rel_x = x - center_x;
+                        let rel_y = y - center_y;
+                        
+                        // We want the point under mouse to stay under mouse
+                        // P_screen = center + pan + P_local * scale
+                        // We want P_screen to be constant (mouse pos)
+                        // So: center + new_pan + P_local * new_scale = center + old_pan + P_local * old_scale
+                        // new_pan = old_pan + P_local * (old_scale - new_scale)
+                        // And P_local = (mouse - center - old_pan) / old_scale
+                        // new_pan = old_pan + (mouse - center - old_pan) * (old_scale - new_scale) / old_scale
+                        // new_pan = old_pan + (mouse - center - old_pan) * (1 - ratio)
+                        
+                        self.pan_x = self.pan_x + (rel_x - self.pan_x) * (1.0 - ratio);
+                        self.pan_y = self.pan_y + (rel_y - self.pan_y) * (1.0 - ratio);
+                        
+                        self.scale = new_scale;
+                        Some(InputResult::Redraw)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -188,7 +238,7 @@ impl RotatableBoard {
         let x_rotated = x_scaled * cos_r - y_tilted * sin_r;
         let y_rotated = x_scaled * sin_r + y_tilted * cos_r;
 
-        (center_x + x_rotated, center_y + y_rotated)
+        (center_x + self.pan_x + x_rotated, center_y + self.pan_y + y_rotated)
     }
 
     /// Transform a point from screen coordinates to local board coordinates.
@@ -203,9 +253,9 @@ impl RotatableBoard {
         let cos_r = self.rotation.cos();
         let sin_r = self.rotation.sin();
 
-        // Translate to center-relative
-        let rel_x = screen_x - center_x;
-        let rel_y = screen_y - center_y;
+        // Translate to center-relative (including pan)
+        let rel_x = screen_x - (center_x + self.pan_x);
+        let rel_y = screen_y - (center_y + self.pan_y);
 
         // Reverse rotation
         let x_unrotated = rel_x * cos_r + rel_y * sin_r;

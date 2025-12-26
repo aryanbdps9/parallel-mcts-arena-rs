@@ -27,6 +27,7 @@ use windows::{
 };
 
 const MK_CONTROL: u16 = 0x0008;
+const MK_SHIFT: u16 = 0x0004;
 
 use super::app::{GuiApp, GuiMode, PlayerType, GameStatus, ActiveTab};
 use super::colors::Colors;
@@ -270,6 +271,9 @@ unsafe extern "system" fn window_proc(
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as f32;
+            let keys = wparam.0 as u32;
+            let shift_pressed = (keys & (MK_SHIFT as u32)) != 0;
+            let ctrl_pressed = (keys & (MK_CONTROL as u32)) != 0;
             
             let (needs_redraw, cursor_change) = RENDERER.with(|r| {
                 if let Some(renderer) = r.borrow().as_ref() {
@@ -279,7 +283,7 @@ unsafe extern "system" fn window_proc(
                             unsafe { let _ = GetClientRect(hwnd, &mut rect); }
                             let width = (rect.right - rect.left) as f32;
                             let height = (rect.bottom - rect.top) as f32;
-                            handle_mouse_move(&mut app.borrow_mut(), renderer, x, y, width, height)
+                            handle_mouse_move(&mut app.borrow_mut(), renderer, x, y, width, height, shift_pressed, ctrl_pressed)
                         } else {
                             (false, false)
                         }
@@ -799,7 +803,7 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32, width: f32, height: f32) -> (b
 
 /// Handle mouse movement (for hover effects and splitter dragging)
 /// Returns (needs_redraw, show_resize_cursor) tuple
-fn handle_mouse_move(app: &mut GuiApp, _renderer: &Renderer, x: f32, y: f32, width: f32, height: f32) -> (bool, bool) {
+fn handle_mouse_move(app: &mut GuiApp, _renderer: &Renderer, x: f32, y: f32, width: f32, height: f32, shift_pressed: bool, ctrl_pressed: bool) -> (bool, bool) {
     let mut needs_redraw = false;
     let mut show_resize_cursor = false;
 
@@ -815,7 +819,7 @@ fn handle_mouse_move(app: &mut GuiApp, _renderer: &Renderer, x: f32, y: f32, wid
                 
                 // Send drag event to game renderer
                 let board_area = get_board_area(app, width, height);
-                let input = GameInput::Drag { dx, dy };
+                let input = GameInput::Drag { dx, dy, shift: shift_pressed, ctrl: ctrl_pressed };
                 if let InputResult::Redraw = app.game_renderer.handle_input(input, &app.game, board_area) {
                     needs_redraw = true;
                 }
