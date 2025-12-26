@@ -1047,11 +1047,24 @@ fn render_in_game(renderer: &Renderer, app: &GuiApp) {
     // Current player indicator
     let current_player = app.game.get_current_player();
     let player_name = app.game_renderer.player_name(current_player);
+    
+    let player_type = app.player_types
+        .iter()
+        .find(|(id, _)| *id == current_player)
+        .map(|(_, pt)| *pt)
+        .unwrap_or(PlayerType::Human);
+
+    let type_suffix = match player_type {
+        PlayerType::Human => "",
+        PlayerType::AiCpu => " (CPU)",
+        PlayerType::AiGpu => " (GPU)",
+    };
+
     let status_text = if app.ai_thinking {
         let elapsed = app.ai_thinking_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-        format!("{} (AI thinking... {}s)", player_name, elapsed)
+        format!("{}{}{} (thinking... {}s)", player_name, type_suffix, if type_suffix.is_empty() { "AI " } else { "" }, elapsed)
     } else {
-        format!("{}'s turn", player_name)
+        format!("{}{}'s turn", player_name, type_suffix)
     };
     let status_rect = Rect::new(client.width - 350.0, 0.0, 340.0, 50.0);
     let status_color = if app.ai_thinking { Colors::AI_THINKING } else { Colors::TEXT_PRIMARY };
@@ -1229,7 +1242,20 @@ fn render_game_over(renderer: &Renderer, app: &GuiApp) {
     let result_text = match app.game_status {
         GameStatus::Win(player) => {
             let winner_name = app.game_renderer.player_name(player);
-            format!("{} wins!", winner_name)
+            
+            let player_type = app.player_types
+                .iter()
+                .find(|(id, _)| *id == player)
+                .map(|(_, pt)| *pt)
+                .unwrap_or(PlayerType::Human);
+                
+            let type_suffix = match player_type {
+                PlayerType::Human => "",
+                PlayerType::AiCpu => " (CPU)",
+                PlayerType::AiGpu => " (GPU)",
+            };
+            
+            format!("{}{} wins!", winner_name, type_suffix)
         }
         GameStatus::Draw => "It's a draw!".to_string(),
         GameStatus::InProgress => "Game in progress".to_string(),
