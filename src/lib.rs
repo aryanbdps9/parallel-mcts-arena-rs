@@ -616,7 +616,7 @@ impl<S: GameState> MCTS<S> {
                                         board_height: h as u32,
                                         current_player: player,
                                         use_heuristic: if use_heuristic_flag { 1 } else { 0 },
-                                        seed: base_seed,
+                                        seed: base_seed + (i as u32 * 9973), // Different seed per state
                                     });
                                 }
                                 flat_data.extend(data);
