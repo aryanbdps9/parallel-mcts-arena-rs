@@ -123,6 +123,106 @@ mod tests {
     }
 
     #[test]
+    fn debug_connect4_shader() {
+        use crate::gpu::GpuSimulationParams;
+
+        let config = GpuConfig {
+            max_batch_size: 1024,
+            prefer_high_performance: true,
+            min_batch_threshold: 0,
+            debug_mode: true,
+        };
+
+        println!("Initializing GPU Context for Connect4...");
+        let context = match GpuContext::new(&config) {
+            Ok(ctx) => Arc::new(ctx),
+            Err(e) => {
+                eprintln!("Failed to initialize GPU: {}", e);
+                return;
+            }
+        };
+
+        let mut accelerator = GpuMctsAccelerator::new(context.clone());
+
+        let width = 7;
+        let height = 6;
+        let board_size = width * height;
+        let mut board = vec![0; board_size];
+
+        // Place a piece
+        board[0] = 1;
+
+        let params = GpuSimulationParams {
+            board_width: width as u32,
+            board_height: height as u32,
+            current_player: 1 | (4 << 8) | (1 << 16), // Player 1, line_size 4, Game Type 1 (Connect4)
+            use_heuristic: 0,
+            seed: 12345,
+        };
+
+        println!("\nRunning Connect4 Shader...");
+        let results = accelerator.simulate_batch(&board, params).expect("Failed to simulate Connect4");
+
+        println!("\nConnect4 Results:");
+        for (i, score) in results.iter().enumerate() {
+            println!("  Board {}: Score = {:.6}", i, score);
+        }
+    }
+
+    #[test]
+    fn debug_othello_shader() {
+        use crate::gpu::GpuSimulationParams;
+
+        let config = GpuConfig {
+            max_batch_size: 1024,
+            prefer_high_performance: true,
+            min_batch_threshold: 0,
+            debug_mode: true,
+        };
+
+        println!("Initializing GPU Context for Othello...");
+        let context = match GpuContext::new(&config) {
+            Ok(ctx) => Arc::new(ctx),
+            Err(e) => {
+                eprintln!("Failed to initialize GPU: {}", e);
+                return;
+            }
+        };
+
+        let mut accelerator = GpuMctsAccelerator::new(context.clone());
+
+        let width = 8;
+        let height = 8;
+        let board_size = width * height;
+        let mut board = vec![0; board_size];
+
+        // Standard Othello setup
+        // 3,3 = white(-1), 4,4 = white(-1)
+        // 3,4 = black(1), 4,3 = black(1)
+        let w = 8;
+        board[3 * w + 3] = -1;
+        board[4 * w + 4] = -1;
+        board[3 * w + 4] = 1;
+        board[4 * w + 3] = 1;
+
+        let params = GpuSimulationParams {
+            board_width: width as u32,
+            board_height: height as u32,
+            current_player: 1 | (2 << 16), // Player 1, Game Type 2 (Othello)
+            use_heuristic: 0,
+            seed: 12345,
+        };
+
+        println!("\nRunning Othello Shader...");
+        let results = accelerator.simulate_batch(&board, params).expect("Failed to simulate Othello");
+
+        println!("\nOthello Results:");
+        for (i, score) in results.iter().enumerate() {
+            println!("  Board {}: Score = {:.6}", i, score);
+        }
+    }
+
+    #[test]
     fn debug_blokus_shader() {
         use crate::gpu::GpuSimulationParams;
 
