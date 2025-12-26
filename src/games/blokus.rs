@@ -767,3 +767,65 @@ impl FromStr for BlokusMove {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_game() {
+        let game = BlokusState::new();
+        assert_eq!(game.get_num_players(), 4);
+        assert_eq!(game.get_current_player(), 1);
+        assert_eq!(game.get_board().len(), 20);
+        assert_eq!(game.get_board()[0].len(), 20);
+        
+        // Check initial pieces
+        let pieces = game.get_available_pieces(1);
+        assert_eq!(pieces.len(), 21);
+    }
+
+    #[test]
+    fn test_piece_generation() {
+        let pieces = get_blokus_pieces();
+        assert_eq!(pieces.len(), 21);
+        
+        // Monomino (1 square) should have 1 transformation
+        assert_eq!(pieces[0].transformations.len(), 1);
+        
+        // Domino (2 squares) should have 2 transformations (horizontal, vertical)
+        assert_eq!(pieces[1].transformations.len(), 2);
+    }
+
+    #[test]
+    fn test_valid_first_move() {
+        let game = BlokusState::new();
+        // Player 1 must start at (0,0)
+        // Piece 0 is monomino (1 square)
+        // Transformation 0 is the only one
+        // Place at (0,0)
+        let mv = BlokusMove(0, 0, 0, 0);
+        assert!(game.is_legal(&mv));
+    }
+
+    #[test]
+    fn test_invalid_first_move() {
+        let game = BlokusState::new();
+        // Player 1 cannot start at (10,10)
+        let mv = BlokusMove(0, 0, 10, 10);
+        assert!(!game.is_legal(&mv));
+    }
+    
+    #[test]
+    fn test_make_move() {
+        let mut game = BlokusState::new();
+        let mv = BlokusMove(0, 0, 0, 0); // P1 places monomino at (0,0)
+        game.make_move(&mv);
+        
+        assert_eq!(game.get_board()[0][0], 1);
+        assert_eq!(game.get_current_player(), 2);
+        
+        // Player 1 should have 20 pieces left
+        assert_eq!(game.get_available_pieces(1).len(), 20);
+    }
+}
