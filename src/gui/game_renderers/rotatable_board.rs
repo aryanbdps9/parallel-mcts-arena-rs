@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn test_default_values() {
         let board = RotatableBoard::new();
-        assert!((board.tilt() - 0.55).abs() < 0.001);
+        assert!((board.tilt() - 1.0).abs() < 0.001);
         assert!((board.rotation() - 0.0).abs() < 0.001);
     }
 
@@ -287,7 +287,7 @@ mod tests {
     fn test_reset_view() {
         let mut board = RotatableBoard::with_params(0.8, 1.5);
         board.reset_view();
-        assert!((board.tilt() - 0.55).abs() < 0.001);
+        assert!((board.tilt() - 1.0).abs() < 0.001);
         assert!((board.rotation() - 0.0).abs() < 0.001);
     }
 

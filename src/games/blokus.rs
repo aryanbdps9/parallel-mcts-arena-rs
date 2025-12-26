@@ -72,6 +72,7 @@ impl Piece {
     /// # Examples
     /// Creating the simple 2-square domino piece:
     /// ```
+    /// use mcts::games::blokus::Piece;
     /// let domino = Piece::new(1, &[(0, 0), (0, 1)]);
     /// // Results in 2 transformations: horizontal and vertical orientations
     /// assert_eq!(domino.transformations.len(), 2);
@@ -167,6 +168,7 @@ pub fn get_blokus_pieces() -> Vec<Piece> {
 /// # Usage
 /// Helpful for creating piece selection menus or analyzing game complexity:
 /// ```
+/// use mcts::games::blokus::get_piece_info;
 /// let piece_info = get_piece_info();
 /// for (id, transform_count) in piece_info {
 ///     println!("Piece {}: {} orientations", id, transform_count);
@@ -675,6 +677,8 @@ impl BlokusState {
     ///
     /// # Usage
     /// ```
+    /// use mcts::games::blokus::BlokusState;
+    /// let state = BlokusState::new();
     /// let available = state.get_available_pieces(1);
     /// println!("Player 1 can place pieces: {:?}", available);
     /// ```

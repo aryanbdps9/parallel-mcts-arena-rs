@@ -253,11 +253,109 @@ impl FromStr for Connect4Move {
     /// # Examples
     /// ```
     /// use std::str::FromStr;
-    /// let move = Connect4Move::from_str("3").unwrap();
-    /// assert_eq!(move.0, 3);
+    /// use mcts::games::connect4::Connect4Move;
+    /// let mv = Connect4Move::from_str("3").unwrap();
+    /// assert_eq!(mv.0, 3);
     /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let c = s.trim().parse::<usize>().map_err(|e| e.to_string())?;
         Ok(Connect4Move(c))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_game() {
+        let game = Connect4State::new(7, 6, 4);
+        assert_eq!(game.get_num_players(), 2);
+        assert_eq!(game.get_current_player(), 1);
+        assert_eq!(game.get_board().len(), 6);
+        assert_eq!(game.get_board()[0].len(), 7);
+        assert_eq!(game.get_line_size(), 4);
+    }
+
+    #[test]
+    fn test_legal_moves() {
+        let game = Connect4State::new(7, 6, 4);
+        let moves = game.get_possible_moves();
+        assert_eq!(moves.len(), 7);
+        for i in 0..7 {
+            assert!(moves.contains(&Connect4Move(i)));
+        }
+    }
+
+    #[test]
+    fn test_make_move() {
+        let mut game = Connect4State::new(7, 6, 4);
+        game.make_move(&Connect4Move(3));
+        assert_eq!(game.get_board()[5][3], 1);
+        assert_eq!(game.get_current_player(), -1);
+        
+        game.make_move(&Connect4Move(3));
+        assert_eq!(game.get_board()[4][3], -1);
+        assert_eq!(game.get_current_player(), 1);
+    }
+
+    #[test]
+    fn test_win_condition_horizontal() {
+        let mut game = Connect4State::new(7, 6, 4);
+        // Player 1: 0, 1, 2, 3
+        // Player 2: 0, 1, 2
+        game.make_move(&Connect4Move(0)); // P1
+        game.make_move(&Connect4Move(0)); // P2
+        game.make_move(&Connect4Move(1)); // P1
+        game.make_move(&Connect4Move(1)); // P2
+        game.make_move(&Connect4Move(2)); // P1
+        game.make_move(&Connect4Move(2)); // P2
+        game.make_move(&Connect4Move(3)); // P1 wins
+
+        assert_eq!(game.get_winner(), Some(1));
+        assert!(game.is_terminal());
+    }
+
+    #[test]
+    fn test_win_condition_vertical() {
+        let mut game = Connect4State::new(7, 6, 4);
+        // Player 1: 0, 0, 0, 0
+        // Player 2: 1, 1, 1
+        game.make_move(&Connect4Move(0)); // P1
+        game.make_move(&Connect4Move(1)); // P2
+        game.make_move(&Connect4Move(0)); // P1
+        game.make_move(&Connect4Move(1)); // P2
+        game.make_move(&Connect4Move(0)); // P1
+        game.make_move(&Connect4Move(1)); // P2
+        game.make_move(&Connect4Move(0)); // P1 wins
+
+        assert_eq!(game.get_winner(), Some(1));
+        assert!(game.is_terminal());
+    }
+
+    #[test]
+    fn test_win_condition_diagonal() {
+        let mut game = Connect4State::new(7, 6, 4);
+        // P1 wins with diagonal /
+        // . . . .
+        // . . . 1
+        // . . 1 2
+        // . 1 2 2
+        // 1 2 1 1
+        
+        game.make_move(&Connect4Move(0)); // P1 (0,0)
+        game.make_move(&Connect4Move(1)); // P2 (0,1)
+        game.make_move(&Connect4Move(1)); // P1 (1,1)
+        game.make_move(&Connect4Move(2)); // P2 (0,2)
+        game.make_move(&Connect4Move(2)); // P1 (1,2) - mistake in comment logic, let's just play it out
+        game.make_move(&Connect4Move(3)); // P2 (0,3)
+        game.make_move(&Connect4Move(2)); // P1 (2,2)
+        game.make_move(&Connect4Move(3)); // P2 (1,3)
+        game.make_move(&Connect4Move(3)); // P1 (2,3)
+        game.make_move(&Connect4Move(0)); // P2 (1,0) - filler
+        game.make_move(&Connect4Move(3)); // P1 (3,3) wins
+
+        assert_eq!(game.get_winner(), Some(1));
+        assert!(game.is_terminal());
     }
 }

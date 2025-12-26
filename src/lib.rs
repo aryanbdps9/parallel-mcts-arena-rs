@@ -14,8 +14,10 @@
 //! ## Example Usage
 //! ```rust
 //! use mcts::{MCTS, GameState};
+//! use mcts::games::connect4::Connect4State;
 //!
 //! // Your game must implement GameState
+//! let game_state = Connect4State::new(7, 6, 4);
 //! let mut mcts = MCTS::new(1.4, 8, 1000000);
 //! let (best_move, stats) = mcts.search(&game_state, 0, 0, 30); // 30 second timeout
 //! ```
