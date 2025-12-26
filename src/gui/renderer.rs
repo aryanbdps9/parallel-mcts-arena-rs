@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use windows::{
-    core::{Interface, PCWSTR},
+    core::{ComInterface, PCWSTR},
     Win32::{
         Foundation::{HWND, RECT},
         Graphics::{
@@ -38,7 +38,7 @@ use windows::{
                 IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, IDXGISurface,
                 DXGI_SWAP_CHAIN_DESC1, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 DXGI_SCALING_STRETCH, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                DXGI_PRESENT, CreateDXGIFactory2,
+                CreateDXGIFactory2,
             },
             Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC, DXGI_ALPHA_MODE_IGNORE},
         },
@@ -349,7 +349,7 @@ impl Renderer {
     /// End a drawing session
     pub fn end_draw(&self) -> windows::core::Result<()> {
         unsafe { self.device_context.EndDraw(None, None)?; }
-        unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?; }
+        unsafe { self.swap_chain.Present(1, 0).ok()?; }
         Ok(())
     }
     
@@ -360,7 +360,8 @@ impl Renderer {
     
     /// Create a solid color brush
     fn create_brush(&self, color: D2D1_COLOR_F) -> windows::core::Result<ID2D1SolidColorBrush> {
-        unsafe { self.device_context.CreateSolidColorBrush(&color, None) }
+        let target: windows::Win32::Graphics::Direct2D::ID2D1RenderTarget = self.device_context.cast()?;
+        unsafe { target.CreateSolidColorBrush(&color, None) }
     }
     
     /// Fill a rectangle with a color
@@ -527,7 +528,7 @@ impl Renderer {
             unsafe {
                 // Get current transform
                 let mut old_transform = Matrix3x2::identity();
-                self.device_context.GetTransform(&mut old_transform as *mut _ as *mut _);
+                self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().GetTransform(&mut old_transform as *mut _ as *mut _);
 
                 // Create rotation matrix
                 let cos_a = angle_rad.cos();
@@ -577,7 +578,7 @@ impl Renderer {
                     m32: rot.m31 * old.m12 + rot.m32 * old.m22 + old.m32,
                 };
 
-                self.device_context.SetTransform(&new_transform as *const _ as *const _);
+                self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().SetTransform(&new_transform as *const _ as *const _);
 
                 // Draw text centered at (center_x, center_y)
                 // Since we rotated around (center_x, center_y), drawing at that point will work
@@ -588,7 +589,7 @@ impl Renderer {
                 self.draw_text_with_format(text, rect, color, Some(&format), true);
 
                 // Restore transform
-                self.device_context.SetTransform(&old_transform as *const _ as *const _);
+                self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().SetTransform(&old_transform as *const _ as *const _);
             }
         }
     }
@@ -699,7 +700,7 @@ impl Renderer {
         };
         
         unsafe {
-            self.device_context.SetTransform(&transform as *const _ as *const _);
+            self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().SetTransform(&transform as *const _ as *const _);
         }
     }
     
@@ -707,7 +708,7 @@ impl Renderer {
     pub fn reset_transform(&self) {
         let identity = Matrix3x2::identity();
         unsafe {
-            self.device_context.SetTransform(&identity as *const _ as *const _);
+            self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().SetTransform(&identity as *const _ as *const _);
         }
     }
     
@@ -836,7 +837,7 @@ impl Renderer {
             // Get current transform
             let mut current = Matrix3x2::identity();
             unsafe { 
-                self.device_context.GetTransform(&mut current as *mut Matrix3x2 as *mut _); 
+                self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().GetTransform(&mut current as *mut Matrix3x2 as *mut _); 
             }
             
             // Create SVG local transform (scale + translate)
@@ -862,7 +863,7 @@ impl Renderer {
             
             // Apply composed transform
             unsafe { 
-                self.device_context.SetTransform(&composed as *const Matrix3x2 as *const _); 
+                self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().SetTransform(&composed as *const Matrix3x2 as *const _); 
             }
             
             // Draw the SVG
@@ -870,7 +871,7 @@ impl Renderer {
             
             // Restore original transform
             unsafe { 
-                self.device_context.SetTransform(&current as *const Matrix3x2 as *const _); 
+                self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().SetTransform(&current as *const Matrix3x2 as *const _); 
             }
         }
     }
@@ -904,14 +905,14 @@ impl Renderer {
             // Save current transform
             let mut old_transform = Matrix3x2::identity();
             unsafe { 
-                self.device_context.GetTransform(
+                self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().GetTransform(
                     &mut old_transform as *mut Matrix3x2 as *mut _
                 ); 
             }
             
             // Apply new transform
             unsafe { 
-                self.device_context.SetTransform(
+                self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().SetTransform(
                     &transform as *const Matrix3x2 as *const _
                 ); 
             }
@@ -921,7 +922,7 @@ impl Renderer {
             
             // Restore transform
             unsafe { 
-                self.device_context.SetTransform(
+                self.device_context.cast::<windows::Win32::Graphics::Direct2D::ID2D1RenderTarget>().unwrap().SetTransform(
                     &old_transform as *const Matrix3x2 as *const _
                 ); 
             }

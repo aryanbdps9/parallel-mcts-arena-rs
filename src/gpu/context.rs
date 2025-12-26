@@ -91,13 +91,21 @@ impl GpuContext {
             eprintln!("Driver: {}", adapter_info.driver);
         }
 
+        // Decide on required features (SPIR-V passthrough is optional and checked for support)
+        let adapter_features = adapter.features();
+        let use_spirv = adapter_features.contains(Features::SPIRV_SHADER_PASSTHROUGH);
+        let requested_features = if use_spirv {
+            Features::SPIRV_SHADER_PASSTHROUGH
+        } else {
+            Features::empty()
+        };
+
         // Request device with reasonable limits
         let (device, queue) = pollster::block_on(adapter.request_device(
             &DeviceDescriptor {
                 label: Some("MCTS GPU Device"),
-                required_features: Features::empty(),
-                required_limits: Limits::default(),
-                memory_hints: Default::default(),
+                features: requested_features,
+                limits: Limits::default(),
             },
             None,
         ))
@@ -115,6 +123,30 @@ impl GpuContext {
             label: Some("PUCT Shader"),
             source: wgpu::ShaderSource::Wgsl(shaders::PUCT_SHADER.into()),
         });
+
+        // Load SPIR-V shader module for Rust-based kernels (if supported).
+        // NOTE: `include_bytes!` returns a byte slice with no alignment guarantee; `bytemuck::cast_slice`
+        // can panic here. Convert bytes -> u32 words explicitly to avoid alignment issues.
+        let spirv_shader = if use_spirv {
+            let bytes = shaders::SHADER_MODULE_SPV;
+            if bytes.len() % 4 != 0 {
+                eprintln!("SPIR-V module length is not a multiple of 4 ({} bytes); disabling SPIR-V pipeline", bytes.len());
+                None
+            } else {
+                let words: Vec<u32> = bytes
+                    .chunks_exact(4)
+                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect();
+                Some(unsafe {
+                    device.create_shader_module_spirv(&wgpu::ShaderModuleDescriptorSpirV {
+                        label: Some("Rust-GPU SPIR-V Shader"),
+                        source: std::borrow::Cow::Owned(words),
+                    })
+                })
+            }
+        } else {
+            None
+        };
 
         // Create bind group layouts
         let puct_bind_group_layout = Self::create_puct_bind_group_layout(&device);
@@ -150,11 +182,28 @@ impl GpuContext {
             "Gomoku Eval"
         );
 
-        let connect4_eval_pipeline = create_game_pipeline(
-            shaders::CONNECT4_SHADER.to_string(),
-            "evaluate_connect4",
-            "Connect4 Eval"
-        );
+        // Use SPIR-V pipeline for Connect4 when available, otherwise WGSL fallback
+        let connect4_eval_pipeline = if let Some(spirv) = spirv_shader.as_ref() {
+            Self::create_compute_pipeline(
+                &device,
+                spirv,
+                "evaluate_connect4",
+                &eval_bind_group_layout,
+                "Connect4 Eval (Rust-GPU)",
+            )
+        } else {
+            let connect4_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Connect4 WGSL Shader"),
+                source: wgpu::ShaderSource::Wgsl(shaders::CONNECT4_SHADER.into()),
+            });
+            Self::create_compute_pipeline(
+                &device,
+                &connect4_shader,
+                "evaluate_connect4",
+                &eval_bind_group_layout,
+                "Connect4 Eval (WGSL fallback)",
+            )
+        };
 
         let othello_eval_pipeline = create_game_pipeline(
             shaders::OTHELLO_SHADER.to_string(),
@@ -287,9 +336,7 @@ impl GpuContext {
             label: Some(label),
             layout: Some(&pipeline_layout),
             module: shader,
-            entry_point: Some(entry_point),
-            compilation_options: Default::default(),
-            cache: None,
+            entry_point: entry_point,
         })
     }
 

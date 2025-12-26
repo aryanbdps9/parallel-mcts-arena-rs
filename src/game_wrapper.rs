@@ -249,7 +249,7 @@ macro_rules! impl_game_dispatch {
                 }
             }
 
-            fn get_board(&self) -> &Vec<Vec<i32>> {
+            fn get_board(&self) -> Vec<Vec<i32>> {
                 match self {
                     $(GameWrapper::$variant(g) => g.get_board(),)*
                 }

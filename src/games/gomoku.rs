@@ -99,8 +99,8 @@ impl GameState for GomokuState {
         2
     }
 
-    fn get_board(&self) -> &Vec<Vec<i32>> {
-        &self.board
+    fn get_board(&self) -> Vec<Vec<i32>> {
+        self.board.clone()
     }
 
     fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {

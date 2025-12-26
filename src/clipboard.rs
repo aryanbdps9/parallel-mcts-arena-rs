@@ -17,13 +17,13 @@
 #[cfg(feature = "gui")]
 use windows::{
     Win32::{
-        Foundation::{HANDLE, GlobalFree},
+        Foundation::{HANDLE, HWND},
         System::{
             DataExchange::{
                 CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
             },
             Memory::{
-                GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+                GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
             },
         },
     },
@@ -93,12 +93,12 @@ pub type ClipboardResult<T> = std::result::Result<T, ClipboardError>;
 pub fn copy_to_clipboard(text: &str) -> Result<()> {
     unsafe {
         // Open the clipboard
-        if OpenClipboard(None).is_err() {
+        if !OpenClipboard(HWND(0)).as_bool() {
             return Ok(());
         }
 
         // Empty the clipboard
-        if EmptyClipboard().is_err() {
+        if !EmptyClipboard().as_bool() {
             let _ = CloseClipboard();
             return Ok(());
         }
@@ -119,7 +119,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
         // Lock the memory and copy the string
         let p_mem = GlobalLock(h_mem);
         if p_mem.is_null() {
-            let _ = GlobalFree(Some(h_mem));
+            let _ = GlobalFree(h_mem);
             let _ = CloseClipboard();
             return Ok(());
         }
@@ -129,8 +129,8 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
         let _ = GlobalUnlock(h_mem);
 
         // Set the clipboard data
-        if SetClipboardData(CF_TEXT, Some(HANDLE(h_mem.0))).is_err() {
-            let _ = GlobalFree(Some(h_mem));
+        if SetClipboardData(CF_TEXT, HANDLE(h_mem.0)).is_err() {
+            let _ = GlobalFree(h_mem);
         }
 
         // Close the clipboard

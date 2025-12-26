@@ -150,7 +150,7 @@ pub trait GameState: Clone + Send + Sync {
     ///
     /// Used for visualization and analysis. Should return a 2D vector
     /// where each cell contains a player ID (e.g., 1, -1, 0 for empty).
-    fn get_board(&self) -> &Vec<Vec<i32>>;
+    fn get_board(&self) -> Vec<Vec<i32>>;
 
     /// Returns the last move made as a set of coordinates, if applicable.
     ///
@@ -426,7 +426,7 @@ pub struct MCTS<S: GameState> {
     gpu_last_batch_size: Arc<AtomicI32>,
     /// Channel for sending simulation requests to the GPU worker
     #[cfg(feature = "gpu")]
-    gpu_simulation_sender: Option<std::sync::mpsc::Sender<EvaluationRequest<S>>>,
+    gpu_simulation_sender: Option<Mutex<std::sync::mpsc::Sender<EvaluationRequest<S>>>>,
     /// Counter for pending GPU evaluations
     #[cfg(feature = "gpu")]
     gpu_pending_evaluations: Arc<AtomicI32>,
@@ -763,7 +763,7 @@ impl<S: GameState> MCTS<S> {
                         });
                     }
                 });
-                Some(tx)
+                Some(Mutex::new(tx))
             } else {
                 None
             }
@@ -1920,7 +1920,7 @@ impl<S: GameState> MCTS<S> {
                         path_players: path_players.clone(), // Clone path_players for GPU
                     };
 
-                    if sender.send(request).is_ok() {
+                    if sender.lock().send(request).is_ok() {
                         // Successfully sent. The GPU thread will handle backprop and VL removal.
                         // Virtual losses stay applied until GPU finishes backpropagation.
                         return;
@@ -2353,8 +2353,8 @@ mod tests {
     impl GameState for TestGame {
         type Move = (usize, usize);
 
-        fn get_board(&self) -> &Vec<Vec<i32>> {
-            &self.board
+        fn get_board(&self) -> Vec<Vec<i32>> {
+            self.board.clone()
         }
 
         fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {

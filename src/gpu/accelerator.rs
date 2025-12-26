@@ -202,7 +202,6 @@ impl GpuMctsAccelerator {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("PUCT Pass"),
-                timestamp_writes: None,
             });
             pass.set_pipeline(self.context.puct_pipeline());
             pass.set_bind_group(0, &bind_group, &[]);
@@ -234,7 +233,12 @@ impl GpuMctsAccelerator {
             .map_err(|e| GpuError::BufferError(format!("{:?}", e)))?;
 
         let data = buffer_slice.get_mapped_range();
-        let results: Vec<T> = bytemuck::cast_slice(&data[..count * std::mem::size_of::<T>()]).to_vec();
+        // Use pod_read_unaligned to handle potential alignment issues with mapped memory
+        let byte_slice = &data[..count * std::mem::size_of::<T>()];
+        let results: Vec<T> = byte_slice
+            .chunks_exact(std::mem::size_of::<T>())
+            .map(|chunk| bytemuck::pod_read_unaligned(chunk))
+            .collect();
         drop(data);
         staging_buffer.unmap();
 
@@ -315,7 +319,7 @@ impl GpuMctsAccelerator {
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Sim Pass"), timestamp_writes: None,
+                label: Some("Sim Pass"),
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, self.sim_bind_group.as_ref().unwrap(), &[]);
@@ -339,8 +343,14 @@ impl GpuMctsAccelerator {
         rx.recv().unwrap().map_err(|e| GpuError::BufferError(e.to_string()))?;
 
         let data = buffer_slice.get_mapped_range();
-        let results: &[GpuSimulationResult] = bytemuck::cast_slice(&data);
-        let scores: Vec<f32> = results.iter().map(|r| r.score).collect();
+        // Use pod_read_unaligned to handle potential alignment issues with mapped memory
+        let scores: Vec<f32> = data
+            .chunks_exact(std::mem::size_of::<GpuSimulationResult>())
+            .map(|chunk| {
+                let res: GpuSimulationResult = bytemuck::pod_read_unaligned(chunk);
+                res.score
+            })
+            .collect();
         drop(data);
         staging.unmap();
 

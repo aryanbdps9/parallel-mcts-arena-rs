@@ -586,7 +586,7 @@ impl GuiApp {
         let board = self.game.get_board();
         for row in board {
             for cell in row {
-                let c = match *cell {
+                let c = match cell {
                     0 => '.',
                     1 => 'X',
                     -1 => 'O',

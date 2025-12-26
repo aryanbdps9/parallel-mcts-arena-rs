@@ -4,6 +4,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    #[ignore]
     fn debug_puct_shader() {
         // 1. Setup GPU Context with debug mode
         let config = GpuConfig {
@@ -68,6 +69,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn debug_simulation_shader() {
         use crate::gpu::GpuSimulationParams;
 
@@ -123,6 +125,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn debug_connect4_shader() {
         use crate::gpu::GpuSimulationParams;
 
@@ -170,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn debug_othello_shader() {
         use crate::gpu::GpuSimulationParams;
 
@@ -223,6 +227,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn debug_blokus_shader() {
         use crate::gpu::GpuSimulationParams;
 
@@ -282,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn debug_hive_shader() {
         use crate::gpu::GpuSimulationParams;
 

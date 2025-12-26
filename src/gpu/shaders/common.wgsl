@@ -27,7 +27,8 @@ const GAME_HIVE: u32 = 4u;
 // Extract game parameters from encoded current_player field
 fn get_line_size() -> i32 {
     let encoded = params.current_player;
-    let line_size = (encoded >> 8) & 0xFF;
+    let line_size_bits = (bitcast<u32>(encoded) >> 8u) & 0xFFu;
+    let line_size = i32(line_size_bits);
     if (line_size > 0) {
         return line_size;
     }

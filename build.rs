@@ -6,11 +6,23 @@
 use std::env;
 use std::fs;
 use std::path::Path;
+use spirv_builder::{MetadataPrintout, SpirvBuilder};
 
 fn main() {
     // Emit rerun-if-changed for feature flags
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-changed=src/gpu/shaders");
+
+    // Build SPIR-V shaders
+    // This will compile the mcts-shaders crate to SPIR-V and place it in OUT_DIR
+    let result = SpirvBuilder::new("crates/mcts-shaders", "spirv-unknown-spv1.5")
+        .print_metadata(MetadataPrintout::None)
+        .build()
+        .expect("Failed to build SPIR-V shaders");
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let dest_path = Path::new(&out_dir).join("mcts_shaders.spv");
+    fs::copy(result.module.unwrap_single(), dest_path).expect("Failed to copy SPIR-V module");
 
     let shader_dir = Path::new("src/gpu/shaders");
     if !shader_dir.exists() {

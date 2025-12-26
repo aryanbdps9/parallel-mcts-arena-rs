@@ -327,7 +327,7 @@ impl GameController {
     }
 
     /// Get the board for rendering
-    pub fn get_board(&self) -> &Vec<Vec<i32>> {
+    pub fn get_board(&self) -> Vec<Vec<i32>> {
         self.game_state.get_board()
     }
 

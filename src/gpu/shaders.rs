@@ -14,6 +14,8 @@ pub const PUCT_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/puct.wgsl"
 
 pub const GOMOKU_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/gomoku.wgsl"));
 
+// Connect4 now uses Rust-GPU SPIR-V shader instead of WGSL
+#[allow(dead_code)]
 pub const CONNECT4_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/connect4.wgsl"));
 
 pub const OTHELLO_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/othello.wgsl"));
@@ -21,3 +23,7 @@ pub const OTHELLO_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/othello
 pub const BLOKUS_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/blokus.wgsl"));
 
 pub const HIVE_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/hive.wgsl"));
+
+/// Compiled SPIR-V shader module containing all kernels
+/// Generated from crates/mcts-shaders
+pub const SHADER_MODULE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcts_shaders.spv"));

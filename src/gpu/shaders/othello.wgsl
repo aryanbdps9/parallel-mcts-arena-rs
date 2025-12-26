@@ -1,13 +1,27 @@
 #include "grid_common.wgsl"
 
-const DIR_X: array<i32, 8> = array<i32, 8>(0, 1, 1, 1, 0, -1, -1, -1);
-const DIR_Y: array<i32, 8> = array<i32, 8>(-1, -1, 0, 1, 1, 1, 0, -1);
+fn othello_dir(d: i32) -> vec2<i32> {
+    // Naga (via wgpu) rejects dynamic indexing into const arrays in some backends.
+    // Use an explicit switch to keep shader validation happy.
+    switch (d) {
+        case 0: { return vec2<i32>(0, -1); }
+        case 1: { return vec2<i32>(1, -1); }
+        case 2: { return vec2<i32>(1, 0); }
+        case 3: { return vec2<i32>(1, 1); }
+        case 4: { return vec2<i32>(0, 1); }
+        case 5: { return vec2<i32>(-1, 1); }
+        case 6: { return vec2<i32>(-1, 0); }
+        case 7: { return vec2<i32>(-1, -1); }
+        default: { return vec2<i32>(0, 0); }
+    }
+}
 
 fn othello_count_flips_dir(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32, d: i32) -> i32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
-    let dx = DIR_X[d];
-    let dy = DIR_Y[d];
+    let dir = othello_dir(d);
+    let dx = dir.x;
+    let dy = dir.y;
     let opponent = -player;
     
     var cx = x + dx;
@@ -51,8 +65,9 @@ fn othello_make_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, playe
     for (var d = 0; d < 8; d++) {
         let flip_count = othello_count_flips_dir(board, x, y, player, d);
         if (flip_count > 0) {
-            let dx = DIR_X[d];
-            let dy = DIR_Y[d];
+            let dir = othello_dir(d);
+            let dx = dir.x;
+            let dy = dir.y;
             var cx = x + dx;
             var cy = y + dy;
             for (var i = 0; i < flip_count; i++) {

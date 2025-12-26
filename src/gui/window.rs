@@ -9,7 +9,7 @@ use std::rc::Rc;
 use mcts::GameState;
 use windows::{
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM, POINT},
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM, POINT},
         Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, ScreenToClient, PAINTSTRUCT},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
@@ -60,7 +60,7 @@ pub fn run_gui(app: GuiApp) -> windows::core::Result<()> {
         let wc = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(window_proc),
-            hInstance: std::mem::transmute(instance),
+            hInstance: instance,
             lpszClassName: PCWSTR(class_name.as_ptr()),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             ..Default::default()
@@ -70,7 +70,6 @@ pub fn run_gui(app: GuiApp) -> windows::core::Result<()> {
 
         // Create window
         let title = wide_string("Parallel MCTS Arena");
-        let hinstance: HINSTANCE = std::mem::transmute(instance);
         let hwnd = CreateWindowExW(
             Default::default(),
             PCWSTR(class_name.as_ptr()),
@@ -82,9 +81,9 @@ pub fn run_gui(app: GuiApp) -> windows::core::Result<()> {
             800,
             None,
             None,
-            Some(hinstance),
+            instance,
             None,
-        )?;
+        );
 
         // Create renderer
         let mut renderer = Renderer::new(hwnd)?;
@@ -100,7 +99,7 @@ pub fn run_gui(app: GuiApp) -> windows::core::Result<()> {
         let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOWMAXIMIZED);
 
         // Set up update timer
-        SetTimer(Some(hwnd), UPDATE_TIMER_ID, UPDATE_INTERVAL_MS, None);
+        SetTimer(hwnd, UPDATE_TIMER_ID, UPDATE_INTERVAL_MS, None);
 
         // Message loop
         let mut msg = MSG::default();
@@ -125,7 +124,7 @@ pub fn run_gui(app: GuiApp) -> windows::core::Result<()> {
             }
         }
 
-        let _ = KillTimer(Some(hwnd), UPDATE_TIMER_ID);
+        let _ = KillTimer(hwnd, UPDATE_TIMER_ID);
         Ok(())
     }
 }
@@ -168,7 +167,7 @@ unsafe extern "system" fn window_proc(
                     let _ = renderer.resize();
                 }
             });
-            unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+            unsafe { let _ = InvalidateRect(hwnd, None, false); }
             LRESULT(0)
         }
 
@@ -187,7 +186,7 @@ unsafe extern "system" fn window_proc(
             });
 
             if needs_redraw {
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                unsafe { let _ = InvalidateRect(hwnd, None, false); }
             }
             LRESULT(0)
         }
@@ -213,7 +212,7 @@ unsafe extern "system" fn window_proc(
                 unsafe { let _ = SetCapture(hwnd); }
             }
             if needs_redraw {
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                unsafe { let _ = InvalidateRect(hwnd, None, false); }
             }
             LRESULT(0)
         }
@@ -229,7 +228,7 @@ unsafe extern "system" fn window_proc(
                 }
             });
             unsafe { let _ = ReleaseCapture(); }
-            unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+            unsafe { let _ = InvalidateRect(hwnd, None, false); }
             LRESULT(0)
         }
 
@@ -297,13 +296,13 @@ unsafe extern "system" fn window_proc(
             if cursor_change {
                 unsafe {
                     if let Ok(cursor) = LoadCursorW(None, IDC_SIZEWE) {
-                        let _ = SetCursor(Some(cursor));
+                        let _ = SetCursor(cursor);
                     }
                 }
             }
 
             if needs_redraw {
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                unsafe { let _ = InvalidateRect(hwnd, None, false); }
             }
             LRESULT(0)
         }
@@ -382,7 +381,7 @@ unsafe extern "system" fn window_proc(
             });
 
             if needs_redraw {
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                unsafe { let _ = InvalidateRect(hwnd, None, false); }
             }
             LRESULT(0)
         }
@@ -401,7 +400,7 @@ unsafe extern "system" fn window_proc(
             if should_quit {
                 unsafe { PostQuitMessage(0); }
             } else {
-                unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+                unsafe { let _ = InvalidateRect(hwnd, None, false); }
             }
             LRESULT(0)
         }

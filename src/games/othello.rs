@@ -63,8 +63,8 @@ impl GameState for OthelloState {
         2
     }
 
-    fn get_board(&self) -> &Vec<Vec<i32>> {
-        &self.board
+    fn get_board(&self) -> Vec<Vec<i32>> {
+        self.board.clone()
     }
 
     fn get_possible_moves(&self) -> Vec<Self::Move> {

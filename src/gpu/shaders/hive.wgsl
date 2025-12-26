@@ -66,20 +66,30 @@ fn hive_set_state(board_idx: u32, offset: u32, val: i32) {
 }
 
 fn hive_decode(val: i32) -> vec3<i32> {
-    let count = (val >> 16) & 0xFF;
-    let player = (val >> 8) & 0xFF;
-    let piece_type = val & 0xFF;
+    // Use u32 bit operations; some backends reject shifting i32 by abstract-int literals.
+    let u = bitcast<u32>(val);
+    let count = i32((u >> 16u) & 0xFFu);
+    let player = i32((u >> 8u) & 0xFFu);
+    let piece_type = i32(u & 0xFFu);
     return vec3<i32>(count, player, piece_type);
 }
 
 fn hive_encode(count: i32, player: i32, piece_type: i32) -> i32 {
-    return (count << 16) | (player << 8) | piece_type;
+    let u = (u32(count) << 16u) | (u32(player) << 8u) | u32(piece_type);
+    return bitcast<i32>(u);
 }
 
 fn hive_get_neighbor(q: i32, r: i32, dir: i32) -> vec2<i32> {
-    let neighbors_q = array<i32, 6>(1, -1, 0, 0, 1, -1);
-    let neighbors_r = array<i32, 6>(0, 0, 1, -1, -1, 1);
-    return vec2<i32>(q + neighbors_q[dir], r + neighbors_r[dir]);
+    // Avoid dynamic indexing into literal arrays; some backends restrict it.
+    switch (dir) {
+        case 0: { return vec2<i32>(q + 1, r); }
+        case 1: { return vec2<i32>(q - 1, r); }
+        case 2: { return vec2<i32>(q, r + 1); }
+        case 3: { return vec2<i32>(q, r - 1); }
+        case 4: { return vec2<i32>(q + 1, r - 1); }
+        case 5: { return vec2<i32>(q - 1, r + 1); }
+        default: { return vec2<i32>(q, r); }
+    }
 }
 
 fn hive_check_win(board_idx: u32) -> f32 {
@@ -418,7 +428,7 @@ fn hive_try_move_random(board_idx: u32, player: i32) -> bool {
             let dir = rand_range(0u, 6u);
             let n = hive_get_neighbor(q, r, i32(dir));
             let target_val = hive_get_cell(board_idx, n.x, n.y);
-            let target_height = (target_val >> 16) & 0xFF;
+            let target_height = hive_decode(target_val).x;
             
             if (target_val == 0) {
                 if (stack_height > 1 || hive_can_slide(board_idx, q, r, n.x, n.y)) {

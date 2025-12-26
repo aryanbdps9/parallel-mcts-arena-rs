@@ -1,0 +1,13 @@
+[package]
+name = "mcts-shaders"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+spirv-std = "0.9.0"
+mcts-shared = { path = "../mcts-shared" }
+libm = "=0.2.6"
