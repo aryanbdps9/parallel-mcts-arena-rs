@@ -768,6 +768,33 @@ impl GameState for HiveState {
         extra_row[12] = self.pieces_placed[1] as i32;
         extra_row[13] = if self.queen_placed[0] { 1 } else { 0 };
         extra_row[14] = if self.queen_placed[1] { 1 } else { 0 };
+
+        // Find Queen positions
+        let mut p1_queen_q = -100;
+        let mut p1_queen_r = -100;
+        let mut p2_queen_q = -100;
+        let mut p2_queen_r = -100;
+
+        if self.queen_placed[0] || self.queen_placed[1] {
+            for (coord, stack) in &self.board {
+                if let Some(piece) = stack.last() {
+                    if piece.piece_type == PieceType::Queen {
+                        if piece.player == 1 {
+                            p1_queen_q = coord.q + offset_q;
+                            p1_queen_r = coord.r + offset_r;
+                        } else {
+                            p2_queen_q = coord.q + offset_q;
+                            p2_queen_r = coord.r + offset_r;
+                        }
+                    }
+                }
+            }
+        }
+
+        extra_row[15] = p1_queen_q;
+        extra_row[16] = p1_queen_r;
+        extra_row[17] = p2_queen_q;
+        extra_row[18] = p2_queen_r;
         
         data.extend(extra_row);
         

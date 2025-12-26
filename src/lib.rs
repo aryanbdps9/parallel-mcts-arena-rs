@@ -551,8 +551,9 @@ impl<S: GameState> MCTS<S> {
                 
                 std::thread::spawn(move || {
                     let mut batch_requests: Vec<EvaluationRequest<S>> = Vec::with_capacity(max_batch_size);
-                    // Use a smaller effective batch size for faster processing
-                    let effective_batch = (max_batch_size / 4).max(64).min(512);
+                    
+                    // Track execution time to adapt batching strategy
+                    let mut last_execution_time = Duration::from_micros(0);
                     
                     loop {
                         let first = match rx.recv() {
@@ -561,12 +562,33 @@ impl<S: GameState> MCTS<S> {
                         };
                         
                         batch_requests.push(first);
+
+                        // Adaptive batching: if GPU is slow (>2ms), wait up to 500us to fill larger batches
+                        let heavy_load = last_execution_time.as_micros() > 2000;
+                        let target_batch = if heavy_load { 
+                            (max_batch_size / 2).max(64).min(2048) 
+                        } else { 
+                            (max_batch_size / 4).max(64).min(512) 
+                        };
                         
-                        // Quickly collect more requests without waiting
-                        while batch_requests.len() < effective_batch {
+                        let deadline = if heavy_load { 
+                            Some(Instant::now() + Duration::from_micros(500)) 
+                        } else { 
+                            None 
+                        };
+
+                        while batch_requests.len() < target_batch {
                             match rx.try_recv() {
                                 Ok(req) => batch_requests.push(req),
-                                Err(_) => break, // No more requests available, process what we have
+                                Err(_) => {
+                                    match deadline {
+                                        Some(d) => {
+                                            if batch_requests.len() >= 64 || Instant::now() >= d { break; }
+                                            std::thread::yield_now();
+                                        }
+                                        None => break,
+                                    }
+                                }
                             }
                         }
                         
@@ -606,6 +628,7 @@ impl<S: GameState> MCTS<S> {
                         let mut scores = vec![0.0f32; batch_requests.len()];
 
                         // GPU evaluation for supported games
+                        let start_time = Instant::now();
                         if let Some(p) = params {
                             let mut acc = accelerator.lock();
                             if let Ok(gpu_scores) = acc.simulate_batch(&flat_data, p) {
@@ -613,6 +636,12 @@ impl<S: GameState> MCTS<S> {
                                     scores[idx] = score;
                                 }
                             }
+                        }
+                        // Update execution time metric (only if GPU was actually used)
+                        if params.is_some() {
+                            last_execution_time = start_time.elapsed();
+                        } else {
+                            last_execution_time = Duration::from_micros(0);
                         }
                         
                         // CPU random rollout for games that don't support GPU simulation
@@ -1877,21 +1906,26 @@ impl<S: GameState> MCTS<S> {
         #[cfg(feature = "gpu")]
         if let Some(ref sender) = self.gpu_simulation_sender {
             if !sim_state.is_terminal() {
-                // Send to GPU. Multiple threads can evaluate the same position - this is fine.
-                self.gpu_pending_evaluations.fetch_add(1, Ordering::Relaxed);
-                let request = EvaluationRequest {
-                    state: sim_state.clone(), // Clone state for GPU
-                    path: path.clone(), // Clone path for GPU
-                    path_players: path_players.clone(), // Clone path_players for GPU
-                };
+                // Check pending evaluations to prevent huge backlog
+                // If GPU is saturated, fall back to CPU simulation
+                let pending = self.gpu_pending_evaluations.load(Ordering::Relaxed);
+                if pending < 10000 {
+                    // Send to GPU. Multiple threads can evaluate the same position - this is fine.
+                    self.gpu_pending_evaluations.fetch_add(1, Ordering::Relaxed);
+                    let request = EvaluationRequest {
+                        state: sim_state.clone(), // Clone state for GPU
+                        path: path.clone(), // Clone path for GPU
+                        path_players: path_players.clone(), // Clone path_players for GPU
+                    };
 
-                if sender.send(request).is_ok() {
-                    // Successfully sent. The GPU thread will handle backprop and VL removal.
-                    // Virtual losses stay applied until GPU finishes backpropagation.
-                    return;
-                } else {
-                    // Failed to send (GPU thread died). Decrement counter and fall through to CPU.
-                    self.gpu_pending_evaluations.fetch_sub(1, Ordering::Relaxed);
+                    if sender.send(request).is_ok() {
+                        // Successfully sent. The GPU thread will handle backprop and VL removal.
+                        // Virtual losses stay applied until GPU finishes backpropagation.
+                        return;
+                    } else {
+                        // Failed to send (GPU thread died). Decrement counter and fall through to CPU.
+                        self.gpu_pending_evaluations.fetch_sub(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
