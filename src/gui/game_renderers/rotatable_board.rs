@@ -14,16 +14,24 @@ const MAX_TILT: f32 = 1.0;
 /// Default rotation angle in radians
 const DEFAULT_ROTATION: f32 = 0.0;
 
+/// Default zoom scale
+const DEFAULT_SCALE: f32 = 1.0;
+const MIN_SCALE: f32 = 0.5;
+const MAX_SCALE: f32 = 5.0;
+
 /// Sensitivity for drag controls
 const TILT_SENSITIVITY: f32 = 0.003;
 const ROTATION_SENSITIVITY: f32 = 0.005;
+const ZOOM_SENSITIVITY: f32 = 1.1;
 
 /// A 3D rotatable board wrapper component.
 ///
 /// This component manages:
 /// - Tilt (Y-axis compression for isometric view)
 /// - Rotation (around the center point)
+/// - Zoom scale
 /// - Right-click drag handling for interactive adjustment
+/// - Ctrl+Scroll for zooming
 /// - D2D transform setup and teardown
 ///
 /// # Usage
@@ -46,6 +54,8 @@ pub struct RotatableBoard {
     tilt: f32,
     /// Current rotation angle in radians
     rotation: f32,
+    /// Current zoom scale
+    scale: f32,
 }
 
 impl Default for RotatableBoard {
@@ -60,6 +70,7 @@ impl RotatableBoard {
         Self {
             tilt: DEFAULT_TILT,
             rotation: DEFAULT_ROTATION,
+            scale: DEFAULT_SCALE,
         }
     }
 
@@ -68,6 +79,7 @@ impl RotatableBoard {
         Self {
             tilt: tilt.clamp(MIN_TILT, MAX_TILT),
             rotation,
+            scale: DEFAULT_SCALE,
         }
     }
 
@@ -81,10 +93,21 @@ impl RotatableBoard {
         self.rotation
     }
 
+    /// Get current scale value
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
     /// Reset to default view
     pub fn reset_view(&mut self) {
         self.tilt = DEFAULT_TILT;
         self.rotation = DEFAULT_ROTATION;
+        self.scale = DEFAULT_SCALE;
+    }
+
+    /// Reset zoom only
+    pub fn reset_zoom(&mut self) {
+        self.scale = DEFAULT_SCALE;
     }
 
     /// Begin drawing with the board transform applied.
@@ -95,7 +118,7 @@ impl RotatableBoard {
     /// * `center_x` - X coordinate of rotation center
     /// * `center_y` - Y coordinate of rotation center
     pub fn begin_draw(&self, renderer: &Renderer, center_x: f32, center_y: f32) {
-        renderer.set_board_transform(center_x, center_y, self.tilt, self.rotation);
+        renderer.set_board_transform(center_x, center_y, self.tilt, self.rotation, self.scale);
     }
 
     /// End drawing and reset the transform.
@@ -123,6 +146,19 @@ impl RotatableBoard {
 
                 Some(InputResult::Redraw)
             }
+            GameInput::Wheel { delta, ctrl, .. } => {
+                if *ctrl {
+                    if *delta > 0.0 {
+                        self.scale *= ZOOM_SENSITIVITY;
+                    } else {
+                        self.scale /= ZOOM_SENSITIVITY;
+                    }
+                    self.scale = self.scale.clamp(MIN_SCALE, MAX_SCALE);
+                    Some(InputResult::Redraw)
+                } else {
+                    None
+                }
+            }
             GameInput::RightDown { .. } | GameInput::RightUp { .. } => {
                 // Consumed but no action needed (window handles capture)
                 Some(InputResult::None)
@@ -143,10 +179,14 @@ impl RotatableBoard {
         let cos_r = self.rotation.cos();
         let sin_r = self.rotation.sin();
 
+        // Apply scale
+        let x_scaled = x * self.scale;
+        let y_scaled = y * self.scale;
+
         // Apply tilt then rotation
-        let y_tilted = y * self.tilt;
-        let x_rotated = x * cos_r - y_tilted * sin_r;
-        let y_rotated = x * sin_r + y_tilted * cos_r;
+        let y_tilted = y_scaled * self.tilt;
+        let x_rotated = x_scaled * cos_r - y_tilted * sin_r;
+        let y_rotated = x_scaled * sin_r + y_tilted * cos_r;
 
         (center_x + x_rotated, center_y + y_rotated)
     }
@@ -174,7 +214,11 @@ impl RotatableBoard {
         // Reverse tilt
         let y_untilted = y_unrotated / self.tilt;
 
-        (x_unrotated, y_untilted)
+        // Reverse scale
+        let x_unscaled = x_unrotated / self.scale;
+        let y_unscaled = y_untilted / self.scale;
+
+        (x_unscaled, y_unscaled)
     }
 }
 

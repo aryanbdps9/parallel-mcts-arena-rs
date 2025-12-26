@@ -466,6 +466,13 @@ impl Renderer {
     pub fn draw_small_text(&self, text: &str, rect: Rect, color: D2D1_COLOR_F, centered: bool) {
         self.draw_text_with_format(text, rect, color, self.small_format.as_ref(), centered);
     }
+
+    /// Draw text with specified font size
+    pub fn draw_text_with_size(&self, text: &str, rect: Rect, color: D2D1_COLOR_F, size: f32, centered: bool) {
+        if let Ok(format) = self.create_text_format("Segoe UI", size, false) {
+            self.draw_text_with_format(text, rect, color, Some(&format), centered);
+        }
+    }
     
     /// Internal text drawing with specified format
     fn draw_text_with_format(
@@ -502,6 +509,86 @@ impl Renderer {
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
+            }
+        }
+    }
+
+    /// Draw rotated text
+    pub fn draw_rotated_text(
+        &self,
+        text: &str,
+        center_x: f32,
+        center_y: f32,
+        angle_rad: f32,
+        color: D2D1_COLOR_F,
+        size: f32,
+    ) {
+        if let Ok(format) = self.create_text_format("Segoe UI", size, false) {
+            unsafe {
+                // Get current transform
+                let mut old_transform = Matrix3x2::identity();
+                self.device_context.GetTransform(&mut old_transform as *mut _ as *mut _);
+
+                // Create rotation matrix
+                let cos_a = angle_rad.cos();
+                let sin_a = angle_rad.sin();
+                
+                // Rotation around (center_x, center_y)
+                // M_rot = T(-cx, -cy) * R(angle) * T(cx, cy)
+                // But we want to combine with existing transform M_old
+                // M_new = M_rot * M_old
+                
+                // Manual matrix multiplication for M_rot
+                // R = [cos, sin, -sin, cos, 0, 0]
+                // T = [1, 0, 0, 1, cx, cy]
+                // T_inv = [1, 0, 0, 1, -cx, -cy]
+                
+                // Let's use the helper struct logic
+                let m11 = cos_a;
+                let m12 = sin_a;
+                let m21 = -sin_a;
+                let m22 = cos_a;
+                let m31 = center_x - center_x * cos_a + center_y * sin_a;
+                let m32 = center_y - center_x * sin_a - center_y * cos_a;
+                
+                let rotation = Matrix3x2 {
+                    m11, m12,
+                    m21, m22,
+                    m31, m32
+                };
+
+                // Combine with old transform: New = Rotation * Old
+                // D2D matrices are row-major: v' = v * M
+                // So composition M1 then M2 is M1 * M2
+                // We want to apply rotation "before" the existing transform (in local space)
+                // So New = Rotation * Old
+                
+                let old = &old_transform;
+                let rot = &rotation;
+                
+                let new_transform = Matrix3x2 {
+                    m11: rot.m11 * old.m11 + rot.m12 * old.m21,
+                    m12: rot.m11 * old.m12 + rot.m12 * old.m22,
+                    
+                    m21: rot.m21 * old.m11 + rot.m22 * old.m21,
+                    m22: rot.m21 * old.m12 + rot.m22 * old.m22,
+                    
+                    m31: rot.m31 * old.m11 + rot.m32 * old.m21 + old.m31,
+                    m32: rot.m31 * old.m12 + rot.m32 * old.m22 + old.m32,
+                };
+
+                self.device_context.SetTransform(&new_transform as *const _ as *const _);
+
+                // Draw text centered at (center_x, center_y)
+                // Since we rotated around (center_x, center_y), drawing at that point will work
+                let width = size * text.len() as f32; // Approximate width
+                let height = size * 1.5;
+                let rect = Rect::new(center_x - width / 2.0, center_y - height / 2.0, width, height);
+                
+                self.draw_text_with_format(text, rect, color, Some(&format), true);
+
+                // Restore transform
+                self.device_context.SetTransform(&old_transform as *const _ as *const _);
             }
         }
     }
@@ -587,23 +674,27 @@ impl Renderer {
     
     // ========== Transform Support ==========
     
-    /// Set a combined tilt+rotation transform centered at (cx, cy)
+    /// Set a combined tilt+rotation+scale transform centered at (cx, cy)
     /// tilt: Y-axis compression factor (1.0 = no tilt, 0.5 = 50% Y compression)
     /// rotation: rotation angle in radians
-    pub fn set_board_transform(&self, cx: f32, cy: f32, tilt: f32, rotation: f32) {
+    /// scale: zoom factor (1.0 = normal size)
+    pub fn set_board_transform(&self, cx: f32, cy: f32, tilt: f32, rotation: f32, scale: f32) {
         let cos_r = rotation.cos();
         let sin_r = rotation.sin();
         
-        // Combined matrix: translate to origin, apply tilt, rotate, translate back
-        // M = T(cx,cy) * R(rotation) * S(1, tilt) * T(-cx,-cy)
-        // This simplifies to:
+        let s_cos_r = cos_r * scale;
+        let s_sin_r = sin_r * scale;
+        let s_tilt = tilt * scale;
+        
+        // Combined matrix: translate to origin, scale, apply tilt, rotate, translate back
+        // M = T(cx,cy) * R(rotation) * S(1, tilt) * S(scale, scale) * T(-cx,-cy)
         let transform = Matrix3x2 {
-            m11: cos_r,
-            m12: sin_r,
-            m21: -sin_r * tilt,
-            m22: cos_r * tilt,
-            m31: cx - cx * cos_r + cy * sin_r * tilt,
-            m32: cy - cx * sin_r - cy * cos_r * tilt,
+            m11: s_cos_r,
+            m12: s_sin_r,
+            m21: -sin_r * s_tilt,
+            m22: cos_r * s_tilt,
+            m31: cx - cx * s_cos_r + cy * sin_r * s_tilt,
+            m32: cy - cx * s_sin_r - cy * cos_r * s_tilt,
         };
         
         unsafe {

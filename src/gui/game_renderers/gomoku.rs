@@ -72,6 +72,24 @@ impl GameRenderer for GomokuRenderer {
                     let is_last = last_move_coords.contains(&(row, col));
                     grid::draw_stone(renderer, &layout, row, col, cell, is_last);
                 }
+
+                // Draw coordinates
+                let cell_rect = layout.cell_rect(row, col);
+                let font_size = layout.cell_size / 8.0;
+                let coord_text = format!("{},{}", row, col);
+                let text_color = if cell == 1 { 
+                    Colors::TEXT_PRIMARY 
+                } else { 
+                    Colors::PLAYER_1 
+                };
+                
+                renderer.draw_text_with_size(
+                    &coord_text,
+                    cell_rect,
+                    text_color,
+                    font_size,
+                    true
+                );
             }
         }
         
@@ -84,6 +102,13 @@ impl GameRenderer for GomokuRenderer {
         
         // End board transform
         self.board_view.end_draw(renderer);
+
+        // Draw Reset Zoom button if zoomed
+        if (self.board_view.scale() - 1.0).abs() > 0.01 {
+            let reset_rect = Rect::new(area.x + area.width - 110.0, area.y + 10.0, 100.0, 30.0);
+            renderer.fill_rounded_rect(reset_rect, 4.0, Colors::BUTTON_BG);
+            renderer.draw_text("Reset Zoom", reset_rect, Colors::TEXT_PRIMARY, true);
+        }
     }
 
     fn handle_input(
@@ -106,6 +131,16 @@ impl GameRenderer for GomokuRenderer {
 
         match input {
             GameInput::Click { x, y } => {
+                // Check Reset Zoom button
+                if (self.board_view.scale() - 1.0).abs() > 0.01 {
+                    let reset_rect = Rect::new(area.x + area.width - 110.0, area.y + 10.0, 100.0, 30.0);
+                    if x >= reset_rect.x && x <= reset_rect.x + reset_rect.width &&
+                       y >= reset_rect.y && y <= reset_rect.y + reset_rect.height {
+                        self.board_view.reset_zoom();
+                        return InputResult::Redraw;
+                    }
+                }
+
                 // Transform screen coordinates to local board coordinates
                 let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
                 let board_x = center_x + lx;
@@ -131,7 +166,7 @@ impl GameRenderer for GomokuRenderer {
                 InputResult::None
             }
             GameInput::Key { .. } => InputResult::None,
-            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } => InputResult::None,
+            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } | GameInput::Wheel { .. } => InputResult::None,
         }
     }
 

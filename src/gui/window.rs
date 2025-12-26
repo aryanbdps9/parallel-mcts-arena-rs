@@ -26,6 +26,8 @@ use windows::{
     core::PCWSTR,
 };
 
+const MK_CONTROL: u16 = 0x0008;
+
 use super::app::{GuiApp, GuiMode, PlayerType, GameStatus, ActiveTab};
 use super::colors::Colors;
 use super::game_renderers::{GameInput, InputResult};
@@ -304,6 +306,9 @@ unsafe extern "system" fn window_proc(
 
         WM_MOUSEWHEEL => {
             let delta = (wparam.0 >> 16) as i16;
+            let keys = (wparam.0 & 0xFFFF) as u16;
+            let ctrl_pressed = (keys & MK_CONTROL) != 0;
+
             let x_screen = (lparam.0 & 0xFFFF) as i32;
             let y_screen = ((lparam.0 >> 16) & 0xFFFF) as i32;
             
@@ -314,7 +319,8 @@ unsafe extern "system" fn window_proc(
 
             let needs_redraw = APP_STATE.with(|state| {
                 if let Some(app) = state.borrow().as_ref() {
-                    let mut app = app.borrow_mut();
+                    let mut app_guard = app.borrow_mut();
+                    let app = &mut *app_guard;
                     
                     match app.mode {
                         GuiMode::InGame => {
@@ -336,6 +342,19 @@ unsafe extern "system" fn window_proc(
                                     }
                                 }
                                 return true;
+                            } else {
+                                // Dispatch to game
+                                let input = GameInput::Wheel { 
+                                    delta: delta as f32, 
+                                    x, 
+                                    y, 
+                                    ctrl: ctrl_pressed 
+                                };
+                                
+                                let board_area = get_board_area(&*app, width, height);
+                                if let InputResult::Redraw = app.game_renderer.handle_input(input, &app.game, board_area) {
+                                    return true;
+                                }
                             }
                         },
                         GuiMode::HowToPlay => {

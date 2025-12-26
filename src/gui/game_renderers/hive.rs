@@ -53,11 +53,13 @@ pub struct HexLayout {
     pub iso_tilt: f32,
     /// Rotation angle in radians (around the center)
     pub rotation: f32,
+    /// Zoom scale
+    pub scale: f32,
 }
 
 impl HexLayout {
     /// Calculate hex layout based on available area and board bounds
-    fn calculate(area: Rect, state: &HiveState, iso_tilt: f32, rotation: f32) -> Self {
+    fn calculate(area: Rect, state: &HiveState, iso_tilt: f32, rotation: f32, scale: f32) -> Self {
         // Find bounds of placed pieces
         let mut min_q: i32 = 0;
         let mut max_q: i32 = 0;
@@ -105,6 +107,7 @@ impl HexLayout {
             offset_r: center_r,
             iso_tilt,
             rotation,
+            scale,
         }
     }
     
@@ -147,9 +150,13 @@ impl HexLayout {
         let x_unrotated = x_local * cos_r + y_local * sin_r;
         let y_unrotated = -x_local * sin_r + y_local * cos_r;
         
+        // Reverse scale
+        let x_unscaled = x_unrotated / self.scale;
+        let y_unscaled = y_unrotated / self.scale;
+
         // Reverse the isometric tilt
-        let r = y_unrotated / (self.hex_size * 1.5 * self.iso_tilt);
-        let q = x_unrotated / (self.hex_size * sqrt3) - r / 2.0;
+        let r = y_unscaled / (self.hex_size * 1.5 * self.iso_tilt);
+        let q = x_unscaled / (self.hex_size * sqrt3) - r / 2.0;
         
         // Round to nearest hex
         let q_adj = q + self.offset_q;
@@ -243,6 +250,32 @@ impl HiveRenderer {
         if is_last_move {
             renderer.fill_iso_hexagon(cx, cy, size * 0.25, Colors::LAST_MOVE);
         }
+
+        // Draw coordinates
+        let font_size = layout.hex_size / 8.0;
+        let coord_text = format!("{},{}", q, r);
+        
+        // Calculate position on the bottom-right edge
+        // Edge midpoint is at angle 60 degrees (PI/3)
+        // Distance is hex_size * sqrt(3)/2 (apothem)
+        // We move slightly inwards (0.85 factor) to be inside
+        let angle_pos = std::f32::consts::PI / 3.0;
+        let dist = layout.hex_size * 3.0_f32.sqrt() / 2.0 * 0.85;
+        
+        let text_cx = cx + dist * angle_pos.cos();
+        let text_cy = cy + dist * angle_pos.sin();
+        
+        // Rotation angle: -30 degrees (-PI/6) to align with edge
+        let rotation_angle = -std::f32::consts::PI / 6.0;
+        
+        renderer.draw_rotated_text(
+            &coord_text,
+            text_cx,
+            text_cy,
+            rotation_angle,
+            Colors::BOARD_GRID,
+            font_size
+        );
     }
 
     /// Draw the icon for a specific piece type using native D2D SVG
@@ -317,9 +350,38 @@ impl HiveRenderer {
                     // Don't draw grid cells where pieces are placed
                     let coord = HexCoord::new(q, r);
                     if !state.get_hex_board().contains_key(&coord) {
-                        // Draw empty hex cell (tilt+rotation handled by D2D transform)
-                        renderer.fill_iso_hexagon(cx, cy, layout.hex_size * 0.92, HEX_EMPTY_COLOR);
-                        renderer.draw_iso_hexagon(cx, cy, layout.hex_size * 0.92, HEX_GRID_COLOR, 1.0);
+                        // Only draw empty cell if it's move 1 (turn 1) or adjacent to a filled cell
+                        let is_turn_1 = state.get_turn() <= 1;
+                        let is_adjacent = coord.neighbors().iter().any(|n| state.get_hex_board().contains_key(n));
+                        
+                        if is_turn_1 || is_adjacent {
+                            // Draw empty hex cell (tilt+rotation handled by D2D transform)
+                            renderer.fill_iso_hexagon(cx, cy, layout.hex_size * 0.92, HEX_EMPTY_COLOR);
+                            renderer.draw_iso_hexagon(cx, cy, layout.hex_size * 0.92, HEX_GRID_COLOR, 1.0);
+
+                            // Draw coordinates
+                            let font_size = layout.hex_size / 8.0;
+                            let coord_text = format!("{},{}", q, r);
+                            
+                            // Calculate position on the bottom-right edge
+                            let angle_pos = std::f32::consts::PI / 3.0;
+                            let dist = layout.hex_size * 3.0_f32.sqrt() / 2.0 * 0.85;
+                            
+                            let text_cx = cx + dist * angle_pos.cos();
+                            let text_cy = cy + dist * angle_pos.sin();
+                            
+                            // Rotation angle: -30 degrees (-PI/6) to align with edge
+                            let rotation_angle = -std::f32::consts::PI / 6.0;
+                            
+                            renderer.draw_rotated_text(
+                                &coord_text,
+                                text_cx,
+                                text_cy,
+                                rotation_angle,
+                                Colors::BOARD_GRID,
+                                font_size
+                            );
+                        }
                     }
                 }
             }
@@ -482,7 +544,7 @@ impl GameRenderer for HiveRenderer {
         renderer.fill_rect(board_area, HEX_BG_COLOR);
         
         // Calculate layout using board_view tilt/rotation
-        let layout = HexLayout::calculate(board_area, state, self.board_view.tilt(), self.board_view.rotation());
+        let layout = HexLayout::calculate(board_area, state, self.board_view.tilt(), self.board_view.rotation(), self.board_view.scale());
         
         // Set board transform (tilt + rotation around center)
         self.board_view.begin_draw(renderer, layout.center_x, layout.center_y);
@@ -565,6 +627,13 @@ impl GameRenderer for HiveRenderer {
             let warning_rect = Rect::new(board_area.x + 10.0, board_area.y + 35.0, 200.0, 25.0);
             renderer.draw_text("Must place Queen!", warning_rect, Colors::STATUS_ERROR, false);
         }
+
+        // Draw Reset Zoom button if zoomed
+        if (self.board_view.scale() - 1.0).abs() > 0.01 {
+            let reset_rect = Rect::new(board_area.x + board_area.width - 110.0, board_area.y + 10.0, 100.0, 30.0);
+            renderer.fill_rounded_rect(reset_rect, 4.0, Colors::BUTTON_BG);
+            renderer.draw_text("Reset Zoom", reset_rect, Colors::TEXT_PRIMARY, true);
+        }
     }
 
     fn handle_input(
@@ -578,7 +647,7 @@ impl GameRenderer for HiveRenderer {
         // Calculate layout for coordinate conversion
         let panel_width = (area.width * 0.2).max(150.0).min(200.0);
         let board_area = Rect::new(area.x, area.y, area.width - panel_width - 10.0, area.height);
-        let layout = HexLayout::calculate(board_area, state, self.board_view.tilt(), self.board_view.rotation());
+        let layout = HexLayout::calculate(board_area, state, self.board_view.tilt(), self.board_view.rotation(), self.board_view.scale());
 
         // Let board_view handle drag inputs for tilt/rotation
         if let Some(result) = self.board_view.handle_input(&input) {
@@ -587,6 +656,16 @@ impl GameRenderer for HiveRenderer {
 
         match input {
             GameInput::Click { x, y } => {
+                // Check Reset Zoom button
+                if (self.board_view.scale() - 1.0).abs() > 0.01 {
+                    let reset_rect = Rect::new(board_area.x + board_area.width - 110.0, board_area.y + 10.0, 100.0, 30.0);
+                    if x >= reset_rect.x && x <= reset_rect.x + reset_rect.width &&
+                       y >= reset_rect.y && y <= reset_rect.y + reset_rect.height {
+                        self.board_view.reset_zoom();
+                        return InputResult::Redraw;
+                    }
+                }
+
                 // Calculate panel area for hit testing
                 let panel_area = Rect::new(area.x + area.width - panel_width, area.y, panel_width, area.height);
                 
@@ -698,7 +777,7 @@ impl GameRenderer for HiveRenderer {
                 InputResult::None
             }
             
-            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } => {
+            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } | GameInput::Wheel { .. } => {
                 // Handled by board_view.handle_input above
                 InputResult::None
             }
