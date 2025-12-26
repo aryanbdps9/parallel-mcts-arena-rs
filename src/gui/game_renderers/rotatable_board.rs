@@ -17,7 +17,7 @@ const DEFAULT_ROTATION: f32 = 0.0;
 /// Default zoom scale
 const DEFAULT_SCALE: f32 = 1.0;
 const MIN_SCALE: f32 = 0.5;
-const MAX_SCALE: f32 = 5.0;
+const MAX_SCALE: f32 = 200.0;
 
 /// Sensitivity for drag controls
 const TILT_SENSITIVITY: f32 = 0.003;
