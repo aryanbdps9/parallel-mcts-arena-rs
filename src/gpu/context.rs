@@ -41,8 +41,12 @@ pub struct GpuContext {
     adapter_info: wgpu::AdapterInfo,
     puct_pipeline: ComputePipeline,
     pub gomoku_eval_pipeline: ComputePipeline,
+    pub connect4_eval_pipeline: ComputePipeline,
+    pub othello_eval_pipeline: ComputePipeline,
+    pub blokus_eval_pipeline: ComputePipeline,
+    pub hive_eval_pipeline: ComputePipeline,
     puct_bind_group_layout: BindGroupLayout,
-    pub gomoku_eval_bind_group_layout: BindGroupLayout,
+    pub eval_bind_group_layout: BindGroupLayout,
     config: GpuConfig,
     max_buffer_size: u64,
 }
@@ -112,14 +116,9 @@ impl GpuContext {
             source: wgpu::ShaderSource::Wgsl(shaders::PUCT_SHADER.into()),
         });
 
-        let gomoku_eval_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Gomoku Eval Shader"),
-            source: wgpu::ShaderSource::Wgsl(shaders::GOMOKU_EVAL_SHADER.into()),
-        });
-
         // Create bind group layouts
         let puct_bind_group_layout = Self::create_puct_bind_group_layout(&device);
-        let gomoku_eval_bind_group_layout = Self::create_gomoku_eval_bind_group_layout(&device);
+        let eval_bind_group_layout = Self::create_eval_bind_group_layout(&device);
 
         // Create pipelines
         let puct_pipeline = Self::create_compute_pipeline(
@@ -130,12 +129,49 @@ impl GpuContext {
             "PUCT Pipeline",
         );
 
-        let gomoku_eval_pipeline = Self::create_compute_pipeline(
-            &device,
-            &gomoku_eval_shader,
-            "evaluate_board",
-            &gomoku_eval_bind_group_layout,
-            "Gomoku Eval Pipeline",
+        // Helper closure to create game pipelines
+        let create_game_pipeline = |source: String, entry: &str, name: &str| -> ComputePipeline {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(&format!("{} Shader", name)),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            Self::create_compute_pipeline(
+                &device,
+                &shader,
+                entry,
+                &eval_bind_group_layout,
+                &format!("{} Pipeline", name),
+            )
+        };
+
+        let gomoku_eval_pipeline = create_game_pipeline(
+            shaders::get_grid_shader_source(shaders::GOMOKU_SHADER),
+            "evaluate_gomoku",
+            "Gomoku Eval"
+        );
+
+        let connect4_eval_pipeline = create_game_pipeline(
+            shaders::get_grid_shader_source(shaders::CONNECT4_SHADER),
+            "evaluate_connect4",
+            "Connect4 Eval"
+        );
+
+        let othello_eval_pipeline = create_game_pipeline(
+            shaders::get_shader_source(shaders::OTHELLO_SHADER),
+            "evaluate_othello",
+            "Othello Eval"
+        );
+
+        let blokus_eval_pipeline = create_game_pipeline(
+            shaders::get_shader_source(shaders::BLOKUS_SHADER),
+            "evaluate_blokus",
+            "Blokus Eval"
+        );
+
+        let hive_eval_pipeline = create_game_pipeline(
+            shaders::get_shader_source(shaders::HIVE_SHADER),
+            "evaluate_hive",
+            "Hive Eval"
         );
 
         Ok(Self {
@@ -144,17 +180,21 @@ impl GpuContext {
             adapter_info,
             puct_pipeline,
             gomoku_eval_pipeline,
+            connect4_eval_pipeline,
+            othello_eval_pipeline,
+            blokus_eval_pipeline,
+            hive_eval_pipeline,
             puct_bind_group_layout,
-            gomoku_eval_bind_group_layout,
+            eval_bind_group_layout,
             config: config.clone(),
             max_buffer_size,
         })
     }
 
-    /// Creates the bind group layout for Gomoku evaluation
-    fn create_gomoku_eval_bind_group_layout(device: &Device) -> BindGroupLayout {
+    /// Creates the bind group layout for game evaluation
+    fn create_eval_bind_group_layout(device: &Device) -> BindGroupLayout {
         device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Gomoku Eval Bind Group Layout"),
+            label: Some("Eval Bind Group Layout"),
             entries: &[
                 BindGroupLayoutEntry {
                     binding: 0,

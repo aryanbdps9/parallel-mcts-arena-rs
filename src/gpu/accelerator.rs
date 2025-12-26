@@ -10,6 +10,11 @@ use std::sync::Arc;
 
 use super::context::{GpuContext, GpuError};
 
+// Game type constants matching shaders.rs
+const GAME_OTHELLO: i32 = 2;
+const GAME_BLOKUS: i32 = 3;
+const GAME_HIVE: i32 = 4;
+
 /// Node data for GPU PUCT calculation
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -262,53 +267,29 @@ impl GpuMctsAccelerator {
     pub fn simulate_batch(&mut self, board_data: &[i32], params: GpuSimulationParams) -> Result<Vec<f32>, GpuError> {
         let start = std::time::Instant::now();
         let board_size = (params.board_width * params.board_height) as usize;
+        if board_size == 0 {
+            return Ok(Vec::new());
+        }
         let num_boards = board_data.len() / board_size;
         
         if num_boards == 0 {
             return Ok(Vec::new());
         }
 
+        // Debug print to verify params
+        // println!("GPU Batch: {} boards, size {}x{}={}, total_len={}, params={:?}", 
+        //    num_boards, params.board_width, params.board_height, board_size, board_data.len(), params);
+
+        // Debug: Bypass GPU execution
+        // return Ok(vec![0.0; num_boards]);
+
         // Ensure buffers
-        if self.sim_capacity < num_boards || self.sim_input_buffer.is_none() {
-            let new_capacity = num_boards.next_power_of_two().max(256);
-            let input_size = (new_capacity * board_size * std::mem::size_of::<i32>()) as u64;
-            let output_size = (new_capacity * std::mem::size_of::<GpuSimulationResult>()) as u64;
-
-            self.sim_input_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Sim Input"), size: input_size,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST, mapped_at_creation: false,
-            }));
-
-            self.sim_output_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Sim Output"), size: output_size,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC, mapped_at_creation: false,
-            }));
-
-            self.sim_staging_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Sim Staging"), size: output_size,
-                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST, mapped_at_creation: false,
-            }));
-
-            self.sim_params_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Sim Params"), size: std::mem::size_of::<GpuSimulationParams>() as u64,
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST, mapped_at_creation: false,
-            }));
-
-            self.sim_bind_group = Some(self.context.device().create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Sim Bind Group"),
-                layout: &self.context.gomoku_eval_bind_group_layout,
-                entries: &[
-                    BindGroupEntry { binding: 0, resource: self.sim_input_buffer.as_ref().unwrap().as_entire_binding() },
-                    BindGroupEntry { binding: 1, resource: self.sim_output_buffer.as_ref().unwrap().as_entire_binding() },
-                    BindGroupEntry { binding: 2, resource: self.sim_params_buffer.as_ref().unwrap().as_entire_binding() },
-                ],
-            }));
-            
-            self.sim_capacity = new_capacity;
-        }
+        self.ensure_sim_buffers(num_boards, board_size);
 
         // Upload data
         self.context.queue().write_buffer(self.sim_input_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(board_data));
+        
+        // Update params
         self.context.queue().write_buffer(self.sim_params_buffer.as_ref().unwrap(), 0, bytemuck::bytes_of(&params));
 
         // Dispatch
@@ -316,11 +297,27 @@ impl GpuMctsAccelerator {
             label: Some("Sim Encoder"),
         });
 
+        // Determine which pipeline to use based on game type
+        let encoded = params.current_player;
+        let explicit_game_type = (encoded >> 16) & 0xFF;
+        let line_size = (encoded >> 8) & 0xFF;
+        
+        let pipeline = match explicit_game_type {
+            GAME_OTHELLO => &self.context.othello_eval_pipeline,
+            GAME_BLOKUS => &self.context.blokus_eval_pipeline,
+            GAME_HIVE => &self.context.hive_eval_pipeline,
+            _ => if line_size > 0 && line_size < 10 {
+                &self.context.connect4_eval_pipeline
+            } else {
+                &self.context.gomoku_eval_pipeline
+            },
+        };
+
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Sim Pass"), timestamp_writes: None,
             });
-            pass.set_pipeline(&self.context.gomoku_eval_pipeline);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, self.sim_bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups((num_boards as u32 + 63) / 64, 1, 1);
         }
@@ -351,6 +348,46 @@ impl GpuMctsAccelerator {
         self.dispatch_count += 1;
 
         Ok(scores)
+    }
+
+    fn ensure_sim_buffers(&mut self, num_boards: usize, board_size: usize) {
+        if self.sim_capacity < num_boards || self.sim_input_buffer.is_none() {
+            let new_capacity = num_boards.next_power_of_two().max(256);
+            let input_size = (new_capacity * board_size * std::mem::size_of::<i32>()) as u64;
+            let output_size = (new_capacity * std::mem::size_of::<GpuSimulationResult>()) as u64;
+
+            self.sim_input_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Sim Input"), size: input_size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST, mapped_at_creation: false,
+            }));
+
+            self.sim_output_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Sim Output"), size: output_size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC, mapped_at_creation: false,
+            }));
+
+            self.sim_staging_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Sim Staging"), size: output_size,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST, mapped_at_creation: false,
+            }));
+
+            self.sim_params_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Sim Params"), size: std::mem::size_of::<GpuSimulationParams>() as u64,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST, mapped_at_creation: false,
+            }));
+
+            self.sim_bind_group = Some(self.context.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Sim Bind Group"),
+                layout: &self.context.eval_bind_group_layout,
+                entries: &[
+                    BindGroupEntry { binding: 0, resource: self.sim_input_buffer.as_ref().unwrap().as_entire_binding() },
+                    BindGroupEntry { binding: 1, resource: self.sim_output_buffer.as_ref().unwrap().as_entire_binding() },
+                    BindGroupEntry { binding: 2, resource: self.sim_params_buffer.as_ref().unwrap().as_entire_binding() },
+                ],
+            }));
+            
+            self.sim_capacity = new_capacity;
+        }
     }
 
     pub fn stats(&self) -> (u64, u64, f64) {

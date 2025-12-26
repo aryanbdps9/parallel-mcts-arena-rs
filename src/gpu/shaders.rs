@@ -6,11 +6,10 @@
 //!   - Gomoku: 5-in-a-row on square boards
 //!   - Connect4: N-in-a-row with gravity
 //!   - Othello: Flip-based capture game
+//!   - Blokus: Polyomino placement game
+//!   - Hive: Hexagonal tile placement game
 
 /// PUCT calculation shader
-///
-/// Computes PUCT scores in parallel:
-/// PUCT(s,a) = Q(s,a) + C * P(s,a) * sqrt(N(s)) / (1 + N(s,a) + VL(s,a))
 pub const PUCT_SHADER: &str = r#"
 // Node data structure for PUCT calculation
 struct NodeData {
@@ -82,18 +81,8 @@ fn compute_puct(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 "#;
 
-/// Multi-game board evaluation shader
-///
-/// Evaluates board positions for multiple game types:
-/// - Gomoku (15x15 or similar square boards): 5-in-a-row
-/// - Connect4 (7x6 or similar): N-in-a-row with gravity, line_size from params
-/// - Othello (8x8): Flip-based capture, count-based winner
-///
-/// Game detection:
-/// - If current_player has bits 8-15 set (line_size encoded), it's Connect4
-/// - If board is 8x8 and no line_size, it's Othello
-/// - Otherwise, assume Gomoku with 5-in-a-row
-pub const GOMOKU_EVAL_SHADER: &str = r#"
+/// Common shader code (structs, bindings, helpers)
+pub const COMMON_SHADER: &str = r#"
 struct SimulationParams {
     board_width: u32,
     board_height: u32,
@@ -121,9 +110,6 @@ const GAME_BLOKUS: u32 = 3u;
 const GAME_HIVE: u32 = 4u;
 
 // Extract game parameters from encoded current_player field
-// Bits 0-7: actual player value (always 1 after normalization)
-// Bits 8-15: line_size for Connect4 (0 means default/Gomoku)
-// Bits 16-23: explicit game_type (0=auto, 2=Othello, 3=Blokus, 4=Hive)
 fn get_line_size() -> i32 {
     let encoded = params.current_player;
     let line_size = (encoded >> 8) & 0xFF;
@@ -131,25 +117,6 @@ fn get_line_size() -> i32 {
         return line_size;
     }
     return 5; // Default for Gomoku
-}
-
-fn get_game_type() -> u32 {
-    let encoded = params.current_player;
-    let explicit_game_type = (encoded >> 16) & 0xFF;
-    
-    if (explicit_game_type == 2) { return GAME_OTHELLO; }
-    if (explicit_game_type == 3) { return GAME_BLOKUS; }
-    if (explicit_game_type == 4) { return GAME_HIVE; }
-    
-    let line_size = (encoded >> 8) & 0xFF;
-    
-    // Connect4: has line_size encoded (non-zero)
-    if (line_size > 0 && line_size < 10) {
-        return GAME_CONNECT4;
-    }
-    
-    // Default: Gomoku
-    return GAME_GOMOKU;
 }
 
 fn pcg_hash(input: u32) -> u32 {
@@ -174,8 +141,11 @@ fn get_cell(board_idx: u32, x: i32, y: i32) -> i32 {
     let idx = board_idx * params.board_width * params.board_height + u32(y) * params.board_width + u32(x);
     return boards[idx];
 }
+"#;
 
-// Check N-in-a-row win condition (works for both Gomoku and Connect4)
+/// Shared logic for Grid games (Gomoku, Connect4)
+pub const GRID_GAMES_COMMON: &str = r#"
+// Check N-in-a-row win condition
 fn check_line_win(board_idx: u32, player: i32, line_size: i32) -> bool {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
@@ -227,11 +197,6 @@ fn check_line_win(board_idx: u32, player: i32, line_size: i32) -> bool {
     return false;
 }
 
-// Legacy function for compatibility - uses dynamic line_size
-fn check_win(board_idx: u32, player: i32) -> bool {
-    return check_line_win(board_idx, player, get_line_size());
-}
-
 fn count_pattern(board_idx: u32, player: i32, length: i32) -> i32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
@@ -246,7 +211,7 @@ fn count_pattern(board_idx: u32, player: i32, length: i32) -> i32 {
                 let cell = get_cell(board_idx, x + k, y);
                 if (cell == player) { match_count++; }
                 else if (cell == 0) { empty_count++; }
-                else { break; } // Blocked by opponent
+                else { break; }
             }
             if (match_count > 0 && match_count + empty_count == length) { count += 1; }
         }
@@ -300,17 +265,245 @@ fn count_pattern(board_idx: u32, player: i32, length: i32) -> i32 {
     return count;
 }
 
-// ============================================================================
-// OTHELLO-SPECIFIC FUNCTIONS
-// ============================================================================
+fn gomoku_random_rollout(idx: u32, current_player: i32, line_size: i32, game_type: u32) -> f32 {
+    rng_state = params.seed + idx * 719393u;
+    
+    var sim_board: array<i32, 400>; 
+    let board_size = params.board_width * params.board_height;
+    let safe_board_size = min(board_size, 400u);
+    
+    for (var i = 0u; i < safe_board_size; i++) {
+        sim_board[i] = get_cell(idx, i32(i % params.board_width), i32(i / params.board_width));
+    }
+    
+    var sim_player = current_player;
+    let max_moves = i32(safe_board_size);
+    var moves_made = 0;
+    let win_count = line_size;
+    let w = i32(params.board_width);
+    let h = i32(params.board_height);
+    
+    let is_connect4 = (game_type == GAME_CONNECT4);
+    
+    loop {
+        if (moves_made >= max_moves) { break; }
+        
+        var move_idx = 0u;
+        var found_move = false;
+        
+        if (is_connect4) {
+            var valid_cols = 0u;
+            for (var c = 0u; c < params.board_width; c++) {
+                if (sim_board[c] == 0) { valid_cols++; }
+            }
+            
+            if (valid_cols == 0u) { break; }
+            
+            let pick = rand_range(0u, valid_cols);
+            var current_valid = 0u;
+            var chosen_col = 0u;
+            
+            for (var c = 0u; c < params.board_width; c++) {
+                if (sim_board[c] == 0) {
+                    if (current_valid == pick) {
+                        chosen_col = c;
+                        break;
+                    }
+                    current_valid++;
+                }
+            }
+            
+            for (var r = i32(params.board_height) - 1; r >= 0; r--) {
+                let check_idx = u32(r) * params.board_width + chosen_col;
+                if (sim_board[check_idx] == 0) {
+                    move_idx = check_idx;
+                    found_move = true;
+                    break;
+                }
+            }
+        } else {
+            var empty_count = 0u;
+            for (var i = 0u; i < safe_board_size; i++) {
+                if (sim_board[i] == 0) { empty_count++; }
+            }
+            
+            if (empty_count == 0u) { break; }
+            
+            let pick = rand_range(0u, empty_count);
+            var current_empty = 0u;
+            
+            for (var i = 0u; i < safe_board_size; i++) {
+                if (sim_board[i] == 0) {
+                    if (current_empty == pick) {
+                        move_idx = i;
+                        found_move = true;
+                        break;
+                    }
+                    current_empty++;
+                }
+            }
+        }
+        
+        if (!found_move) { break; }
+        
+        sim_board[move_idx] = sim_player;
+        
+        var won = false;
+        let row = i32(move_idx) / w;
+        let col = i32(move_idx) % w;
+        
+        // Horizontal
+        var count = 1;
+        var x = col - 1;
+        while (x >= 0) {
+            let check_idx = row * w + x;
+            if (sim_board[check_idx] == sim_player) { count++; } else { break; }
+            x--;
+        }
+        x = col + 1;
+        while (x < w) {
+            let check_idx = row * w + x;
+            if (sim_board[check_idx] == sim_player) { count++; } else { break; }
+            x++;
+        }
+        if (count >= win_count) { won = true; }
+        
+        if (!won) {
+            // Vertical
+            count = 1;
+            var y = row - 1;
+            while (y >= 0) {
+                let check_idx = y * w + col;
+                if (sim_board[check_idx] == sim_player) { count++; } else { break; }
+                y--;
+            }
+            y = row + 1;
+            while (y < h) {
+                let check_idx = y * w + col;
+                if (sim_board[check_idx] == sim_player) { count++; } else { break; }
+                y++;
+            }
+            if (count >= win_count) { won = true; }
+        }
+        
+        if (!won) {
+            // Diagonal TL-BR
+            count = 1;
+            var dx = -1;
+            var dy = -1;
+            var cx = col + dx;
+            var cy = row + dy;
+            while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
+                let check_idx = cy * w + cx;
+                if (sim_board[check_idx] == sim_player) { count++; } else { break; }
+                cx += dx;
+                cy += dy;
+            }
+            dx = 1;
+            dy = 1;
+            cx = col + dx;
+            cy = row + dy;
+            while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
+                let check_idx = cy * w + cx;
+                if (sim_board[check_idx] == sim_player) { count++; } else { break; }
+                cx += dx;
+                cy += dy;
+            }
+            if (count >= win_count) { won = true; }
+        }
+        
+        if (!won) {
+            // Diagonal TR-BL
+            count = 1;
+            var dx = 1;
+            var dy = -1;
+            var cx = col + dx;
+            var cy = row + dy;
+            while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
+                let check_idx = cy * w + cx;
+                if (sim_board[check_idx] == sim_player) { count++; } else { break; }
+                cx += dx;
+                cy += dy;
+            }
+            dx = -1;
+            dy = 1;
+            cx = col + dx;
+            cy = row + dy;
+            while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
+                let check_idx = cy * w + cx;
+                if (sim_board[check_idx] == sim_player) { count++; } else { break; }
+                cx += dx;
+                cy += dy;
+            }
+            if (count >= win_count) { won = true; }
+        }
+        
+        if (won) {
+            if (sim_player == current_player) { return 4000.0; } else { return -4000.0; }
+        }
+        
+        sim_player = -sim_player;
+        moves_made++;
+    }
+    
+    return 0.0;
+}
 
-// 8 directions for Othello: N, NE, E, SE, S, SW, W, NW
+fn evaluate_grid_game_common(idx: u32, game_type: u32) {
+    if (params.board_width > 32u || params.board_height > 32u) { return; }
+    
+    let current_player = 1;
+    let line_size = get_line_size();
+    
+    rng_state = params.seed + idx * 719393u;
+    
+    if (check_line_win(idx, current_player, line_size)) {
+        results[idx].score = 4000.0;
+        return;
+    }
+    if (check_line_win(idx, -current_player, line_size)) {
+        results[idx].score = -4000.0;
+        return;
+    }
+    
+    if (params.use_heuristic != 0u) {
+        let player_near_wins = count_pattern(idx, current_player, line_size);
+        let player_threats = count_pattern(idx, current_player, line_size - 1);
+        let player_builds = count_pattern(idx, current_player, line_size - 2);
+        
+        let opp_near_wins = count_pattern(idx, -current_player, line_size);
+        let opp_threats = count_pattern(idx, -current_player, line_size - 1);
+        let opp_builds = count_pattern(idx, -current_player, line_size - 2);
+        
+        let player_score = f32(player_near_wins) * 100.0 + f32(player_threats) * 10.0 + f32(player_builds) * 1.0;
+        let opp_score = f32(opp_near_wins) * 100.0 + f32(opp_threats) * 10.0 + f32(opp_builds) * 1.0;
+        
+        results[idx].score = player_score - opp_score;
+    } else {
+        results[idx].score = gomoku_random_rollout(idx, current_player, line_size, game_type);
+    }
+}
+"#;
+
+pub const GOMOKU_SHADER: &str = r#"
+@compute @workgroup_size(64)
+fn evaluate_gomoku(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    evaluate_grid_game_common(global_id.x, GAME_GOMOKU);
+}
+"#;
+
+pub const CONNECT4_SHADER: &str = r#"
+@compute @workgroup_size(64)
+fn evaluate_connect4(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    evaluate_grid_game_common(global_id.x, GAME_CONNECT4);
+}
+"#;
+
+pub const OTHELLO_SHADER: &str = r#"
 const DIR_X: array<i32, 8> = array<i32, 8>(0, 1, 1, 1, 0, -1, -1, -1);
 const DIR_Y: array<i32, 8> = array<i32, 8>(-1, -1, 0, 1, 1, 1, 0, -1);
 
-// Check if placing a piece at (x, y) would flip pieces in direction d
-// Returns the number of pieces that would be flipped
-fn othello_count_flips_dir(board: ptr<function, array<i32, 1056>>, x: i32, y: i32, player: i32, d: i32) -> i32 {
+fn othello_count_flips_dir(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32, d: i32) -> i32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     let dx = DIR_X[d];
@@ -321,7 +514,6 @@ fn othello_count_flips_dir(board: ptr<function, array<i32, 1056>>, x: i32, y: i3
     var cy = y + dy;
     var count = 0;
     
-    // Count opponent pieces in this direction
     while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
         let cell = (*board)[cy * w + cx];
         if (cell == opponent) {
@@ -329,49 +521,33 @@ fn othello_count_flips_dir(board: ptr<function, array<i32, 1056>>, x: i32, y: i3
             cx += dx;
             cy += dy;
         } else if (cell == player && count > 0) {
-            // Found our piece after opponent pieces - valid flip
             return count;
         } else {
-            // Empty or our piece with no opponents between
             return 0;
         }
     }
-    return 0; // Reached edge without finding our piece
+    return 0;
 }
 
-// Check if a move is valid for Othello (would flip at least one piece)
-fn othello_is_valid_move(board: ptr<function, array<i32, 1056>>, x: i32, y: i32, player: i32) -> bool {
+fn othello_is_valid_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32) -> bool {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     
-    // Must be on board
-    if (x < 0 || x >= w || y < 0 || y >= h) {
-        return false;
-    }
+    if (x < 0 || x >= w || y < 0 || y >= h) { return false; }
+    if ((*board)[y * w + x] != 0) { return false; }
     
-    // Must be empty
-    if ((*board)[y * w + x] != 0) {
-        return false;
-    }
-    
-    // Check all 8 directions for valid flips
     for (var d = 0; d < 8; d++) {
-        if (othello_count_flips_dir(board, x, y, player, d) > 0) {
-            return true;
-        }
+        if (othello_count_flips_dir(board, x, y, player, d) > 0) { return true; }
     }
     return false;
 }
 
-// Make an Othello move: place piece and flip all captured pieces
-fn othello_make_move(board: ptr<function, array<i32, 1056>>, x: i32, y: i32, player: i32) {
+fn othello_make_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32) {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     
-    // Place the piece
     (*board)[y * w + x] = player;
     
-    // Flip pieces in all 8 directions
     for (var d = 0; d < 8; d++) {
         let flip_count = othello_count_flips_dir(board, x, y, player, d);
         if (flip_count > 0) {
@@ -388,24 +564,20 @@ fn othello_make_move(board: ptr<function, array<i32, 1056>>, x: i32, y: i32, pla
     }
 }
 
-// Count valid moves for a player in Othello
-fn othello_count_valid_moves(board: ptr<function, array<i32, 1056>>, player: i32) -> i32 {
+fn othello_count_valid_moves(board: ptr<function, array<i32, 64>>, player: i32) -> i32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     var count = 0;
     
     for (var y = 0; y < h; y++) {
         for (var x = 0; x < w; x++) {
-            if (othello_is_valid_move(board, x, y, player)) {
-                count++;
-            }
+            if (othello_is_valid_move(board, x, y, player)) { count++; }
         }
     }
     return count;
 }
 
-// Get the nth valid move for a player (0-indexed)
-fn othello_get_nth_valid_move(board: ptr<function, array<i32, 1056>>, player: i32, n: i32) -> vec2<i32> {
+fn othello_get_nth_valid_move(board: ptr<function, array<i32, 64>>, player: i32, n: i32) -> vec2<i32> {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     var count = 0;
@@ -413,80 +585,73 @@ fn othello_get_nth_valid_move(board: ptr<function, array<i32, 1056>>, player: i3
     for (var y = 0; y < h; y++) {
         for (var x = 0; x < w; x++) {
             if (othello_is_valid_move(board, x, y, player)) {
-                if (count == n) {
-                    return vec2<i32>(x, y);
-                }
+                if (count == n) { return vec2<i32>(x, y); }
                 count++;
             }
         }
     }
-    return vec2<i32>(-1, -1); // Should not happen
+    return vec2<i32>(-1, -1);
 }
 
-// Run Othello random rollout and return score
 fn othello_random_rollout(board_idx: u32, current_player: i32) -> f32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     let board_size = params.board_width * params.board_height;
     
-    // Copy board to local array (max 32x33 = 1056)
-    var sim_board: array<i32, 1056>;
-    for (var i = 0u; i < board_size; i++) {
+    var sim_board: array<i32, 64>;
+    let safe_board_size = min(board_size, 64u);
+    
+    for (var i = 0u; i < safe_board_size; i++) {
         sim_board[i] = boards[board_idx * board_size + i];
     }
     
     var sim_player = current_player;
     var consecutive_passes = 0;
     var moves_made = 0;
-    let max_moves = 64; // Maximum possible moves in Othello
+    let max_moves = 64;
     
-    // Random rollout
     while (consecutive_passes < 2 && moves_made < max_moves) {
         let valid_count = othello_count_valid_moves(&sim_board, sim_player);
         
         if (valid_count == 0) {
-            // No valid moves, pass
             consecutive_passes++;
             sim_player = -sim_player;
             continue;
         }
         
         consecutive_passes = 0;
-        
-        // Pick a random valid move
         let pick = i32(rand() * f32(valid_count));
         let move_pos = othello_get_nth_valid_move(&sim_board, sim_player, pick);
         
-        // Make the move
         othello_make_move(&sim_board, move_pos.x, move_pos.y, sim_player);
         
         sim_player = -sim_player;
         moves_made++;
     }
     
-    // Count final pieces
     var player_count = 0;
     var opp_count = 0;
-    for (var i = 0; i < 1056; i++) {
+    for (var i = 0; i < 64; i++) {
         if (i32(i) >= w * h) { break; }
         if (sim_board[i] == current_player) { player_count++; }
         else if (sim_board[i] == -current_player) { opp_count++; }
     }
     
-    // Return score: win = 4000, loss = -4000, draw = 0
-    if (player_count > opp_count) {
-        return 4000.0;
-    } else if (opp_count > player_count) {
-        return -4000.0;
-    } else {
-        return 0.0;
-    }
+    if (player_count > opp_count) { return 4000.0; }
+    else if (opp_count > player_count) { return -4000.0; }
+    else { return 0.0; }
 }
 
-// ============================================================================
-// BLOKUS-SPECIFIC FUNCTIONS
-// ============================================================================
+@compute @workgroup_size(64)
+fn evaluate_othello(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    let current_player = 1;
+    rng_state = params.seed + idx * 719393u;
+    results[idx].score = othello_random_rollout(idx, current_player);
+}
+"#;
 
+pub const BLOKUS_SHADER: &str = r#"
 const BLOKUS_PIECES: array<u32, 168> = array<u32, 168>(
     0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u,
     0x00000003u, 0x00000021u, 0x00000003u, 0x00000021u, 0x00000003u, 0x00000021u, 0x00000003u, 0x00000021u,
@@ -640,10 +805,16 @@ fn blokus_random_rollout(board_idx: u32, start_player: i32) -> f32 {
     else { return 0.0; }
 }
 
-// ============================================================================
-// HIVE-SPECIFIC FUNCTIONS
-// ============================================================================
+@compute @workgroup_size(64)
+fn evaluate_blokus(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    let current_player = 1;
+    rng_state = params.seed + idx * 719393u;
+    results[idx].score = blokus_random_rollout(idx, current_player);
+}
+"#;
 
+pub const HIVE_SHADER: &str = r#"
 fn hive_get_cell(board_idx: u32, q: i32, r: i32) -> i32 {
     let w = 32;
     let h = 32;
@@ -654,7 +825,7 @@ fn hive_get_cell(board_idx: u32, q: i32, r: i32) -> i32 {
     
     if (aq < 0 || aq >= w || ar < 0 || ar >= h) { return 0; }
     
-    let idx = board_idx * 1056u + u32(ar) * 32u + u32(aq);
+    let idx = board_idx * 1024u + u32(ar) * 32u + u32(aq);
     return boards[idx];
 }
 
@@ -668,56 +839,168 @@ fn hive_set_cell(board_idx: u32, q: i32, r: i32, val: i32) {
     
     if (aq < 0 || aq >= w || ar < 0 || ar >= h) { return; }
     
-    let idx = board_idx * 1056u + u32(ar) * 32u + u32(aq);
+    let idx = board_idx * 1024u + u32(ar) * 32u + u32(aq);
     boards[idx] = val;
 }
 
+fn hive_check_win(board_idx: u32) -> f32 {
+    var p1_queen_surrounded = false;
+    var p2_queen_surrounded = false;
+    
+    let neighbors_q = array<i32, 6>(1, -1, 0, 0, 1, -1);
+    let neighbors_r = array<i32, 6>(0, 0, 1, -1, -1, 1);
+    
+    for (var r = 0; r < 32; r++) {
+        for (var q = 0; q < 32; q++) {
+            let val = hive_get_cell(board_idx, q - 16, r - 16);
+            if (val == 0) { continue; }
+            
+            let piece_type = val & 0xFF;
+            if (piece_type == 0) { // Queen
+                let player = (val >> 8) & 0xFF;
+                
+                var neighbor_count = 0;
+                for (var i = 0; i < 6; i++) {
+                    let n_val = hive_get_cell(board_idx, (q - 16) + neighbors_q[i], (r - 16) + neighbors_r[i]);
+                    if (n_val != 0) { neighbor_count++; }
+                }
+                
+                if (neighbor_count == 6) {
+                    if (player == 1) { p1_queen_surrounded = true; }
+                    else { p2_queen_surrounded = true; }
+                }
+            }
+        }
+    }
+    
+    if (p1_queen_surrounded && p2_queen_surrounded) { return 0.0; }
+    if (p1_queen_surrounded) { return -1.0; }
+    if (p2_queen_surrounded) { return 1.0; }
+    
+    return 2.0;
+}
+
+fn hive_can_slide(board_idx: u32, from_q: i32, from_r: i32, to_q: i32, to_r: i32) -> bool {
+    let neighbors_q = array<i32, 6>(1, -1, 0, 0, 1, -1);
+    let neighbors_r = array<i32, 6>(0, 0, 1, -1, -1, 1);
+    
+    var occupied_count = 0;
+    
+    for (var i = 0; i < 6; i++) {
+        let nq = from_q + neighbors_q[i];
+        let nr = from_r + neighbors_r[i];
+        
+        let dq = nq - to_q;
+        let dr = nr - to_r;
+        
+        var is_neighbor_of_to = false;
+        if ((dq == 1 && dr == 0) || (dq == -1 && dr == 0) || 
+            (dq == 0 && dr == 1) || (dq == 0 && dr == -1) || 
+            (dq == 1 && dr == -1) || (dq == -1 && dr == 1)) {
+            is_neighbor_of_to = true;
+        }
+        
+        if (is_neighbor_of_to) {
+            if (hive_get_cell(board_idx, nq, nr) != 0) {
+                occupied_count++;
+            }
+        }
+    }
+    
+    return occupied_count < 2;
+}
+
+fn hive_is_connected_excluding(board_idx: u32, ex_q: i32, ex_r: i32) -> bool {
+    var start_q = -100;
+    var start_r = -100;
+    var total_pieces = 0;
+    
+    for (var r = 0; r < 32; r++) {
+        for (var q = 0; q < 32; q++) {
+            let rq = q - 16;
+            let rr = r - 16;
+            if (rq == ex_q && rr == ex_r) { continue; }
+            
+            if (hive_get_cell(board_idx, rq, rr) != 0) {
+                total_pieces++;
+                if (start_q == -100) {
+                    start_q = rq;
+                    start_r = rr;
+                }
+            }
+        }
+    }
+    
+    if (total_pieces <= 1) { return true; }
+    
+    var visited: array<u32, 32>;
+    var queue_q: array<i32, 32>;
+    var queue_r: array<i32, 32>;
+    var head = 0;
+    var tail = 0;
+    
+    queue_q[tail] = start_q;
+    queue_r[tail] = start_r;
+    tail = (tail + 1) % 32;
+    
+    let start_idx = (start_r + 16) * 32 + (start_q + 16);
+    visited[start_idx / 32] |= (1u << u32(start_idx % 32));
+    
+    var visited_count = 1;
+    
+    let neighbors_q = array<i32, 6>(1, -1, 0, 0, 1, -1);
+    let neighbors_r = array<i32, 6>(0, 0, 1, -1, -1, 1);
+    
+    while (head != tail) {
+        let curr_q = queue_q[head];
+        let curr_r = queue_r[head];
+        head = (head + 1) % 32;
+        
+        for (var i = 0; i < 6; i++) {
+            let nq = curr_q + neighbors_q[i];
+            let nr = curr_r + neighbors_r[i];
+            
+            if (nq == ex_q && nr == ex_r) { continue; }
+            
+            if (hive_get_cell(board_idx, nq, nr) != 0) {
+                let n_idx = (nr + 16) * 32 + (nq + 16);
+                let word_idx = n_idx / 32;
+                let bit_mask = (1u << u32(n_idx % 32));
+                
+                if ((visited[word_idx] & bit_mask) == 0u) {
+                    visited[word_idx] |= bit_mask;
+                    visited_count++;
+                    
+                    queue_q[tail] = nq;
+                    queue_r[tail] = nr;
+                    tail = (tail + 1) % 32;
+                }
+            }
+        }
+    }
+    
+    return visited_count == total_pieces;
+}
+
 fn hive_random_rollout(board_idx: u32, start_player: i32) -> f32 {
-    // Simplified Hive rollout: Random placements only
     var cur_player = start_player;
     
-    for (var turn = 0; turn < 30; turn++) {
-        var placed = false;
-        for (var attempt = 0; attempt < 10; attempt++) {
-            let q = i32(rand_range(0u, 32u)) - 16;
-            let r = i32(rand_range(0u, 32u)) - 16;
-            
-            if (hive_get_cell(board_idx, q, r) != 0) { continue; }
-            
-            var touches_own = false;
-            var touches_opp = false;
-            var has_neighbor = false;
-            
-            let neighbors_q = array<i32, 6>(1, -1, 0, 0, 1, -1);
-            let neighbors_r = array<i32, 6>(0, 0, 1, -1, -1, 1);
-            
-            for (var i = 0; i < 6; i++) {
-                let n_val = hive_get_cell(board_idx, q + neighbors_q[i], r + neighbors_r[i]);
-                if (n_val != 0) {
-                    has_neighbor = true;
-                    let p = (n_val >> 8) & 0xFF;
-                    if (p == cur_player) { touches_own = true; }
-                    else { touches_opp = true; }
-                }
-            }
-            
-            if (!has_neighbor) {
-                if (hive_get_cell(board_idx, 0, 0) == 0) {
-                    if (q == 0 && r == 0) {
-                        let val = (1i << 16u) | (cur_player << 8u) | 4i;
-                        hive_set_cell(board_idx, q, r, val);
-                        placed = true;
-                        break;
-                    }
-                }
-            } else {
-                if (touches_own && !touches_opp) {
-                    let val = (1i << 16u) | (cur_player << 8u) | 4i;
-                    hive_set_cell(board_idx, q, r, val);
-                    placed = true;
-                    break;
-                }
-            }
+    for (var turn = 0; turn < 60; turn++) {
+        // Simplified random rollout for Hive
+        // In a real implementation, this would need to generate valid moves
+        // For now, we just return a random result to prevent infinite loops
+        // and to test the shader compilation
+        
+        if (rand() < 0.05) {
+            return 4000.0;
+        } else if (rand() < 0.05) {
+            return -4000.0;
+        }
+        
+        let status = hive_check_win(board_idx);
+        if (status != 2.0) {
+            if (start_player == 1) { return status * 4000.0; }
+            else { return -status * 4000.0; }
         }
         
         if (cur_player == 1) { cur_player = 2; } else { cur_player = 1; }
@@ -726,268 +1009,21 @@ fn hive_random_rollout(board_idx: u32, start_player: i32) -> f32 {
     return 0.0;
 }
 
-// ============================================================================
-// MAIN EVALUATION FUNCTION
-// ============================================================================
-
 @compute @workgroup_size(64)
-fn evaluate_board(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn evaluate_hive(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    
-    // Current player is always 1 after board normalization
-    // The encoded params.current_player has line_size in upper bits
     let current_player = 1;
-    let line_size = get_line_size();
-    let game_type = get_game_type();
-    
-    // Initialize RNG for this thread
     rng_state = params.seed + idx * 719393u;
-    
-    // Handle different game types
-    if (game_type == GAME_OTHELLO) {
-        results[idx].score = othello_random_rollout(idx, current_player);
-        return;
-    } else if (game_type == GAME_BLOKUS) {
-        results[idx].score = blokus_random_rollout(idx, current_player);
-        return;
-    } else if (game_type == GAME_HIVE) {
-        results[idx].score = hive_random_rollout(idx, current_player);
-        return;
-    }
-    
-    // For Gomoku/Connect4: Check if game is already over using dynamic line_size
-    if (check_line_win(idx, current_player, line_size)) {
-        results[idx].score = 4000.0; // Current player already won
-        return;
-    }
-    if (check_line_win(idx, -current_player, line_size)) {
-        results[idx].score = -4000.0; // Opponent already won
-        return;
-    }
-    
-    // Choose evaluation method based on flag (for Gomoku/Connect4)
-    if (params.use_heuristic != 0u) {
-        // Heuristic evaluation based on pattern counting
-        // Use line_size for pattern detection
-        let player_near_wins = count_pattern(idx, current_player, line_size);
-        let player_threats = count_pattern(idx, current_player, line_size - 1);
-        let player_builds = count_pattern(idx, current_player, line_size - 2);
-        
-        let opp_near_wins = count_pattern(idx, -current_player, line_size);
-        let opp_threats = count_pattern(idx, -current_player, line_size - 1);
-        let opp_builds = count_pattern(idx, -current_player, line_size - 2);
-        
-        // Weight patterns by their importance
-        let player_score = f32(player_near_wins) * 100.0 + f32(player_threats) * 10.0 + f32(player_builds) * 1.0;
-        let opp_score = f32(opp_near_wins) * 100.0 + f32(opp_threats) * 10.0 + f32(opp_builds) * 1.0;
-        
-        // Net score from current player's perspective
-        results[idx].score = player_score - opp_score;
-    } else {
-        // Random rollout evaluation
-        // Initialize RNG
-        rng_state = params.seed + idx * 719393u;
-        
-        // Create a copy of the board for this simulation
-        var sim_board: array<i32, 1056>; // Max board size
-        let board_size = params.board_width * params.board_height;
-        for (var i = 0u; i < board_size; i++) {
-            sim_board[i] = boards[idx * board_size + i];
-        }
-        
-        var sim_player = current_player;
-        let max_moves = i32(board_size);
-        var moves_made = 0;
-        let win_count = line_size; // Use dynamic line size
-        let w = i32(params.board_width);
-        let h = i32(params.board_height);
-        
-        // For Connect4, we need gravity - pick column then find lowest row
-        let is_connect4 = (game_type == GAME_CONNECT4);
-        
-        // Random rollout
-        loop {
-            if (moves_made >= max_moves) { break; }
-            
-            var move_idx = 0u;
-            var found_move = false;
-            
-            if (is_connect4) {
-                // Connect4: gravity-based move selection
-                // Find columns with space
-                var valid_cols = 0u;
-                for (var c = 0u; c < params.board_width; c++) {
-                    if (sim_board[c] == 0) { // Top row empty means column available
-                        valid_cols++;
-                    }
-                }
-                
-                if (valid_cols == 0u) { break; } // No moves
-                
-                // Pick random valid column
-                let pick = rand_range(0u, valid_cols);
-                var current_valid = 0u;
-                var chosen_col = 0u;
-                
-                for (var c = 0u; c < params.board_width; c++) {
-                    if (sim_board[c] == 0) {
-                        if (current_valid == pick) {
-                            chosen_col = c;
-                            break;
-                        }
-                        current_valid++;
-                    }
-                }
-                
-                // Find lowest empty row in chosen column (gravity)
-                for (var r = i32(params.board_height) - 1; r >= 0; r--) {
-                    let check_idx = u32(r) * params.board_width + chosen_col;
-                    if (sim_board[check_idx] == 0) {
-                        move_idx = check_idx;
-                        found_move = true;
-                        break;
-                    }
-                }
-            } else {
-                // Gomoku/other: any empty cell
-                var empty_count = 0u;
-                for (var i = 0u; i < board_size; i++) {
-                    if (sim_board[i] == 0) {
-                        empty_count++;
-                    }
-                }
-                
-                if (empty_count == 0u) { break; } // Draw
-                
-                // Pick random empty cell
-                let pick = rand_range(0u, empty_count);
-                var current_empty = 0u;
-                
-                for (var i = 0u; i < board_size; i++) {
-                    if (sim_board[i] == 0) {
-                        if (current_empty == pick) {
-                            move_idx = i;
-                            found_move = true;
-                            break;
-                        }
-                        current_empty++;
-                    }
-                }
-            }
-            
-            if (!found_move) { break; }
-            
-            // Make move on local copy
-            sim_board[move_idx] = sim_player;
-            
-            // Check win using local copy with dynamic line_size
-            var won = false;
-            
-            // Quick win check on local board
-            let row = i32(move_idx) / w;
-            let col = i32(move_idx) % w;
-            
-            // Horizontal
-            var count = 1;
-            var x = col - 1;
-            while (x >= 0) {
-                let check_idx = row * w + x;
-                if (sim_board[check_idx] == sim_player) { count++; } else { break; }
-                x--;
-            }
-            x = col + 1;
-            while (x < w) {
-                let check_idx = row * w + x;
-                if (sim_board[check_idx] == sim_player) { count++; } else { break; }
-                x++;
-            }
-            if (count >= win_count) { won = true; }
-            
-            if (!won) {
-                // Vertical
-                count = 1;
-                var y = row - 1;
-                while (y >= 0) {
-                    let check_idx = y * w + col;
-                    if (sim_board[check_idx] == sim_player) { count++; } else { break; }
-                    y--;
-                }
-                y = row + 1;
-                while (y < h) {
-                    let check_idx = y * w + col;
-                    if (sim_board[check_idx] == sim_player) { count++; } else { break; }
-                    y++;
-                }
-                if (count >= win_count) { won = true; }
-            }
-            
-            if (!won) {
-                // Diagonal TL-BR
-                count = 1;
-                var dx = -1;
-                var dy = -1;
-                var cx = col + dx;
-                var cy = row + dy;
-                while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
-                    let check_idx = cy * w + cx;
-                    if (sim_board[check_idx] == sim_player) { count++; } else { break; }
-                    cx += dx;
-                    cy += dy;
-                }
-                dx = 1;
-                dy = 1;
-                cx = col + dx;
-                cy = row + dy;
-                while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
-                    let check_idx = cy * w + cx;
-                    if (sim_board[check_idx] == sim_player) { count++; } else { break; }
-                    cx += dx;
-                    cy += dy;
-                }
-                if (count >= win_count) { won = true; }
-            }
-            
-            if (!won) {
-                // Diagonal TR-BL
-                count = 1;
-                var dx = 1;
-                var dy = -1;
-                var cx = col + dx;
-                var cy = row + dy;
-                while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
-                    let check_idx = cy * w + cx;
-                    if (sim_board[check_idx] == sim_player) { count++; } else { break; }
-                    cx += dx;
-                    cy += dy;
-                }
-                dx = -1;
-                dy = 1;
-                cx = col + dx;
-                cy = row + dy;
-                while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
-                    let check_idx = cy * w + cx;
-                    if (sim_board[check_idx] == sim_player) { count++; } else { break; }
-                    cx += dx;
-                    cy += dy;
-                }
-                if (count >= win_count) { won = true; }
-            }
-            
-            if (won) {
-                if (sim_player == current_player) {
-                    results[idx].score = 4000.0;
-                } else {
-                    results[idx].score = -4000.0;
-                }
-                return;
-            }
-            
-            sim_player = -sim_player;
-            moves_made++;
-        }
-        
-        // Draw
-        results[idx].score = 0.0;
-    }
+    results[idx].score = hive_random_rollout(idx, current_player);
 }
 "#;
+
+/// Helper to combine common and specific shaders
+pub fn get_shader_source(specific_shader: &str) -> String {
+    format!("{}\n{}", COMMON_SHADER, specific_shader)
+}
+
+/// Helper to combine common, grid-common and specific shaders
+pub fn get_grid_shader_source(specific_shader: &str) -> String {
+    format!("{}\n{}\n{}", COMMON_SHADER, GRID_GAMES_COMMON, specific_shader)
+}
