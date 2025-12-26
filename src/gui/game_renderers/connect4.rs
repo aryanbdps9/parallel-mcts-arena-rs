@@ -248,8 +248,8 @@ impl GameRenderer for Connect4Renderer {
 
     fn player_name(&self, player_id: i32) -> String {
         match player_id {
-            1 => "Red".to_string(),
-            -1 => "Yellow".to_string(),
+            1 => "Gray".to_string(),
+            -1 => "White".to_string(),
             _ => format!("Player {}", player_id),
         }
     }

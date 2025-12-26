@@ -10,7 +10,7 @@ horizontally, vertically, or diagonally.
 GAMEPLAY
 ────────
 • Players take turns dropping discs into columns
-• Player 1 uses 🔴 (red), Player 2 uses 🟡 (yellow)
+• Player 1 uses (Gray), Player 2 uses (White)
 • Discs fall to the lowest available position in a column
 • Current board: {BOARD_HEIGHT} rows × {BOARD_WIDTH} columns
 
