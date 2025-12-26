@@ -18,6 +18,7 @@ use windows::{
             CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, IDC_SIZEWE, MSG,
             SW_SHOW, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
             WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+            WM_RBUTTONDOWN, WM_RBUTTONUP,
             SetTimer, KillTimer, SetCursor,
         },
         UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_TAB, VK_SPACE, VK_BACK, VK_PRIOR, VK_NEXT, SetCapture, ReleaseCapture},
@@ -83,7 +84,11 @@ pub fn run_gui(app: GuiApp) -> windows::core::Result<()> {
         )?;
 
         // Create renderer
-        let renderer = Renderer::new(hwnd)?;
+        let mut renderer = Renderer::new(hwnd)?;
+        
+        // Load Hive SVG icons
+        load_hive_svgs(&mut renderer);
+        
         RENDERER.with(|r| {
             *r.borrow_mut() = Some(renderer);
         });
@@ -222,6 +227,41 @@ unsafe extern "system" fn window_proc(
             });
             unsafe { let _ = ReleaseCapture(); }
             unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+            LRESULT(0)
+        }
+
+        WM_RBUTTONDOWN => {
+            let x = (lparam.0 & 0xFFFF) as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as f32;
+            
+            let capture = APP_STATE.with(|state| {
+                if let Some(app) = state.borrow().as_ref() {
+                    let mut app = app.borrow_mut();
+                    if matches!(app.mode, GuiMode::InGame) {
+                        app.is_right_dragging = true;
+                        app.last_drag_pos = Some((x, y));
+                        return true;
+                    }
+                }
+                false
+            });
+
+            if capture {
+                unsafe { let _ = SetCapture(hwnd); }
+            }
+            LRESULT(0)
+        }
+
+        WM_RBUTTONUP => {
+            APP_STATE.with(|state| {
+                if let Some(app) = state.borrow().as_ref() {
+                    let mut app = app.borrow_mut();
+                    app.is_right_dragging = false;
+                    app.last_drag_pos = None;
+                }
+            });
+            
+            unsafe { let _ = ReleaseCapture(); }
             LRESULT(0)
         }
 
@@ -652,6 +692,25 @@ fn handle_mouse_move(app: &mut GuiApp, _renderer: &Renderer, x: f32, y: f32, wid
     let mut show_resize_cursor = false;
 
     if app.mode == GuiMode::InGame {
+        // Handle right-drag for tilt adjustment
+        if app.is_right_dragging {
+            if let Some((last_x, last_y)) = app.last_drag_pos {
+                let dx = x - last_x;
+                let dy = y - last_y;
+                
+                // Update last position
+                app.last_drag_pos = Some((x, y));
+                
+                // Send drag event to game renderer
+                let board_area = get_board_area(app, width, height);
+                let input = GameInput::Drag { dx, dy };
+                if let InputResult::Redraw = app.game_renderer.handle_input(input, &app.game, board_area) {
+                    needs_redraw = true;
+                }
+            }
+            return (needs_redraw, show_resize_cursor);
+        }
+        
         // Handle splitter dragging
         if app.is_dragging_splitter {
             let game_area = get_game_area(width, height);
@@ -1269,6 +1328,23 @@ fn get_info_area(app: &GuiApp, width: f32, height: f32) -> Rect {
 fn get_tab_area(app: &GuiApp, width: f32, height: f32) -> Rect {
     let info_area = get_info_area(app, width, height);
     Rect::new(info_area.x, info_area.y, info_area.width, 35.0)
+}
+
+/// Load all Hive SVG icons into the renderer cache
+fn load_hive_svgs(renderer: &mut Renderer) {
+    // SVG content for each Hive piece
+    const QUEEN_SVG: &str = include_str!("../../assets/hive/queen.svg");
+    const BEETLE_SVG: &str = include_str!("../../assets/hive/beetle.svg");
+    const SPIDER_SVG: &str = include_str!("../../assets/hive/spider.svg");
+    const GRASSHOPPER_SVG: &str = include_str!("../../assets/hive/grasshopper.svg");
+    const ANT_SVG: &str = include_str!("../../assets/hive/ant.svg");
+    
+    // Load each SVG with a 100x100 viewport (matching the SVG viewBox)
+    let _ = renderer.load_svg("hive_queen", QUEEN_SVG, 100.0, 100.0);
+    let _ = renderer.load_svg("hive_beetle", BEETLE_SVG, 100.0, 100.0);
+    let _ = renderer.load_svg("hive_spider", SPIDER_SVG, 100.0, 100.0);
+    let _ = renderer.load_svg("hive_grasshopper", GRASSHOPPER_SVG, 100.0, 100.0);
+    let _ = renderer.load_svg("hive_ant", ANT_SVG, 100.0, 100.0);
 }
 
 

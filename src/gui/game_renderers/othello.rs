@@ -7,16 +7,20 @@ use crate::games::othello::OthelloMove;
 use crate::gui::colors::{Colors, player_color};
 use crate::gui::renderer::{Rect, Renderer};
 use mcts::GameState;
-use super::{GameInput, GameRenderer, InputResult, grid};
+use super::{GameInput, GameRenderer, InputResult, grid, RotatableBoard};
 
 /// Renderer for Othello game
 pub struct OthelloRenderer {
     hover_cell: Option<(usize, usize)>,
+    board_view: RotatableBoard,
 }
 
 impl OthelloRenderer {
     pub fn new() -> Self {
-        Self { hover_cell: None }
+        Self {
+            hover_cell: None,
+            board_view: RotatableBoard::new(),
+        }
     }
 }
 
@@ -27,9 +31,13 @@ impl GameRenderer for OthelloRenderer {
         let board_size = board.len();
 
         let layout = grid::calculate_grid_layout(area, board_size, 20.0);
+        let board_rect = layout.board_rect();
+        let (center_x, center_y) = board_rect.center();
+        
+        // Apply board rotation/tilt transforms
+        self.board_view.begin_draw(renderer, center_x, center_y);
 
         // Draw board background (green felt)
-        let board_rect = layout.board_rect();
         let green_bg = windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
             r: 0.76, g: 0.60, b: 0.42, a: 1.0,
         };
@@ -95,6 +103,9 @@ impl GameRenderer for OthelloRenderer {
                 renderer.fill_ellipse(cx, cy, radius, radius, Colors::HIGHLIGHT);
             }
         }
+        
+        // End board transform
+        self.board_view.end_draw(renderer);
     }
 
     fn handle_input(
@@ -107,10 +118,21 @@ impl GameRenderer for OthelloRenderer {
         let board = game.get_board();
         let board_size = board.len();
         let layout = grid::calculate_grid_layout(area, board_size, 20.0);
+        let board_rect = layout.board_rect();
+        let (center_x, center_y) = board_rect.center();
+
+        // Handle board rotation/tilt drag
+        if let Some(result) = self.board_view.handle_input(&input) {
+            return result;
+        }
 
         match input {
             GameInput::Click { x, y } => {
-                if let Some((row, col)) = layout.screen_to_cell(x, y) {
+                // Transform screen coordinates to local board coordinates
+                let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
+                let board_x = center_x + lx;
+                let board_y = center_y + ly;
+                if let Some((row, col)) = layout.screen_to_cell(board_x, board_y) {
                     let mv = MoveWrapper::Othello(OthelloMove(row, col));
                     if game.is_legal(&mv) {
                         return InputResult::Move(mv);
@@ -119,7 +141,11 @@ impl GameRenderer for OthelloRenderer {
                 InputResult::None
             }
             GameInput::Hover { x, y } => {
-                let new_hover = layout.screen_to_cell(x, y);
+                // Transform screen coordinates to local board coordinates
+                let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
+                let board_x = center_x + lx;
+                let board_y = center_y + ly;
+                let new_hover = layout.screen_to_cell(board_x, board_y);
                 if new_hover != self.hover_cell {
                     self.hover_cell = new_hover;
                     return InputResult::Redraw;
@@ -127,6 +153,7 @@ impl GameRenderer for OthelloRenderer {
                 InputResult::None
             }
             GameInput::Key { .. } => InputResult::None,
+            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } => InputResult::None,
         }
     }
 
@@ -148,5 +175,6 @@ impl GameRenderer for OthelloRenderer {
 
     fn reset(&mut self) {
         self.hover_cell = None;
+        self.board_view.reset_view();
     }
 }

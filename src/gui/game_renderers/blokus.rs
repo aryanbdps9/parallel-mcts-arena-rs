@@ -8,7 +8,7 @@ use crate::games::blokus::{BlokusMove, BlokusState, get_blokus_pieces, Piece};
 use crate::gui::colors::Colors;
 use crate::gui::renderer::{Rect, Renderer};
 use mcts::GameState;
-use super::{GameInput, GameRenderer, InputResult, grid};
+use super::{GameInput, GameRenderer, InputResult, grid, RotatableBoard};
 use std::collections::HashSet;
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
@@ -103,6 +103,8 @@ pub struct BlokusRenderer {
     keyboard_mode: bool,
     /// Panel areas for hit testing (recalculated each render)
     piece_button_rects: Vec<(usize, Rect)>,  // (piece_id, rect)
+    /// Rotatable board view component
+    board_view: RotatableBoard,
 }
 
 impl BlokusRenderer {
@@ -116,6 +118,7 @@ impl BlokusRenderer {
             piece_panel_scroll: 0,
             keyboard_mode: false,
             piece_button_rects: Vec::new(),
+            board_view: RotatableBoard::new(),
         }
     }
 
@@ -352,6 +355,11 @@ impl GameRenderer for BlokusRenderer {
 
         // Draw board background
         let board_rect = layout.board_rect();
+        let (center_x, center_y) = board_rect.center();
+        
+        // Apply board rotation/tilt transforms
+        self.board_view.begin_draw(renderer, center_x, center_y);
+        
         renderer.fill_rect(board_rect.inset(-3.0), Colors::PANEL_BG);
 
         // Draw checkerboard pattern for empty cells
@@ -475,6 +483,9 @@ impl GameRenderer for BlokusRenderer {
                 renderer.draw_rect(cell, cursor_color, 2.0);
             }
         }
+        
+        // End board transform before drawing side panels
+        self.board_view.end_draw(renderer);
 
         // Side panel layout
         let panel_x = board_area.x + board_available + 15.0;
@@ -595,16 +606,28 @@ impl GameRenderer for BlokusRenderer {
         let board_available = (area.height).min(area.width - side_panel_width - 20.0);
         let board_area = Rect::new(area.x + 10.0, area.y + 10.0, board_available, board_available);
         let layout = grid::calculate_grid_layout(board_area, board_size, 5.0);
+        let board_rect = layout.board_rect();
+        let (center_x, center_y) = board_rect.center();
 
         // Piece panel area
         let panel_x = board_area.x + board_available + 15.0;
         let piece_panel_y = area.y + 10.0 + 140.0;
         let piece_panel_area = Rect::new(panel_x, piece_panel_y, side_panel_width, area.height - 160.0);
 
+        // Handle board rotation/tilt drag
+        if let Some(result) = self.board_view.handle_input(&input) {
+            return result;
+        }
+
         match input {
             GameInput::Click { x, y } => {
+                // Transform screen coordinates to local board coordinates
+                let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
+                let board_x = center_x + lx;
+                let board_y = center_y + ly;
+                
                 // Check if click is on board
-                if let Some((row, col)) = layout.screen_to_cell(x, y) {
+                if let Some((row, col)) = layout.screen_to_cell(board_x, board_y) {
                     self.keyboard_mode = false;
                     self.hover_cell = Some((row, col));
 
@@ -658,7 +681,11 @@ impl GameRenderer for BlokusRenderer {
 
             GameInput::Hover { x, y } => {
                 if !self.keyboard_mode {
-                    let new_hover = layout.screen_to_cell(x, y);
+                    // Transform screen coordinates to local board coordinates
+                    let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
+                    let board_x = center_x + lx;
+                    let board_y = center_y + ly;
+                    let new_hover = layout.screen_to_cell(board_x, board_y);
                     if new_hover != self.hover_cell {
                         self.hover_cell = new_hover;
                         return InputResult::Redraw;
@@ -755,6 +782,7 @@ impl GameRenderer for BlokusRenderer {
                     _ => InputResult::None,
                 }
             }
+            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } => InputResult::None,
         }
     }
 
@@ -784,5 +812,6 @@ impl GameRenderer for BlokusRenderer {
         self.piece_panel_scroll = 0;
         self.keyboard_mode = false;
         self.piece_button_rects.clear();
+        self.board_view.reset_view();
     }
 }

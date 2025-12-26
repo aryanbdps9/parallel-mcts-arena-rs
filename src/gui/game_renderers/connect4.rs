@@ -7,16 +7,20 @@ use crate::games::connect4::Connect4Move;
 use crate::gui::colors::{Colors, player_color};
 use crate::gui::renderer::{Rect, Renderer};
 use mcts::GameState;
-use super::{GameInput, GameRenderer, InputResult};
+use super::{GameInput, GameRenderer, InputResult, RotatableBoard};
 
 /// Renderer for Connect4 game
 pub struct Connect4Renderer {
     hover_column: Option<usize>,
+    board_view: RotatableBoard,
 }
 
 impl Connect4Renderer {
     pub fn new() -> Self {
-        Self { hover_column: None }
+        Self {
+            hover_column: None,
+            board_view: RotatableBoard::new(),
+        }
     }
 
     fn calculate_layout(&self, area: Rect, rows: usize, cols: usize) -> Connect4Layout {
@@ -87,9 +91,13 @@ impl GameRenderer for Connect4Renderer {
         let cols = if rows > 0 { board[0].len() } else { 7 };
 
         let layout = self.calculate_layout(area, rows, cols);
+        let board_rect = layout.board_rect();
+        let (center_x, center_y) = board_rect.center();
+
+        // Apply board rotation/tilt transforms
+        self.board_view.begin_draw(renderer, center_x, center_y);
 
         // Draw board background (blue frame)
-        let board_rect = layout.board_rect();
         renderer.fill_rounded_rect(board_rect.inset(-10.0), 10.0, Colors::BUTTON_SELECTED);
 
         // Draw cells with holes
@@ -141,6 +149,9 @@ impl GameRenderer for Connect4Renderer {
                 renderer.fill_ellipse(cx, cy, radius, radius, Colors::HIGHLIGHT);
             }
         }
+
+        // End board transform
+        self.board_view.end_draw(renderer);
     }
 
     fn handle_input(
@@ -154,10 +165,22 @@ impl GameRenderer for Connect4Renderer {
         let rows = board.len();
         let cols = if rows > 0 { board[0].len() } else { 7 };
         let layout = self.calculate_layout(area, rows, cols);
+        let board_rect = layout.board_rect();
+        let (center_x, center_y) = board_rect.center();
+
+        // Handle board rotation/tilt drag
+        if let Some(result) = self.board_view.handle_input(&input) {
+            return result;
+        }
 
         match input {
             GameInput::Click { x, y } => {
-                if let Some(col) = layout.screen_to_column(x, y) {
+                // Transform screen coordinates to local board coordinates
+                let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
+                // Add center back to get board-space coordinates
+                let board_x = center_x + lx;
+                let board_y = center_y + ly;
+                if let Some(col) = layout.screen_to_column(board_x, board_y) {
                     // Check if column has space
                     if board[0][col] == 0 {
                         let mv = MoveWrapper::Connect4(Connect4Move(col));
@@ -169,7 +192,11 @@ impl GameRenderer for Connect4Renderer {
                 InputResult::None
             }
             GameInput::Hover { x, y } => {
-                let new_hover = layout.screen_to_column(x, y).filter(|&col| board[0][col] == 0);
+                // Transform screen coordinates to local board coordinates
+                let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
+                let board_x = center_x + lx;
+                let board_y = center_y + ly;
+                let new_hover = layout.screen_to_column(board_x, board_y).filter(|&col| board[0][col] == 0);
                 if new_hover != self.hover_column {
                     self.hover_column = new_hover;
                     return InputResult::Redraw;
@@ -177,6 +204,7 @@ impl GameRenderer for Connect4Renderer {
                 InputResult::None
             }
             GameInput::Key { .. } => InputResult::None,
+            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } => InputResult::None,
         }
     }
 
@@ -198,5 +226,6 @@ impl GameRenderer for Connect4Renderer {
 
     fn reset(&mut self) {
         self.hover_column = None;
+        self.board_view.reset_view();
     }
 }

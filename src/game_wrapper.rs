@@ -44,6 +44,7 @@
 use crate::games::blokus::{BlokusMove, BlokusState}; // Multi-player territory game
 use crate::games::connect4::{Connect4Move, Connect4State}; // Gravity-based 4-in-a-row game
 use crate::games::gomoku::{GomokuMove, GomokuState}; // Classic 5-in-a-row game
+use crate::games::hive::{HiveMove, HiveState}; // Hex-based insect strategy game
 use crate::games::othello::{OthelloMove, OthelloState}; // Reversi/Othello territory game
 use mcts::GameState; // Core trait for MCTS compatibility
 use std::fmt; // Formatting traits for display
@@ -106,6 +107,15 @@ pub enum GameWrapper {
     /// - Complex positional evaluation
     /// - Classic AI testbed with well-understood strategy
     Othello(OthelloState),
+
+    /// Hive game state
+    ///
+    /// Strategic two-player game with hexagonal insect tiles.
+    /// No board - pieces form the playing surface.
+    /// - Each piece type has unique movement abilities
+    /// - Win by surrounding opponent's Queen Bee
+    /// - High branching factor with complex movement rules
+    Hive(HiveState),
 }
 
 /// Wrapper enum for all supported move types
@@ -154,6 +164,12 @@ pub enum MoveWrapper {
     /// Contains (row, col) coordinates, but move execution automatically
     /// calculates and performs all necessary piece captures in all directions.
     Othello(OthelloMove),
+
+    /// Hive move: placement or movement of insect tiles
+    ///
+    /// Can be a placement of a new piece from hand or movement of an
+    /// existing piece on the board. Movement rules vary by piece type.
+    Hive(HiveMove),
 }
 
 impl fmt::Display for MoveWrapper {
@@ -166,6 +182,7 @@ impl fmt::Display for MoveWrapper {
             MoveWrapper::Connect4(m) => write!(f, "C4({})", m.0),
             MoveWrapper::Blokus(m) => write!(f, "B({})", m),
             MoveWrapper::Othello(m) => write!(f, "O({},{})", m.0, m.1),
+            MoveWrapper::Hive(m) => write!(f, "H({})", m),
         }
     }
 }
@@ -180,6 +197,7 @@ impl fmt::Display for GameWrapper {
             GameWrapper::Connect4(g) => write!(f, "{}", g),
             GameWrapper::Blokus(g) => write!(f, "{}", g),
             GameWrapper::Othello(g) => write!(f, "{}", g),
+            GameWrapper::Hive(g) => write!(f, "{}", g),
         }
     }
 }
@@ -268,4 +286,4 @@ macro_rules! impl_game_dispatch {
     };
 }
 
-impl_game_dispatch!(Gomoku, Connect4, Blokus, Othello);
+impl_game_dispatch!(Gomoku, Connect4, Blokus, Othello, Hive);

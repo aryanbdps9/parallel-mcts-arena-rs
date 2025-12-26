@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Ant - Three body segments with 6 legs and antennae -->
+  <!-- Abdomen (back, largest) -->
+  <ellipse cx="70" cy="55" rx="18" ry="22" fill="#0080CC"/>
+  <!-- Thorax (middle) -->
+  <ellipse cx="45" cy="50" rx="12" ry="10" fill="#0080CC"/>
+  <!-- Head (front) -->
+  <ellipse cx="25" cy="48" rx="14" ry="12" fill="#0080CC"/>
+  <!-- Eyes -->
+  <circle cx="18" cy="44" r="4" fill="#1a1a1a"/>
+  <!-- Mandibles -->
+  <path d="M15 55 Q8 60 5 58" stroke="#006699" stroke-width="3" stroke-linecap="round" fill="none"/>
+  <path d="M18 57 Q12 65 8 62" stroke="#006699" stroke-width="3" stroke-linecap="round" fill="none"/>
+  <!-- Antennae (bent) -->
+  <path d="M20 38 L15 25 L5 22" stroke="#0080CC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M25 36 L22 22 L15 18" stroke="#0080CC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Front legs -->
+  <path d="M30 55 L22 72 L18 80" stroke="#0080CC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M35 55 L30 70 L25 80" stroke="#0080CC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Middle legs -->
+  <path d="M45 55 L42 72 L38 82" stroke="#0080CC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M50 55 L52 72 L55 82" stroke="#0080CC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Back legs -->
+  <path d="M60 58 L58 75 L55 85" stroke="#0080CC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M65 60 L70 75 L75 85" stroke="#0080CC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Petiole (waist between thorax and abdomen) -->
+  <ellipse cx="55" cy="52" rx="4" ry="5" fill="#0080CC"/>
+</svg>

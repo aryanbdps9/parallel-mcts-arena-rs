@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Spider - Two body segments with 8 legs -->
+  <!-- Abdomen (large, back) -->
+  <ellipse cx="55" cy="60" rx="22" ry="25" fill="#800080"/>
+  <!-- Cephalothorax (front) -->
+  <ellipse cx="45" cy="35" rx="15" ry="15" fill="#800080"/>
+  <!-- Eyes (8 eyes in 2 rows) -->
+  <circle cx="38" cy="30" r="3" fill="#ff3333"/>
+  <circle cx="52" cy="30" r="3" fill="#ff3333"/>
+  <circle cx="42" cy="25" r="2" fill="#ff3333"/>
+  <circle cx="48" cy="25" r="2" fill="#ff3333"/>
+  <!-- Legs - 4 pairs, bent -->
+  <!-- Front left legs -->
+  <path d="M35 35 Q20 25 10 15" fill="none" stroke="#800080" stroke-width="4" stroke-linecap="round"/>
+  <path d="M35 40 Q18 35 5 30" fill="none" stroke="#800080" stroke-width="4" stroke-linecap="round"/>
+  <!-- Back left legs -->
+  <path d="M40 55 Q22 60 8 70" fill="none" stroke="#800080" stroke-width="4" stroke-linecap="round"/>
+  <path d="M45 65 Q25 75 10 88" fill="none" stroke="#800080" stroke-width="4" stroke-linecap="round"/>
+  <!-- Front right legs -->
+  <path d="M55 35 Q70 25 85 15" fill="none" stroke="#800080" stroke-width="4" stroke-linecap="round"/>
+  <path d="M55 40 Q72 35 90 30" fill="none" stroke="#800080" stroke-width="4" stroke-linecap="round"/>
+  <!-- Back right legs -->
+  <path d="M65 55 Q78 60 92 70" fill="none" stroke="#800080" stroke-width="4" stroke-linecap="round"/>
+  <path d="M65 65 Q78 75 92 88" fill="none" stroke="#800080" stroke-width="4" stroke-linecap="round"/>
+  <!-- Chelicerae (fangs) -->
+  <path d="M42 45 L38 52" stroke="#4d004d" stroke-width="3" stroke-linecap="round"/>
+  <path d="M48 45 L52 52" stroke="#4d004d" stroke-width="3" stroke-linecap="round"/>
+</svg>

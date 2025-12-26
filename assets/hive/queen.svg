@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Queen Bee - Crown and striped body -->
+  <!-- Body (oval) -->
+  <ellipse cx="50" cy="55" rx="25" ry="20" fill="#FFD700"/>
+  <!-- Stripes -->
+  <ellipse cx="50" cy="48" rx="22" ry="4" fill="#1a1a1a"/>
+  <ellipse cx="50" cy="62" rx="22" ry="4" fill="#1a1a1a"/>
+  <!-- Head -->
+  <ellipse cx="50" cy="30" rx="12" ry="10" fill="#FFD700"/>
+  <!-- Crown -->
+  <path d="M38 20 L42 28 L50 15 L58 28 L62 20" fill="none" stroke="#FFA500" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Crown jewels -->
+  <circle cx="38" cy="18" r="3" fill="#FF6347"/>
+  <circle cx="50" cy="12" r="4" fill="#FF6347"/>
+  <circle cx="62" cy="18" r="3" fill="#FF6347"/>
+  <!-- Wings -->
+  <ellipse cx="28" cy="50" rx="15" ry="22" fill="rgba(200,220,255,0.5)" stroke="#aac" stroke-width="1"/>
+  <ellipse cx="72" cy="50" rx="15" ry="22" fill="rgba(200,220,255,0.5)" stroke="#aac" stroke-width="1"/>
+  <!-- Antennae -->
+  <path d="M45 22 Q40 10 35 8" fill="none" stroke="#1a1a1a" stroke-width="2" stroke-linecap="round"/>
+  <path d="M55 22 Q60 10 65 8" fill="none" stroke="#1a1a1a" stroke-width="2" stroke-linecap="round"/>
+</svg>
