@@ -603,7 +603,7 @@ fn handle_key(app: &mut GuiApp, vk: u16, hwnd: HWND) -> bool {
                     app.how_to_play_scroll = 0;
                 }
             } else if vk == VK_RIGHT.0 {
-                if app.selected_how_to_play_game < 3 {
+                if app.selected_how_to_play_game < 4 {
                     app.selected_how_to_play_game += 1;
                     app.how_to_play_scroll = 0;
                 }
@@ -781,7 +781,7 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32, width: f32, height: f32) -> (b
         }
         GuiMode::HowToPlay => {
             // Check game tab clicks
-            let games = ["Gomoku", "Connect4", "Othello", "Blokus"];
+            let games = ["Gomoku", "Connect4", "Othello", "Blokus", "Hive"];
             for (i, _) in games.iter().enumerate() {
                 let tab_rect = get_how_to_play_tab_rect(i, width, height);
                 if tab_rect.contains(x, y) {
@@ -1081,7 +1081,7 @@ fn render_how_to_play(renderer: &Renderer, app: &GuiApp) {
     renderer.draw_title("How To Play", title_rect, Colors::TEXT_PRIMARY, true);
     
     // Game tabs
-    let games = ["Gomoku", "Connect4", "Othello", "Blokus"];
+    let games = ["Gomoku", "Connect4", "Othello", "Blokus", "Hive"];
     for (i, name) in games.iter().enumerate() {
         let tab_rect = get_how_to_play_tab_rect(i, client.width, client.height);
         let is_selected = i == app.selected_how_to_play_game;
@@ -1179,6 +1179,19 @@ fn get_game_instructions(game_index: usize) -> String {
               • Use larger pieces early\n\
               • Block opponent's expansion paths\n\
               • Keep options open in multiple directions".to_string(),
+        4 => "HIVE\n\n\
+              Objective: Completely surround the opponent's Queen Bee.\n\n\
+              Rules:\n\
+              • Place tiles adjacent to your own pieces (except first move)\n\
+              • Queen Bee must be placed by turn 4\n\
+              • Pieces move only after Queen is placed\n\
+              • Hive must remain connected at all times\n\n\
+              Piece Movements:\n\
+              • Queen: 1 space\n\
+              • Beetle: 1 space, can climb on top\n\
+              • Spider: Exactly 3 spaces\n\
+              • Grasshopper: Jumps over pieces\n\
+              • Ant: Any number of spaces around edge".to_string(),
         _ => "Select a game to see instructions.".to_string(),
     }
 }
@@ -1516,7 +1529,7 @@ fn get_game_area(width: f32, height: f32) -> Rect {
 }
 
 fn get_how_to_play_tab_rect(index: usize, width: f32, _height: f32) -> Rect {
-    let tab_width = (width - 40.0) / 4.0;
+    let tab_width = (width - 40.0) / 5.0;
     let tab_height = 40.0;
     let x = 20.0 + index as f32 * tab_width;
     let y = 80.0;
