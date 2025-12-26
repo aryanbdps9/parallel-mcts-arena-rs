@@ -17,7 +17,7 @@ gpu = ["wgpu", "bytemuck", "pollster", "futures"]
 
 [build-dependencies]
 spirv-builder = "0.9.0"
-naga = { version = "=0.13.0", features = ["wgsl-in"] }
+naga = { version = "=0.13.0", features = ["wgsl-in", "spv-in", "wgsl-out"] }
 
 # Runtime Dependencies
 [dependencies]

@@ -9,21 +9,28 @@
 //!   - Blokus: Polyomino placement game
 //!   - Hive: Hexagonal tile placement game
 
-/// PUCT calculation shader
-pub const PUCT_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/puct.wgsl"));
+use super::embedded_wgsl;
 
-pub const GOMOKU_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/gomoku.wgsl"));
-
-// Connect4 now uses Rust-GPU SPIR-V shader instead of WGSL
-#[allow(dead_code)]
+/// Connect4 evaluation shader (generated at build time from rust-gpu SPIR-V)
 pub const CONNECT4_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/connect4.wgsl"));
 
-pub const OTHELLO_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/othello.wgsl"));
+/// PUCT calculation shader (embedded WGSL)
+pub fn puct_wgsl() -> &'static str {
+	embedded_wgsl::puct_wgsl()
+}
 
-pub const BLOKUS_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/blokus.wgsl"));
+pub fn gomoku_wgsl() -> &'static str {
+	embedded_wgsl::gomoku_wgsl()
+}
 
-pub const HIVE_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/hive.wgsl"));
+pub fn othello_wgsl() -> &'static str {
+	embedded_wgsl::othello_wgsl()
+}
 
-/// Compiled SPIR-V shader module containing all kernels
-/// Generated from crates/mcts-shaders
-pub const SHADER_MODULE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcts_shaders.spv"));
+pub fn blokus_wgsl() -> &'static str {
+	embedded_wgsl::blokus_wgsl()
+}
+
+pub fn hive_wgsl() -> &'static str {
+	embedded_wgsl::hive_wgsl()
+}
