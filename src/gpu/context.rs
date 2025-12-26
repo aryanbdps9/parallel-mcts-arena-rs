@@ -10,6 +10,8 @@ use wgpu::{
     PipelineLayoutDescriptor, ComputePipelineDescriptor, Maintain,
 };
 use std::sync::Arc;
+use std::env;
+use std::borrow::Cow;
 
 use super::GpuConfig;
 use super::shaders;
@@ -64,11 +66,12 @@ impl GpuContext {
     /// * `Ok(GpuContext)` if initialization succeeds
     /// * `Err(GpuError)` if initialization fails
     pub fn new(config: &GpuConfig) -> Result<Self, GpuError> {
-        // Create instance with all backends enabled
-        let instance = Instance::new(InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        // Choose backend(s). On Windows, prefer DX12 first to avoid hitting
+        // Naga's SPIR-V backend at runtime (WGSL->SPIR-V), which can panic for
+        // some generated shaders.
+        //
+        // Override with `MCTS_WGPU_BACKEND=dx12|vulkan|all` if needed.
+        let override_backend = env::var("MCTS_WGPU_BACKEND").ok();
 
         // Request adapter with specified power preference
         let power_preference = if config.prefer_high_performance {
@@ -77,12 +80,50 @@ impl GpuContext {
             PowerPreference::LowPower
         };
 
-        let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions {
+        let request_options = RequestAdapterOptions {
             power_preference,
             compatible_surface: None,
             force_fallback_adapter: false,
-        }))
-        .ok_or_else(|| GpuError::NoAdapter("No suitable GPU adapter found".to_string()))?;
+        };
+
+        let mut try_backends: Vec<wgpu::Backends> = Vec::new();
+        match override_backend.as_deref() {
+            Some("dx12") => try_backends.push(wgpu::Backends::DX12),
+            Some("vulkan") => try_backends.push(wgpu::Backends::VULKAN),
+            Some("all") => try_backends.push(wgpu::Backends::all()),
+            Some(other) => {
+                eprintln!("Unknown MCTS_WGPU_BACKEND='{other}', falling back to defaults");
+            }
+            None => {}
+        }
+
+        if try_backends.is_empty() {
+            if cfg!(windows) {
+                // Vulkan first (we can load SPIR-V directly), then fall back.
+                try_backends.push(wgpu::Backends::VULKAN);
+                try_backends.push(wgpu::Backends::all());
+            } else {
+                try_backends.push(wgpu::Backends::all());
+            }
+        }
+
+        let mut adapter: Option<wgpu::Adapter> = None;
+        let mut instance: Option<Instance> = None;
+        for backends in try_backends {
+            let inst = Instance::new(InstanceDescriptor {
+                backends,
+                ..Default::default()
+            });
+
+            if let Some(a) = pollster::block_on(inst.request_adapter(&request_options)) {
+                adapter = Some(a);
+                instance = Some(inst);
+                break;
+            }
+        }
+
+        let _instance = instance.ok_or_else(|| GpuError::NoAdapter("No suitable GPU adapter found".to_string()))?;
+        let adapter = adapter.unwrap();
 
         let adapter_info = adapter.get_info();
         
@@ -109,69 +150,84 @@ impl GpuContext {
         let limits = device.limits();
         let max_buffer_size = limits.max_buffer_size;
 
-        // Compile shaders
-        let puct_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PUCT Shader"),
-            source: wgpu::ShaderSource::Wgsl(shaders::puct_wgsl().into()),
-        });
+        // Compile shaders.
+        // On Vulkan, prefer feeding validated rust-gpu SPIR-V directly to avoid
+        // runtime WGSL->SPIR-V codegen (which can panic inside Naga).
+        let mcts_shader = match adapter_info.backend {
+            wgpu::Backend::Vulkan => {
+                let bytes = shaders::MCTS_SHADERS_SPV;
+                if bytes.len() % 4 != 0 {
+                    return Err(GpuError::DeviceRequest("Invalid SPIR-V byte length".to_string()));
+                }
+
+                let mut words = Vec::with_capacity(bytes.len() / 4);
+                for chunk in bytes.chunks_exact(4) {
+                    words.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("MCTS Shaders (rust-gpu SPIR-V)"),
+                    source: wgpu::ShaderSource::SpirV(Cow::Owned(words)),
+                })
+            }
+            _ => device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("MCTS Shaders (generated WGSL)"),
+                source: wgpu::ShaderSource::Wgsl(shaders::MCTS_SHADERS_WGSL.into()),
+            }),
+        };
 
         // Create bind group layouts
         let puct_bind_group_layout = Self::create_puct_bind_group_layout(&device);
         let eval_bind_group_layout = Self::create_eval_bind_group_layout(&device);
 
         // Create pipelines
+        // NOTE: Each pipeline uses its own bind group 0 layout.
         let puct_pipeline = Self::create_compute_pipeline(
             &device,
-            &puct_shader,
+            &mcts_shader,
             "compute_puct",
-            &puct_bind_group_layout,
+            &[&puct_bind_group_layout],
             "PUCT Pipeline",
         );
 
-        // Helper closure to create game pipelines
-        let create_game_pipeline = |source: &str, entry: &str, name: &str| -> ComputePipeline {
-            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(&format!("{} Shader", name)),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            });
-            Self::create_compute_pipeline(
-                &device,
-                &shader,
-                entry,
-                &eval_bind_group_layout,
-                &format!("{} Pipeline", name),
-            )
-        };
-
-        let gomoku_eval_pipeline = create_game_pipeline(
-            shaders::gomoku_wgsl(),
+        let gomoku_eval_pipeline = Self::create_compute_pipeline(
+            &device,
+            &mcts_shader,
             "evaluate_gomoku",
-            "Gomoku Eval"
+            &[&eval_bind_group_layout],
+            "Gomoku Eval Pipeline",
         );
 
-        // Connect4 kernel is authored in rust-gpu and translated to WGSL in build.rs.
-        let connect4_eval_pipeline = create_game_pipeline(
-            shaders::CONNECT4_SHADER,
+        let connect4_eval_pipeline = Self::create_compute_pipeline(
+            &device,
+            &mcts_shader,
             "evaluate_connect4",
-            "Connect4 Eval (generated WGSL)"
+            &[&eval_bind_group_layout],
+            "Connect4 Eval Pipeline",
         );
 
-        let othello_eval_pipeline = create_game_pipeline(
-            shaders::othello_wgsl(),
+        let othello_eval_pipeline = Self::create_compute_pipeline(
+            &device,
+            &mcts_shader,
             "evaluate_othello",
-            "Othello Eval"
+            &[&eval_bind_group_layout],
+            "Othello Eval Pipeline",
         );
 
-        let blokus_eval_pipeline = create_game_pipeline(
-            shaders::blokus_wgsl(),
+        let blokus_eval_pipeline = Self::create_compute_pipeline(
+            &device,
+            &mcts_shader,
             "evaluate_blokus",
-            "Blokus Eval"
+            &[&eval_bind_group_layout],
+            "Blokus Eval Pipeline",
         );
 
-        let hive_eval_pipeline = create_game_pipeline(
-            shaders::hive_wgsl(),
+        let hive_eval_pipeline = Self::create_compute_pipeline(
+            &device,
+            &mcts_shader,
             "evaluate_hive",
-            "Hive Eval"
+            &[&eval_bind_group_layout],
+            "Hive Eval Pipeline",
         );
 
         Ok(Self {
@@ -274,12 +330,12 @@ impl GpuContext {
         device: &Device,
         shader: &ShaderModule,
         entry_point: &str,
-        bind_group_layout: &BindGroupLayout,
+        bind_group_layouts: &[&BindGroupLayout],
         label: &str,
     ) -> ComputePipeline {
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some(&format!("{} Layout", label)),
-            bind_group_layouts: &[bind_group_layout],
+            bind_group_layouts,
             push_constant_ranges: &[],
         });
 

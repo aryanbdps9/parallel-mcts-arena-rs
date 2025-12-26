@@ -9,28 +9,10 @@
 //!   - Blokus: Polyomino placement game
 //!   - Hive: Hexagonal tile placement game
 
-use super::embedded_wgsl;
+/// Generated WGSL module (rust-gpu SPIR-V translated to WGSL at build time)
+///
+/// This module contains all compute entry points used by the runtime.
+pub const MCTS_SHADERS_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/mcts_shaders.wgsl"));
 
-/// Connect4 evaluation shader (generated at build time from rust-gpu SPIR-V)
-pub const CONNECT4_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/connect4.wgsl"));
-
-/// PUCT calculation shader (embedded WGSL)
-pub fn puct_wgsl() -> &'static str {
-	embedded_wgsl::puct_wgsl()
-}
-
-pub fn gomoku_wgsl() -> &'static str {
-	embedded_wgsl::gomoku_wgsl()
-}
-
-pub fn othello_wgsl() -> &'static str {
-	embedded_wgsl::othello_wgsl()
-}
-
-pub fn blokus_wgsl() -> &'static str {
-	embedded_wgsl::blokus_wgsl()
-}
-
-pub fn hive_wgsl() -> &'static str {
-	embedded_wgsl::hive_wgsl()
-}
+/// Generated SPIR-V module (rust-gpu output, validated at build time)
+pub const MCTS_SHADERS_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mcts_shaders.spv"));

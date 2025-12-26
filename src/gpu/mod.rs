@@ -16,7 +16,6 @@
 mod context;
 mod accelerator;
 mod shaders;
-mod embedded_wgsl;
 
 pub use context::GpuContext;
 pub use accelerator::{GpuMctsAccelerator, GpuNodeData, GpuPuctResult, GpuSimulationParams};

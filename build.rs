@@ -16,7 +16,7 @@ fn main() {
     println!("cargo::rerun-if-changed=crates/mcts-shared/src");
 
     // Build SPIR-V shaders (rust-gpu)
-    // We then translate selected entry points to WGSL for wgpu compatibility.
+    // We then translate the full module to WGSL for wgpu compatibility.
     let result = SpirvBuilder::new("crates/mcts-shaders", "spirv-unknown-spv1.5")
         .print_metadata(MetadataPrintout::None)
         .build()
@@ -25,14 +25,30 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir);
 
-    // Convert rust-gpu SPIR-V -> WGSL for Connect4
+    // Convert rust-gpu SPIR-V -> WGSL for all kernels
     let spv_path = result.module.unwrap_single();
     let spv_bytes = fs::read(&spv_path).expect("Failed to read rust-gpu SPIR-V module");
-    let mut connect4_wgsl = spirv_to_wgsl(&spv_bytes).expect("Failed to convert rust-gpu SPIR-V -> WGSL");
-    normalize_generated_entry_points(&mut connect4_wgsl);
-    validate_generated_wgsl("connect4.wgsl (generated)", &connect4_wgsl);
-    fs::write(out_path.join("connect4.wgsl"), connect4_wgsl)
-        .expect("Failed to write generated connect4.wgsl to OUT_DIR");
+
+    // Also ship the validated SPIR-V alongside the generated WGSL.
+    fs::write(out_path.join("mcts_shaders.spv"), &spv_bytes)
+        .expect("Failed to write mcts_shaders.spv to OUT_DIR");
+
+    // Naga's SPIR-V parsing/validation and WGSL emission can be stack-hungry on Windows.
+    // Run it on a thread with a larger stack to avoid build-script stack overflow.
+    let module_wgsl = std::thread::Builder::new()
+        .name("naga_spv_to_wgsl".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let mut wgsl = spirv_to_wgsl(&spv_bytes).expect("Failed to convert rust-gpu SPIR-V -> WGSL");
+            normalize_generated_entry_points(&mut wgsl);
+            validate_generated_wgsl("mcts_shaders.wgsl (generated)", &wgsl);
+            wgsl
+        })
+        .expect("Failed to spawn naga conversion thread")
+        .join()
+        .expect("naga conversion thread panicked");
+    fs::write(out_path.join("mcts_shaders.wgsl"), module_wgsl)
+        .expect("Failed to write generated mcts_shaders.wgsl to OUT_DIR");
 }
 
 fn spirv_to_wgsl(spv_bytes: &[u8]) -> Result<String, String> {
@@ -68,7 +84,7 @@ fn spirv_to_wgsl(spv_bytes: &[u8]) -> Result<String, String> {
 fn normalize_generated_entry_points(wgsl: &mut String) {
     // Naga may append an underscore to exported entry points to avoid collisions.
     // We normalize any entry-point function `name_` -> `name` so the runtime can
-    // consistently refer to `evaluate_*` across all games.
+    // consistently refer to stable entry point names.
     //
     // We only rewrite the function that immediately follows a stage attribute.
     let mut out = String::with_capacity(wgsl.len());

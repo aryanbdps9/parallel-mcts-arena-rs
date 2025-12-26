@@ -51,8 +51,7 @@ pub struct GpuPuctResult {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuParams {
-    num_elements: u32,
-    _reserved: [u32; 3],
+    data: [u32; 4],
 }
 
 /// Parameters for game board evaluation
@@ -176,7 +175,7 @@ impl GpuMctsAccelerator {
         self.context.queue().write_buffer(input_buffer, 0, bytemuck::cast_slice(nodes));
 
         // Create params buffer
-        let params = GpuParams { num_elements: num_nodes as u32, _reserved: [0; 3] };
+        let params = GpuParams { data: [num_nodes as u32, 0, 0, 0] };
         let params_buffer = self.context.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("PUCT Params"),
             contents: bytemuck::bytes_of(&params),
