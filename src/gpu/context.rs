@@ -145,31 +145,31 @@ impl GpuContext {
         };
 
         let gomoku_eval_pipeline = create_game_pipeline(
-            shaders::get_grid_shader_source(shaders::GOMOKU_SHADER),
+            shaders::GOMOKU_SHADER.to_string(),
             "evaluate_gomoku",
             "Gomoku Eval"
         );
 
         let connect4_eval_pipeline = create_game_pipeline(
-            shaders::get_grid_shader_source(shaders::CONNECT4_SHADER),
+            shaders::CONNECT4_SHADER.to_string(),
             "evaluate_connect4",
             "Connect4 Eval"
         );
 
         let othello_eval_pipeline = create_game_pipeline(
-            shaders::get_shader_source(shaders::OTHELLO_SHADER),
+            shaders::OTHELLO_SHADER.to_string(),
             "evaluate_othello",
             "Othello Eval"
         );
 
         let blokus_eval_pipeline = create_game_pipeline(
-            shaders::get_shader_source(shaders::BLOKUS_SHADER),
+            shaders::BLOKUS_SHADER.to_string(),
             "evaluate_blokus",
             "Blokus Eval"
         );
 
         let hive_eval_pipeline = create_game_pipeline(
-            shaders::get_shader_source(shaders::HIVE_SHADER),
+            shaders::HIVE_SHADER.to_string(),
             "evaluate_hive",
             "Hive Eval"
         );

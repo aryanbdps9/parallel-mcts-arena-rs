@@ -424,6 +424,34 @@ impl GameRenderer for BlokusRenderer {
             }
         }
 
+        // Draw coordinates
+        for row in 0..board_size {
+            for col in 0..board_size {
+                let cell_rect = layout.cell_rect(row, col);
+                let font_size = layout.cell_size / 8.0;
+                let coord_text = format!("{},{}", row, col);
+                let cell_value = board[row][col];
+                
+                let text_color = if cell_value != 0 {
+                    if cell_value == 2 || cell_value == 4 {
+                        Colors::PLAYER_1 // Black
+                    } else {
+                        Colors::TEXT_PRIMARY // White
+                    }
+                } else {
+                    Colors::TEXT_SECONDARY
+                };
+                
+                renderer.draw_text_with_size(
+                    &coord_text,
+                    cell_rect,
+                    text_color,
+                    font_size,
+                    true
+                );
+            }
+        }
+
         // Highlight last move
         if let Some(last_moves) = state.get_last_move() {
             for (r, c) in last_moves {
@@ -486,6 +514,13 @@ impl GameRenderer for BlokusRenderer {
         
         // End board transform before drawing side panels
         self.board_view.end_draw(renderer);
+
+        // Draw Reset Zoom button if zoomed
+        if (self.board_view.scale() - 1.0).abs() > 0.01 {
+            let reset_rect = Rect::new(board_area.x + board_area.width - 110.0, board_area.y + 10.0, 100.0, 30.0);
+            renderer.fill_rounded_rect(reset_rect, 4.0, Colors::BUTTON_BG);
+            renderer.draw_text("Reset Zoom", reset_rect, Colors::TEXT_PRIMARY, true);
+        }
 
         // Side panel layout
         let panel_x = board_area.x + board_available + 15.0;
@@ -615,12 +650,22 @@ impl GameRenderer for BlokusRenderer {
         let piece_panel_area = Rect::new(panel_x, piece_panel_y, side_panel_width, area.height - 160.0);
 
         // Handle board rotation/tilt drag
-        if let Some(result) = self.board_view.handle_input(&input) {
+        if let Some(result) = self.board_view.handle_input(&input, center_x, center_y) {
             return result;
         }
 
         match input {
             GameInput::Click { x, y } => {
+                // Check Reset Zoom button
+                if (self.board_view.scale() - 1.0).abs() > 0.01 {
+                    let reset_rect = Rect::new(board_area.x + board_area.width - 110.0, board_area.y + 10.0, 100.0, 30.0);
+                    if x >= reset_rect.x && x <= reset_rect.x + reset_rect.width &&
+                       y >= reset_rect.y && y <= reset_rect.y + reset_rect.height {
+                        self.board_view.reset_zoom();
+                        return InputResult::Redraw;
+                    }
+                }
+
                 // Transform screen coordinates to local board coordinates
                 let (lx, ly) = self.board_view.screen_to_local(x, y, center_x, center_y);
                 let board_x = center_x + lx;
@@ -782,7 +827,7 @@ impl GameRenderer for BlokusRenderer {
                     _ => InputResult::None,
                 }
             }
-            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } => InputResult::None,
+            GameInput::Drag { .. } | GameInput::RightDown { .. } | GameInput::RightUp { .. } | GameInput::Wheel { .. } => InputResult::None,
         }
     }
 

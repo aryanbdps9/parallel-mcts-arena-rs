@@ -786,6 +786,7 @@ dependencies = [
  "clap",
  "colored",
  "futures",
+ "naga",
  "num_cpus",
  "parking_lot",
  "pollster",

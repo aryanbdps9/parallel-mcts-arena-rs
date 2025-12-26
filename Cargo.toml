@@ -5,7 +5,7 @@ name = "parallel-mcts-arena"
 version = "0.1.0"
 rust-version = "1.88.0"
 edition = "2024"
-description = "A multi-threaded Monte Carlo Tree Search engine that plays four classic board games with configurable AI opponents"
+description = "A multi-threaded Monte Carlo Tree Search engine that plays some classic board games with configurable AI opponents"
 readme = "README.md"
 license-file = "LICENSE"
 keywords = ["games", "mcts", "ai", "board-games"]
@@ -74,4 +74,7 @@ lto = "fat"           # Link-time optimization for smaller, faster binary
 codegen-units = 1     # Single codegen unit for maximum optimization
 panic = "abort"       # Abort on panic instead of unwinding (smaller binary)
 strip = true          # Remove debug symbols from binary
+
+[build-dependencies]
+naga = { version = "23.0.0", features = ["wgsl-in"] }
 

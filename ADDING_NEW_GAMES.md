@@ -37,10 +37,29 @@ This guide outlines the steps to add a new game to the Parallel MCTS Arena.
     *   Update `impl fmt::Display for MoveWrapper` to handle your new move type.
     *   Update the `impl_game_dispatch!` macro call at the bottom of the file to include your new game variant:
         ```rust
-        impl_game_dispatch!(Gomoku, Connect4, Blokus, Othello, MyGame);
+        impl_game_dispatch!(Gomoku, Connect4, Blokus, Othello, Hive, MyGame);
         ```
 
-## 3. GUI Implementation
+## 3. GPU Acceleration Support
+
+To enable GPU-accelerated MCTS for your game (optional but recommended):
+
+1.  **Shader Implementation**:
+    *   Open `src/gpu/shaders.rs`.
+    *   Add a new evaluation function for your game (e.g., `fn evaluate_mygame(...)`).
+    *   Update the `compute_eval` entry point to call your function based on the game ID.
+
+2.  **Pipeline Creation**:
+    *   Open `src/gpu/context.rs`.
+    *   Add a new pipeline field to `GpuContext` (e.g., `pub mygame_eval_pipeline: ComputePipeline`).
+    *   Initialize the pipeline in `GpuContext::new` using `create_compute_pipeline`.
+
+3.  **Accelerator Integration**:
+    *   Open `src/gpu/accelerator.rs`.
+    *   Define a new game ID constant (e.g., `const GAME_MYGAME: i32 = 5;`).
+    *   Update `simulate_batch` to select your new pipeline when your game is active.
+
+## 4. GUI Implementation
 
 The GUI rendering logic is in `src/gui/game_renderers/`.
 
@@ -52,13 +71,13 @@ The GUI rendering logic is in `src/gui/game_renderers/`.
     ```
 4.  Update `src/gui/renderer.rs` to handle rendering your game.
 
-## 4. Input Handling
+## 5. Input Handling
 
 1.  Open `src/gui/window.rs`.
 2.  Update the mouse click handling to translate click coordinates into your game's move type.
 3.  Wrap the move in `MoveWrapper::MyGame(move)`.
 
-## 5. How To Play Documentation
+## 6. How To Play Documentation
 
 When adding a new game, you should also add a "How to Play" help file.
 

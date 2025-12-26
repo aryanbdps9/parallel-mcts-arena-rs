@@ -72,6 +72,7 @@ impl Piece {
     /// # Examples
     /// Creating the simple 2-square domino piece:
     /// ```
+    /// use mcts::games::blokus::Piece;
     /// let domino = Piece::new(1, &[(0, 0), (0, 1)]);
     /// // Results in 2 transformations: horizontal and vertical orientations
     /// assert_eq!(domino.transformations.len(), 2);
@@ -167,6 +168,7 @@ pub fn get_blokus_pieces() -> Vec<Piece> {
 /// # Usage
 /// Helpful for creating piece selection menus or analyzing game complexity:
 /// ```
+/// use mcts::games::blokus::get_piece_info;
 /// let piece_info = get_piece_info();
 /// for (id, transform_count) in piece_info {
 ///     println!("Piece {}: {} orientations", id, transform_count);
@@ -465,10 +467,8 @@ impl GameState for BlokusState {
         if winners.len() == 1 {
             Some((winners[0].0 + 1) as i32)
         } else {
-            // In case of a tie, MCTS framework doesn't support multiple winners.
-            // Returning None for a draw, or the first winner.
-            // For now, let's return the first winner's ID.
-            Some((winners[0].0 + 1) as i32)
+            // In case of a tie, return None (Draw)
+            None
         }
     }
 
@@ -675,6 +675,8 @@ impl BlokusState {
     ///
     /// # Usage
     /// ```
+    /// use mcts::games::blokus::BlokusState;
+    /// let state = BlokusState::new();
     /// let available = state.get_available_pieces(1);
     /// println!("Player 1 can place pieces: {:?}", available);
     /// ```
@@ -761,5 +763,256 @@ impl FromStr for BlokusMove {
         } else {
             Err("Invalid move format for Blokus".to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_game() {
+        let game = BlokusState::new();
+        assert_eq!(game.get_num_players(), 4);
+        assert_eq!(game.get_current_player(), 1);
+        assert_eq!(game.get_board().len(), 20);
+        assert_eq!(game.get_board()[0].len(), 20);
+        
+        // Check initial pieces
+        let pieces = game.get_available_pieces(1);
+        assert_eq!(pieces.len(), 21);
+    }
+
+    #[test]
+    fn test_piece_generation() {
+        let pieces = get_blokus_pieces();
+        assert_eq!(pieces.len(), 21);
+        
+        // Monomino (1 square) should have 1 transformation
+        assert_eq!(pieces[0].transformations.len(), 1);
+        
+        // Domino (2 squares) should have 2 transformations (horizontal, vertical)
+        assert_eq!(pieces[1].transformations.len(), 2);
+    }
+
+    #[test]
+    fn test_valid_first_move() {
+        let game = BlokusState::new();
+        // Player 1 must start at (0,0)
+        // Piece 0 is monomino (1 square)
+        // Transformation 0 is the only one
+        // Place at (0,0)
+        let mv = BlokusMove(0, 0, 0, 0);
+        assert!(game.is_legal(&mv));
+    }
+
+    #[test]
+    fn test_invalid_first_move() {
+        let game = BlokusState::new();
+        // Player 1 cannot start at (10,10)
+        let mv = BlokusMove(0, 0, 10, 10);
+        assert!(!game.is_legal(&mv));
+    }
+    
+    #[test]
+    fn test_make_move() {
+        let mut game = BlokusState::new();
+        let mv = BlokusMove(0, 0, 0, 0); // P1 places monomino at (0,0)
+        game.make_move(&mv);
+        
+        assert_eq!(game.get_board()[0][0], 1);
+        assert_eq!(game.get_current_player(), 2);
+        
+        // Player 1 should have 20 pieces left
+        assert_eq!(game.get_available_pieces(1).len(), 20);
+    }
+
+    #[test]
+    fn test_corner_to_corner_rule() {
+        let mut game = BlokusState::new();
+        
+        // P1 places monomino at (0,0)
+        let mv1 = BlokusMove(0, 0, 0, 0);
+        game.make_move(&mv1);
+        
+        // P2, P3, P4 pass
+        game.make_move(&PASS_MOVE);
+        game.make_move(&PASS_MOVE);
+        game.make_move(&PASS_MOVE);
+        
+        assert_eq!(game.get_current_player(), 1);
+        
+        // P1 tries to place Domino (Piece 1) at (1,1) - Valid (touches corner (0,0))
+        // Piece 1, Trans 0 is likely [(0,0), (0,1)]
+        let mv2 = BlokusMove(1, 0, 1, 1);
+        assert!(game.is_legal(&mv2));
+        
+        // P1 tries to place Domino at (2,2) - Invalid (doesn't touch any P1 corner)
+        let mv3 = BlokusMove(1, 0, 2, 2);
+        assert!(!game.is_legal(&mv3));
+    }
+
+    #[test]
+    fn test_no_edge_contact() {
+        let mut game = BlokusState::new();
+        
+        // P1 places monomino at (0,0)
+        game.make_move(&BlokusMove(0, 0, 0, 0));
+        
+        // P2, P3, P4 pass
+        game.make_move(&PASS_MOVE);
+        game.make_move(&PASS_MOVE);
+        game.make_move(&PASS_MOVE);
+        
+        // P1 tries to place Domino at (0,1) - Invalid (touches edge of (0,0))
+        // Piece 1, Trans 0: [(0,0), (0,1)] at (0,1) -> occupies (0,1), (0,2)
+        // (0,1) touches (0,0) edge.
+        let mv_edge1 = BlokusMove(1, 0, 0, 1);
+        assert!(!game.is_legal(&mv_edge1));
+        
+        // P1 tries to place Domino at (1,0) - Invalid (touches edge of (0,0))
+        // Piece 1, Trans 0: [(0,0), (0,1)] at (1,0) -> occupies (1,0), (1,1)
+        // (1,0) touches (0,0) edge.
+        let mv_edge2 = BlokusMove(1, 0, 1, 0);
+        assert!(!game.is_legal(&mv_edge2));
+    }
+
+    #[test]
+    fn test_pass_move_logic() {
+        let mut game = BlokusState::new();
+        
+        // P1 passes
+        game.make_move(&PASS_MOVE);
+        assert_eq!(game.consecutive_passes, 1);
+        assert_eq!(game.get_current_player(), 2);
+        
+        // P2 passes
+        game.make_move(&PASS_MOVE);
+        assert_eq!(game.consecutive_passes, 2);
+        
+        // P3 passes
+        game.make_move(&PASS_MOVE);
+        assert_eq!(game.consecutive_passes, 3);
+        
+        // P4 passes - Game should end
+        game.make_move(&PASS_MOVE);
+        assert_eq!(game.consecutive_passes, 4);
+        assert!(game.is_terminal());
+    }
+
+    #[test]
+    fn test_scoring() {
+        let mut game = BlokusState::new();
+        
+        // P1 places monomino (1 square)
+        game.make_move(&BlokusMove(0, 0, 0, 0));
+        
+        // P2 passes
+        game.make_move(&PASS_MOVE);
+        // P3 passes
+        game.make_move(&PASS_MOVE);
+        // P4 passes
+        game.make_move(&PASS_MOVE);
+        
+        // P1 passes
+        game.make_move(&PASS_MOVE);
+        // P2 passes
+        game.make_move(&PASS_MOVE);
+        // P3 passes
+        game.make_move(&PASS_MOVE);
+        // P4 passes -> Game Over
+        game.make_move(&PASS_MOVE);
+        
+        assert!(game.is_terminal());
+        
+        // P1 used 1 square. Remaining: Total - 1.
+        // P2, P3, P4 used 0 squares. Remaining: Total.
+        // P1 should win.
+        
+        assert_eq!(game.get_winner(), Some(1));
+    }
+
+    #[test]
+    fn test_possible_moves() {
+        let game = BlokusState::new();
+        let moves = game.get_possible_moves();
+        
+        // Initial state: P1 has many moves (corners)
+        assert!(!moves.is_empty());
+        assert!(!moves.contains(&PASS_MOVE));
+        
+        // Check that all moves are valid
+        for mv in &moves {
+            assert!(game.is_legal(mv));
+        }
+    }
+
+    #[test]
+    fn test_tie_game() {
+        let mut game = BlokusState::new();
+        // Everyone passes immediately -> 4-way tie
+        game.make_move(&PASS_MOVE);
+        game.make_move(&PASS_MOVE);
+        game.make_move(&PASS_MOVE);
+        game.make_move(&PASS_MOVE);
+        
+        assert!(game.is_terminal());
+        assert_eq!(game.get_winner(), None);
+    }
+
+    #[test]
+    fn test_move_display_and_parse() {
+        let mv = BlokusMove(5, 2, 10, 7);
+        let s = format!("{}", mv);
+        assert_eq!(s, "P5T2@(10,7)");
+
+        let parsed = BlokusMove::from_str("(5,2,10,7)").unwrap();
+        assert_eq!(parsed, mv);
+        
+        // Test invalid parse
+        assert!(BlokusMove::from_str("invalid").is_err());
+        assert!(BlokusMove::from_str("(1,2,3)").is_err()); // missing part
+    }
+
+    #[test]
+    fn test_pass_display() {
+        let s = format!("{}", PASS_MOVE);
+        assert_eq!(s, "PASS");
+    }
+
+    #[test]
+    fn test_gpu_data() {
+        let game = BlokusState::new();
+        let data = game.get_gpu_simulation_data();
+        assert!(data.is_some());
+        let (vec, width, height, _params) = data.unwrap();
+        assert_eq!(width, 20);
+        assert_eq!(height, 21);
+        assert_eq!(vec.len(), 20 * 21);
+    }
+    
+    #[test]
+    fn test_piece_info() {
+        let info = get_piece_info();
+        assert_eq!(info.len(), 21);
+        assert_eq!(info[0], (0, 1)); // Monomino
+    }
+
+    #[test]
+    fn test_getters_and_helpers() {
+        let game = BlokusState::new();
+        assert_eq!(game.get_board_size(), 20);
+        assert_eq!(game.get_line_size(), 1);
+        
+        // Test get_available_pieces for valid and invalid players
+        assert_eq!(game.get_available_pieces(1).len(), 21);
+        assert!(game.get_available_pieces(5).is_empty()); // Invalid player
+        
+        // Test get_player_pieces for valid and invalid players
+        assert_eq!(game.get_player_pieces(1).len(), 21);
+        assert!(game.get_player_pieces(5).is_empty()); // Invalid player
+        
+        // Test get_last_move
+        assert_eq!(game.get_last_move(), None);
     }
 }

@@ -78,3 +78,6 @@ pub fn try_init_gpu(config: &GpuConfig) -> GpuInitResult {
         }
     }
 }
+
+#[cfg(test)]
+mod shader_debug;

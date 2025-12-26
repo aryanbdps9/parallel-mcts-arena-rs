@@ -270,3 +270,57 @@ impl FromStr for GomokuMove {
         Ok(GomokuMove(r, c))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_game() {
+        let game = GomokuState::new(15, 5);
+        assert_eq!(game.get_num_players(), 2);
+        assert_eq!(game.get_current_player(), 1);
+        assert_eq!(game.get_board().len(), 15);
+        assert_eq!(game.get_board()[0].len(), 15);
+        assert_eq!(game.get_line_size(), 5);
+    }
+
+    #[test]
+    fn test_legal_moves() {
+        let game = GomokuState::new(15, 5);
+        let moves = game.get_possible_moves();
+        assert_eq!(moves.len(), 15 * 15);
+    }
+
+    #[test]
+    fn test_make_move() {
+        let mut game = GomokuState::new(15, 5);
+        game.make_move(&GomokuMove(7, 7));
+        assert_eq!(game.get_board()[7][7], 1);
+        assert_eq!(game.get_current_player(), -1);
+        
+        game.make_move(&GomokuMove(7, 8));
+        assert_eq!(game.get_board()[7][8], -1);
+        assert_eq!(game.get_current_player(), 1);
+    }
+
+    #[test]
+    fn test_win_condition() {
+        let mut game = GomokuState::new(15, 5);
+        // P1: (0,0), (0,1), (0,2), (0,3), (0,4)
+        // P2: (1,0), (1,1), (1,2), (1,3)
+        
+        game.make_move(&GomokuMove(0, 0)); // P1
+        game.make_move(&GomokuMove(1, 0)); // P2
+        game.make_move(&GomokuMove(0, 1)); // P1
+        game.make_move(&GomokuMove(1, 1)); // P2
+        game.make_move(&GomokuMove(0, 2)); // P1
+        game.make_move(&GomokuMove(1, 2)); // P2
+        game.make_move(&GomokuMove(0, 3)); // P1
+        game.make_move(&GomokuMove(1, 3)); // P2
+        game.make_move(&GomokuMove(0, 4)); // P1 wins
+
+        assert_eq!(game.get_winner(), Some(1));
+        assert!(game.is_terminal());
+    }
+}

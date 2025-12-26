@@ -952,4 +952,191 @@ mod tests {
         let neighbors = center.neighbors();
         assert_eq!(neighbors.len(), 6);
     }
+
+    #[test]
+    fn test_piece_type_properties() {
+        assert_eq!(PieceType::Queen.count_per_player(), 1);
+        assert_eq!(PieceType::Beetle.count_per_player(), 2);
+        assert_eq!(PieceType::Spider.count_per_player(), 2);
+        assert_eq!(PieceType::Grasshopper.count_per_player(), 3);
+        assert_eq!(PieceType::Ant.count_per_player(), 3);
+    }
+
+    #[test]
+    fn test_place_piece_adjacency() {
+        let mut state = HiveState::new();
+        
+        // Player 1 places Queen at (0,0)
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Queen, to: HexCoord::new(0, 0) });
+        
+        // Player 2 places Ant at (1,0) - adjacent to P1
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Ant, to: HexCoord::new(1, 0) });
+        
+        // Player 1 places Ant. Must be adjacent to P1 piece (0,0) and NOT adjacent to P2 piece (1,0)
+        // (-1, 0) is adjacent to (0,0) and not (1,0) -> Valid
+        // (2, 0) is adjacent to (1,0) -> Invalid (touching opponent)
+        
+        let moves = state.get_possible_moves();
+        let valid_place = HiveMove::Place { piece_type: PieceType::Ant, to: HexCoord::new(-1, 0) };
+        let invalid_place = HiveMove::Place { piece_type: PieceType::Ant, to: HexCoord::new(2, 0) };
+        
+        assert!(moves.contains(&valid_place));
+        assert!(!moves.contains(&invalid_place));
+    }
+
+    #[test]
+    fn test_queen_placement_rule() {
+        let mut state = HiveState::new();
+        
+        // Turn 1
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Spider, to: HexCoord::new(0, 0) });
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Spider, to: HexCoord::new(1, 0) });
+        
+        // Turn 2
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Ant, to: HexCoord::new(-1, 0) });
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Ant, to: HexCoord::new(2, 0) });
+        
+        // Turn 3
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Beetle, to: HexCoord::new(0, 1) });
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Beetle, to: HexCoord::new(1, 1) });
+        
+        // Turn 4 - Player 1 MUST place Queen if not already placed
+        let moves = state.get_possible_moves();
+        for mv in moves {
+            if let HiveMove::Place { piece_type, .. } = mv {
+                assert_eq!(piece_type, PieceType::Queen, "Must place Queen on turn 4");
+            }
+        }
+    }
+
+    #[test]
+    fn test_beetle_climb() {
+        let mut state = HiveState::new();
+        
+        // Setup a small hive
+        // P1 Queen at (0,0)
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Queen, to: HexCoord::new(0, 0) });
+        // P2 Queen at (1,0)
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Queen, to: HexCoord::new(1, 0) });
+        
+        // P1 Beetle at (-1,0)
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Beetle, to: HexCoord::new(-1, 0) });
+        // P2 Beetle at (2,0)
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Beetle, to: HexCoord::new(2, 0) });
+        
+        // Move P1 Beetle on top of P1 Queen
+        let climb_move = HiveMove::Move { from: HexCoord::new(-1, 0), to: HexCoord::new(0, 0) };
+        
+        let moves = state.get_possible_moves();
+        assert!(moves.contains(&climb_move));
+        
+        state.make_move(&climb_move);
+        
+        // Check stack height
+        let stack = state.board.get(&HexCoord::new(0, 0)).unwrap();
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack.last().unwrap().piece_type, PieceType::Beetle);
+    }
+    
+    #[test]
+    fn test_one_hive_rule() {
+        let mut state = HiveState::new();
+        
+        // P1 Q at (0,0)
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Queen, to: HexCoord::new(0, 0) });
+        // P2 Q at (1,0)
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Queen, to: HexCoord::new(1, 0) });
+        
+        // P1 Ant at (-1,0)
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Ant, to: HexCoord::new(-1, 0) });
+        // P2 Ant at (2,0)
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Ant, to: HexCoord::new(2, 0) });
+        
+        // P1 Ant moves to (0, 1)
+        state.make_move(&HiveMove::Move { from: HexCoord::new(-1, 0), to: HexCoord::new(0, 1) });
+        
+        // P2 Ant moves to (1, 1)
+        state.make_move(&HiveMove::Move { from: HexCoord::new(2, 0), to: HexCoord::new(1, 1) });
+        
+        // Now we have a chain. If P1 moves Q from (0,0), it might break the hive if it's an articulation point.
+        // (-1,0) is empty now. P1 Ant is at (0,1).
+        // (0,0) connects (0,1) and (1,0).
+        // (0,1) neighbors: (1,1), (-1,1), (0,2), (0,0), (1,0), (-1,2)
+        // (0,1) touches (0,0) and (1,0).
+        // So if (0,0) is removed, (0,1) and (1,0) are still connected?
+        // Yes, (0,1) touches (1,0) directly?
+        // (0,1) neighbors:
+        // E: (1,1)
+        // W: (-1,1)
+        // SE: (0,2)
+        // NW: (0,0)
+        // NE: (1,0) -> Yes!
+        // SW: (-1,2)
+        
+        // So (0,1) touches (1,0). Removing (0,0) does NOT break the hive.
+        
+        // Let's try to construct a real break.
+        // A - B - C
+        // A=(0,0), B=(1,0), C=(2,0)
+        // If B moves, A and C are disconnected.
+        
+        let mut state = HiveState::new();
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Queen, to: HexCoord::new(0, 0) }); // P1
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Queen, to: HexCoord::new(1, 0) }); // P2
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Ant, to: HexCoord::new(-1, 0) }); // P1
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Ant, to: HexCoord::new(2, 0) }); // P2
+        
+        // P1 Ant moves to (-2, 0)
+        state.make_move(&HiveMove::Move { from: HexCoord::new(-1, 0), to: HexCoord::new(-2, 0) });
+        
+        // P2 Ant moves to (3, 0)
+        state.make_move(&HiveMove::Move { from: HexCoord::new(2, 0), to: HexCoord::new(3, 0) });
+        
+        // Line: (-2,0) - (0,0) - (1,0) - (3,0)
+        // Wait, (-2,0) touches (-1,0) which is empty. (-2,0) touches (0,0)?
+        // (-2,0) neighbors: (-1,0), (-3,0), (-2,1), (-2,-1), (-1,-1), (-3,1)
+        // No, (-2,0) does not touch (0,0).
+        // So P1 Ant move to (-2,0) was invalid?
+        // Ah, Ant moves by sliding. It must slide around.
+        
+        // Let's just test that `would_break_hive` works.
+        // We can't easily access private methods in integration tests, but these are unit tests in the same module.
+        
+        // Manually setup board for testing private method if needed, or just rely on public API.
+        // Public API `get_possible_moves` calls `would_break_hive`.
+        
+        // In the line configuration A-B-C, B cannot move.
+        // We need to achieve this configuration legally.
+        // P1 Q at (0,0)
+        // P2 Q at (1,0)
+        // P1 B at (-1,0)
+        
+        // P1 B moves to (-2,0)? No, must slide.
+        
+        // Let's try a simpler case.
+        // P1 Q at (0,0). P2 Q at (1,0).
+        // P1 Q tries to move to (0,1).
+        // If it moves, (0,0) is empty.
+        // (1,0) is the only other piece.
+        // (0,1) touches (1,0). So it's connected.
+        
+        // What if P1 Q moves to (-1,0)?
+        // (-1,0) touches (0,0) (which will be empty) and...
+        // (-1,0) neighbors: (0,0), (-2,0), (-1,1), (-1,-1), (0,-1), (-2,1)
+        // Does (-1,0) touch (1,0)?
+        // (1,0) neighbors: (2,0), (0,0), (1,1), (1,-1), (2,-1), (0,1)
+        // No common neighbors except (0,0).
+        // So if P1 Q moves from (0,0) to (-1,0), the new position (-1,0) does NOT touch (1,0).
+        // So the hive would be broken (two separate pieces).
+        
+        let mut state = HiveState::new();
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Queen, to: HexCoord::new(0, 0) }); // P1
+        state.make_move(&HiveMove::Place { piece_type: PieceType::Queen, to: HexCoord::new(1, 0) }); // P2
+        
+        // P1 Q tries to move to (-1,0)
+        let invalid_move = HiveMove::Move { from: HexCoord::new(0, 0), to: HexCoord::new(-1, 0) };
+        let moves = state.get_possible_moves();
+        
+        assert!(!moves.contains(&invalid_move));
+    }
 }

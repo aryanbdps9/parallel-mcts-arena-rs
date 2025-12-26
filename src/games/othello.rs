@@ -322,3 +322,49 @@ impl FromStr for OthelloMove {
         Ok(OthelloMove(r, c))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_game() {
+        let game = OthelloState::new(8);
+        assert_eq!(game.get_num_players(), 2);
+        assert_eq!(game.get_current_player(), 1);
+        assert_eq!(game.get_board().len(), 8);
+        assert_eq!(game.get_board()[0].len(), 8);
+        
+        // Check initial setup
+        let board = game.get_board();
+        assert_eq!(board[3][3], -1);
+        assert_eq!(board[4][4], -1);
+        assert_eq!(board[3][4], 1);
+        assert_eq!(board[4][3], 1);
+    }
+
+    #[test]
+    fn test_legal_moves() {
+        let game = OthelloState::new(8);
+        let moves = game.get_possible_moves();
+        // Expected moves for Black: (2,3), (3,2), (4,5), (5,4)
+        assert_eq!(moves.len(), 4);
+        assert!(moves.contains(&OthelloMove(2, 3)));
+        assert!(moves.contains(&OthelloMove(3, 2)));
+        assert!(moves.contains(&OthelloMove(4, 5)));
+        assert!(moves.contains(&OthelloMove(5, 4)));
+    }
+
+    #[test]
+    fn test_make_move() {
+        let mut game = OthelloState::new(8);
+        // Black plays (2,3)
+        // Should flip (3,3) from White to Black
+        game.make_move(&OthelloMove(2, 3));
+        
+        let board = game.get_board();
+        assert_eq!(board[2][3], 1); // Placed piece
+        assert_eq!(board[3][3], 1); // Flipped piece
+        assert_eq!(game.get_current_player(), -1);
+    }
+}

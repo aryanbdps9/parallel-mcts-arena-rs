@@ -21,7 +21,7 @@ impl Colors {
     pub const LAST_MOVE: D2D1_COLOR_F = D2D1_COLOR_F { r: 1.0, g: 0.8, b: 0.2, a: 0.6 };
 
     // Player colors
-    pub const PLAYER_1: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }; // Black
+    pub const PLAYER_1: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.3, g: 0.3, b: 0.3, a: 1.0 }; // Black
     pub const PLAYER_2: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.95, g: 0.95, b: 0.95, a: 1.0 }; // White
     pub const PLAYER_3: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.9, g: 0.3, b: 0.3, a: 1.0 }; // Red
     pub const PLAYER_4: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.3, g: 0.5, b: 0.9, a: 1.0 }; // Blue

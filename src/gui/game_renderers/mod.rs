@@ -40,7 +40,9 @@ pub enum GameInput {
     /// Right mouse button up (end drag)
     RightUp { x: f32, y: f32 },
     /// Drag delta (for camera/tilt adjustment)
-    Drag { dx: f32, dy: f32 },
+    Drag { dx: f32, dy: f32, shift: bool, ctrl: bool },
+    /// Mouse wheel scroll
+    Wheel { delta: f32, x: f32, y: f32, ctrl: bool },
 }
 
 /// Result of processing game input

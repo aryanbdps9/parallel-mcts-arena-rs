@@ -14,8 +14,10 @@
 //! ## Example Usage
 //! ```rust
 //! use mcts::{MCTS, GameState};
+//! use mcts::games::connect4::Connect4State;
 //!
 //! // Your game must implement GameState
+//! let game_state = Connect4State::new(7, 6, 4);
 //! let mut mcts = MCTS::new(1.4, 8, 1000000);
 //! let (best_move, stats) = mcts.search(&game_state, 0, 0, 30); // 30 second timeout
 //! ```
@@ -614,7 +616,7 @@ impl<S: GameState> MCTS<S> {
                                         board_height: h as u32,
                                         current_player: player,
                                         use_heuristic: if use_heuristic_flag { 1 } else { 0 },
-                                        seed: base_seed,
+                                        seed: base_seed + (i as u32 * 9973), // Different seed per state
                                     });
                                 }
                                 flat_data.extend(data);

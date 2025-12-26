@@ -325,6 +325,8 @@ pub struct GuiApp {
     pub history_scroll: i32,
     pub how_to_play_scroll: i32,
     pub selected_how_to_play_game: usize,
+    pub game_selection_scroll: i32,
+    pub settings_scroll: i32,
 
     // Resizable panel state
     /// Width of the right info panel (0.0 to 1.0 as percentage of available width)
@@ -398,6 +400,8 @@ impl GuiApp {
             history_scroll: 0,
             how_to_play_scroll: 0,
             selected_how_to_play_game: 0,
+            game_selection_scroll: 0,
+            settings_scroll: 0,
             info_panel_ratio: 0.25, // Default 25% of game area width
             is_dragging_splitter: false,
             is_right_dragging: false,
