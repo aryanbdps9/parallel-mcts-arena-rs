@@ -12,8 +12,9 @@ keywords = ["games", "mcts", "ai", "board-games"]
 categories = ["games", "command-line-utilities"]
 
 [features]
-default = ["gui"]
+default = ["gui", "gpu"]
 gui = ["windows"]
+gpu = ["wgpu", "bytemuck", "pollster", "futures"]
 
 # Runtime Dependencies
 [dependencies]
@@ -51,6 +52,11 @@ windows = { version = "0.60", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
 ], optional = true }
+# GPU compute capabilities (optional - for GPU-accelerated MCTS)
+wgpu = { version = "23", optional = true }
+bytemuck = { version = "1.21", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
+futures = { version = "0.3", optional = true }
 
 # Library configuration
 [lib]

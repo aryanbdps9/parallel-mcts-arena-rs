@@ -38,7 +38,7 @@
 // Each module handles a specific aspect of the application:
 pub mod game_wrapper; // Unified interface for all games
 pub mod game_controller; // Central game state management
-pub mod games; // Game implementations (Gomoku, Connect4, Othello, Blokus)
+pub use mcts::games; // Game implementations (Gomoku, Connect4, Othello, Blokus) - from lib
 #[cfg(feature = "gui")]
 pub mod gui; // Windows GUI implementation
 pub mod clipboard; // Cross-platform clipboard support
@@ -58,13 +58,22 @@ use std::io;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// The exploration factor (C) for the MCTS PUCT formula.
+    /// The exploration factor (C) for the MCTS PUCT formula (CPU).
     ///
     /// Higher values encourage more exploration of untested moves.
     /// Lower values favor exploitation of known good moves.
     ///
     #[arg(short, long, default_value_t = 4.0)]
-    exploration_factor: f64,
+    cpu_exploration_factor: f64,
+
+    /// The exploration factor (C) for the MCTS PUCT formula (GPU).
+    ///
+    /// Higher values encourage more exploration of untested moves.
+    /// Lower values favor exploitation of known good moves.
+    /// With heuristic evaluation, a higher value is recommended.
+    ///
+    #[arg(long, default_value_t = 2.0)]
+    gpu_exploration_factor: f64,
 
     /// Maximum number of MCTS iterations per search.
     ///
@@ -184,6 +193,20 @@ struct Args {
     /// Note: Uses more memory to maintain the tree
     #[arg(long, action = clap::ArgAction::SetTrue, default_value_t = true)]
     shared_tree: bool,
+
+    /// Number of threads for GPU search batch size.
+    ///
+    /// Higher values allow better GPU saturation but require more VRAM.
+    /// Recommended: 256-4096 depending on GPU.
+    #[arg(long, default_value_t = 4096)]
+    gpu_threads: usize,
+
+    /// Use heuristic evaluation instead of random rollouts for GPU simulations.
+    ///
+    /// Heuristic evaluation is faster and gives stronger play but is game-specific.
+    /// Random rollouts are slower but work for any game.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    gpu_use_heuristic: bool,
 }
 
 /// Main entry point for the Parallel Multi-Game MCTS Engine
@@ -291,16 +314,19 @@ fn main() -> io::Result<()> {
     {
         // Launch Windows GUI with all configuration options
         let gui_app = gui::GuiApp::new(
-            args.exploration_factor,
+            args.cpu_exploration_factor,
+            args.gpu_exploration_factor,
             num_threads,
-            args.search_iterations,
             args.max_nodes,
+            args.search_iterations,
+            args.shared_tree,
+            args.gpu_threads,
+            args.gpu_use_heuristic,
             args.board_size,
             args.line_size,
             args.timeout_secs,
             args.stats_interval_secs,
             args.ai_only,
-            args.shared_tree,
         );
         
         return gui::run_gui(gui_app)

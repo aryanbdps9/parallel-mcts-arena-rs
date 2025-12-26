@@ -9,6 +9,7 @@
 //! - **Virtual Losses**: Prevents multiple threads from exploring the same paths
 //! - **Memory Management**: Node recycling and automatic tree pruning
 //! - **PUCT Selection**: Enhanced UCB1 formula with prior probabilities
+//! - **GPU Acceleration** (optional): Batch PUCT calculation on GPU for large trees
 //!
 //! ## Example Usage
 //! ```rust
@@ -18,6 +19,19 @@
 //! let mut mcts = MCTS::new(1.4, 8, 1000000);
 //! let (best_move, stats) = mcts.search(&game_state, 0, 0, 30); // 30 second timeout
 //! ```
+//!
+//! ## GPU Acceleration
+//! To enable GPU acceleration, build with the `gpu` feature:
+//! ```bash
+//! cargo build --features gpu
+//! ```
+//! Then use `MCTS::with_gpu()` to create a GPU-accelerated engine.
+
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
+// Game implementations - available for all features
+pub mod games;
 
 use parking_lot::{Mutex, RwLock};
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -128,7 +142,7 @@ pub trait GameState: Clone + Send + Sync {
     ///
     /// Must be cloneable, comparable, hashable, debuggable, and thread-safe.
     /// Used as keys in hash maps and for move generation.
-    type Move: Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync;
+    type Move: Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync + 'static;
 
     /// Returns the board state.
     ///
@@ -141,6 +155,12 @@ pub trait GameState: Clone + Send + Sync {
     /// Used for UI highlighting and game analysis. Some games may not
     /// have coordinate-based moves, so this can return None.
     fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
+        None
+    }
+
+    /// Returns data for GPU simulation if supported
+    /// Returns (board_data, board_width, board_height, current_player)
+    fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {
         None
     }
 
@@ -356,6 +376,13 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     }
 }
 
+/// Request for GPU evaluation
+struct EvaluationRequest<S: GameState> {
+    state: S,
+    path: Vec<Arc<Node<S::Move>>>,
+    path_players: Vec<i32>,
+}
+
 /// The main MCTS engine.
 pub struct MCTS<S: GameState> {
     /// The root of the search tree.
@@ -376,6 +403,31 @@ pub struct MCTS<S: GameState> {
     timeout_measurements: Arc<AtomicI32>,
     /// Counter for searches since last overhead measurement
     searches_since_measurement: Arc<AtomicI32>,
+    /// GPU accelerator for batch PUCT computation (optional, requires 'gpu' feature)
+    #[cfg(feature = "gpu")]
+    gpu_accelerator: Option<Arc<Mutex<gpu::GpuMctsAccelerator>>>,
+    /// Whether GPU acceleration is enabled
+    #[cfg(feature = "gpu")]
+    gpu_enabled: bool,
+    /// Cached GPU-computed PUCT scores keyed by (parent_node_id, child_node_id)
+    /// This allows caching PUCT for the entire tree, not just root children
+    #[cfg(feature = "gpu")]
+    gpu_puct_cache: Arc<RwLock<HashMap<(usize, usize), f64>>>,
+    /// Last time the GPU PUCT cache was updated
+    #[cfg(feature = "gpu")]
+    gpu_cache_timestamp: Arc<Mutex<Instant>>,
+    /// Number of simulations since last GPU cache update
+    #[cfg(feature = "gpu")]
+    simulations_since_gpu_update: Arc<AtomicI32>,
+    /// Statistics: nodes processed in last GPU batch
+    #[cfg(feature = "gpu")]
+    gpu_last_batch_size: Arc<AtomicI32>,
+    /// Channel for sending simulation requests to the GPU worker
+    #[cfg(feature = "gpu")]
+    gpu_simulation_sender: Option<std::sync::mpsc::Sender<EvaluationRequest<S>>>,
+    /// Counter for pending GPU evaluations
+    #[cfg(feature = "gpu")]
+    gpu_pending_evaluations: Arc<AtomicI32>,
 }
 
 impl<S: GameState> MCTS<S> {
@@ -402,7 +454,342 @@ impl<S: GameState> MCTS<S> {
             timeout_overhead_ms: Arc::new(Mutex::new(50.0)), // Start with conservative 50ms estimate
             timeout_measurements: Arc::new(AtomicI32::new(0)),
             searches_since_measurement: Arc::new(AtomicI32::new(0)),
+            #[cfg(feature = "gpu")]
+            gpu_accelerator: None,
+            #[cfg(feature = "gpu")]
+            gpu_enabled: false,
+            #[cfg(feature = "gpu")]
+            gpu_puct_cache: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "gpu")]
+            gpu_cache_timestamp: Arc::new(Mutex::new(Instant::now())),
+            #[cfg(feature = "gpu")]
+            simulations_since_gpu_update: Arc::new(AtomicI32::new(0)),
+            #[cfg(feature = "gpu")]
+            gpu_last_batch_size: Arc::new(AtomicI32::new(0)),
+            #[cfg(feature = "gpu")]
+            gpu_simulation_sender: None,
+            #[cfg(feature = "gpu")]
+            gpu_pending_evaluations: Arc::new(AtomicI32::new(0)),
         }
+    }
+
+    /// Creates a new MCTS engine with GPU acceleration enabled.
+    ///
+    /// This constructor attempts to initialize a GPU context for accelerating
+    /// PUCT calculations. If GPU initialization fails, the engine falls back
+    /// to CPU-only mode.
+    ///
+    /// # Arguments
+    /// * `exploration_parameter` - A constant to tune the level of exploration.
+    /// * `num_threads` - The number of threads to use for the search. If 0, rayon will use the default.
+    /// * `max_nodes` - Maximum number of nodes allowed in the tree.
+    ///
+    /// # Returns
+    /// A tuple of (MCTS engine, Option<String>) where the string contains GPU info or error message.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(exploration_parameter: f64, num_threads: usize, max_nodes: usize) -> (Self, Option<String>)
+    where
+        S: 'static,
+    {
+        let gpu_config = gpu::GpuConfig::default();
+        Self::with_gpu_config(exploration_parameter, num_threads, max_nodes, gpu_config, true)
+    }
+
+    /// Creates a new MCTS engine with custom GPU configuration.
+    ///
+    /// # Arguments
+    /// * `exploration_parameter` - A constant to tune the level of exploration.
+    /// * `num_threads` - The number of threads to use for the search.
+    /// * `max_nodes` - Maximum number of nodes allowed in the tree.
+    /// * `gpu_config` - Custom GPU configuration.
+    ///
+    /// # Returns
+    /// A tuple of (MCTS engine, Option<String>) where the string contains GPU info or error message.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu_config(
+        exploration_parameter: f64,
+        num_threads: usize,
+        max_nodes: usize,
+        gpu_config: gpu::GpuConfig,
+        use_heuristic: bool,
+    ) -> (Self, Option<String>)
+    where
+        S: 'static,
+    {
+        let pool_builder = ThreadPoolBuilder::new();
+        let pool = if num_threads > 0 {
+            pool_builder.num_threads(num_threads).build().unwrap()
+        } else {
+            pool_builder.build().unwrap()
+        };
+
+        let (gpu_accelerator, gpu_enabled, message) = match gpu::try_init_gpu(&gpu_config) {
+            gpu::GpuInitResult::Success(ctx) => {
+                let info = ctx.debug_info();
+                let accelerator = gpu::GpuMctsAccelerator::new(std::sync::Arc::new(ctx));
+                (Some(Arc::new(Mutex::new(accelerator))), true, Some(format!("GPU enabled: {}", info)))
+            }
+            gpu::GpuInitResult::Unavailable(msg) => {
+                (None, false, Some(format!("GPU unavailable, using CPU: {}", msg)))
+            }
+            gpu::GpuInitResult::Error(msg) => {
+                (None, false, Some(format!("GPU initialization failed, using CPU: {}", msg)))
+            }
+        };
+
+        let node_count = Arc::new(AtomicI32::new(1));
+        let node_count_clone = node_count.clone();
+        let pending_evaluations = Arc::new(AtomicI32::new(0));
+        let pending_evals_clone = pending_evaluations.clone();
+
+        let gpu_simulation_sender = if gpu_enabled {
+            if let Some(ref accelerator) = gpu_accelerator {
+                let accelerator = accelerator.clone();
+                let (tx, rx) = std::sync::mpsc::channel::<EvaluationRequest<S>>();
+                let max_batch_size = gpu_config.max_batch_size;
+                let use_heuristic_flag = use_heuristic;
+                
+                std::thread::spawn(move || {
+                    let mut batch_requests: Vec<EvaluationRequest<S>> = Vec::with_capacity(max_batch_size);
+                    
+                    // Track execution time to adapt batching strategy
+                    let mut last_execution_time = Duration::from_micros(0);
+                    
+                    loop {
+                        let first = match rx.recv() {
+                            Ok(req) => req,
+                            Err(_) => break,
+                        };
+                        
+                        batch_requests.push(first);
+
+                        // Adaptive batching: if GPU is slow (>2ms), wait up to 500us to fill larger batches
+                        let heavy_load = last_execution_time.as_micros() > 2000;
+                        let target_batch = if heavy_load { 
+                            (max_batch_size / 2).max(64).min(2048) 
+                        } else { 
+                            (max_batch_size / 4).max(64).min(512) 
+                        };
+                        
+                        let deadline = if heavy_load { 
+                            Some(Instant::now() + Duration::from_micros(500)) 
+                        } else { 
+                            None 
+                        };
+
+                        while batch_requests.len() < target_batch {
+                            match rx.try_recv() {
+                                Ok(req) => batch_requests.push(req),
+                                Err(_) => {
+                                    match deadline {
+                                        Some(d) => {
+                                            if batch_requests.len() >= 64 || Instant::now() >= d { break; }
+                                            std::thread::yield_now();
+                                        }
+                                        None => break,
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if batch_requests.is_empty() { continue; }
+                        
+                        let mut flat_data = Vec::new();
+                        let mut gpu_indices = Vec::new();
+                        let mut cpu_indices = Vec::new();
+                        let mut params = None;
+                        
+                        // Generate a unique base seed for this batch using high-resolution timing
+                        let base_seed = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos() as u32;
+                        
+                        for (i, req) in batch_requests.iter().enumerate() {
+                            if let Some((data, w, h, player)) = req.state.get_gpu_simulation_data() {
+                                if params.is_none() {
+                                    // Use high-resolution nanosecond-based seed that varies per batch
+                                    params = Some(gpu::GpuSimulationParams {
+                                        board_width: w as u32,
+                                        board_height: h as u32,
+                                        current_player: player,
+                                        use_heuristic: if use_heuristic_flag { 1 } else { 0 },
+                                        seed: base_seed,
+                                    });
+                                }
+                                flat_data.extend(data);
+                                gpu_indices.push(i);
+                            } else {
+                                // This game doesn't support GPU simulation, needs CPU rollout
+                                cpu_indices.push(i);
+                            }
+                        }
+                        
+                        let mut scores = vec![0.0f32; batch_requests.len()];
+
+                        // GPU evaluation for supported games
+                        let start_time = Instant::now();
+                        if let Some(p) = params {
+                            let mut acc = accelerator.lock();
+                            if let Ok(gpu_scores) = acc.simulate_batch(&flat_data, p) {
+                                for (idx, score) in gpu_indices.into_iter().zip(gpu_scores.into_iter()) {
+                                    scores[idx] = score;
+                                }
+                            }
+                        }
+                        // Update execution time metric (only if GPU was actually used)
+                        if params.is_some() {
+                            last_execution_time = start_time.elapsed();
+                        } else {
+                            last_execution_time = Duration::from_micros(0);
+                        }
+                        
+                        // CPU random rollout for games that don't support GPU simulation
+                        // This ensures all games work, even without custom GPU shaders
+                        for idx in cpu_indices {
+                            let mut sim_state = batch_requests[idx].state.clone();
+                            let leaf_player = sim_state.get_current_player();
+                            
+                            // Run random rollout on CPU
+                            let winner = if sim_state.is_terminal() {
+                                sim_state.get_winner()
+                            } else {
+                                let mut moves_cache = Vec::new();
+                                let mut simulation_moves = 0;
+                                const MAX_SIMULATION_MOVES: usize = 500;
+                                
+                                while !sim_state.is_terminal() && simulation_moves < MAX_SIMULATION_MOVES {
+                                    moves_cache.clear();
+                                    moves_cache.extend(sim_state.get_possible_moves());
+                                    if moves_cache.is_empty() {
+                                        break;
+                                    }
+                                    let move_index = random_range(0, moves_cache.len());
+                                    let mv = &moves_cache[move_index];
+                                    sim_state.make_move(mv);
+                                    simulation_moves += 1;
+                                }
+                                
+                                if simulation_moves >= MAX_SIMULATION_MOVES {
+                                    None // Treat as draw
+                                } else {
+                                    sim_state.get_winner()
+                                }
+                            };
+                            
+                            // Convert winner to score (from leaf_player's perspective)
+                            // Use special values to distinguish win/loss/draw
+                            scores[idx] = match winner {
+                                Some(w) if w == leaf_player => 4000.0,
+                                Some(_) => -4000.0,
+                                None => 0.0, // Draw
+                            };
+                        }
+
+                        // Process results: Expand and Backpropagate in parallel
+                        let requests: Vec<_> = batch_requests.drain(..).collect();
+                        requests.into_par_iter().zip(scores.into_par_iter()).for_each(|(req, score)| {
+                            let leaf_node = req.path.last().unwrap();
+                            
+                            // 1. Expand
+                            if !req.state.is_terminal() {
+                                // Check max_nodes to respect tree size limit
+                                let current_nodes = node_count_clone.load(Ordering::Relaxed) as usize;
+                                if current_nodes < max_nodes {
+                                    let mut children_guard = leaf_node.children.write();
+                                    if children_guard.is_empty() {
+                                        let possible_moves = req.state.get_possible_moves();
+                                        let new_depth = leaf_node.depth + 1;
+                                        let mut new_nodes_count = 0;
+                                        
+                                        for mv in possible_moves {
+                                            let new_node = Arc::new(Node {
+                                                children: RwLock::new(HashMap::new()),
+                                                visits: AtomicI32::new(0),
+                                                wins: AtomicI32::new(0),
+                                                virtual_losses: AtomicI32::new(0),
+                                                depth: new_depth,
+                                            });
+                                            children_guard.insert(mv, new_node);
+                                            new_nodes_count += 1;
+                                        }
+                                        node_count_clone.fetch_add(new_nodes_count, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+
+                            // 2. Backpropagate
+                            // Map score to [0, 1] win probability for current_player (at leaf)
+                            let leaf_player = req.state.get_current_player();
+                            
+                            let win_prob = if score >= 4000.0 {
+                                1.0
+                            } else if score <= -4000.0 {
+                                0.0
+                            } else {
+                                // Map heuristic score to win probability
+                                // Use tanh to squash score into [-1, 1], then map to [0, 1]
+                                // Adjusted scale: score of 500 (5 four-patterns) gives ~99% win probability
+                                // score of 100 (1 four-pattern) gives ~76% win probability  
+                                // score of 10 (1 three-pattern) gives ~54% win probability
+                                0.5 + 0.5 * (score / 200.0).tanh() as f64
+                            };
+
+                            for (node, &player_who_moved) in req.path.iter().zip(req.path_players.iter()).rev() {
+                                node.remove_virtual_loss();
+                                node.visits.fetch_add(1, Ordering::Relaxed);
+                                
+                                // Calculate reward for this node's perspective
+                                // If the player who made the move is the same as the one favored by the score,
+                                // they get a higher reward.
+                                let reward_val = if player_who_moved == leaf_player {
+                                    2.0 * win_prob
+                                } else {
+                                    2.0 * (1.0 - win_prob)
+                                };
+                                
+                                // Stochastic rounding to integer to preserve fractional value in expectation
+                                let reward_int = reward_val as i32;
+                                let reward_frac = reward_val - reward_int as f64;
+                                let final_reward = reward_int + if random_f64() < reward_frac { 1 } else { 0 };
+                                
+                                node.wins.fetch_add(final_reward, Ordering::Relaxed);
+                            }
+                            
+                            // Decrement pending evaluations counter
+                            pending_evals_clone.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    }
+                });
+                Some(tx)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mcts = MCTS {
+            root: Arc::new(Node::new()),
+            exploration_parameter,
+            pool,
+            node_pool: NodePool::new(),
+            max_nodes,
+            node_count,
+            timeout_overhead_ms: Arc::new(Mutex::new(50.0)),
+            timeout_measurements: Arc::new(AtomicI32::new(0)),
+            searches_since_measurement: Arc::new(AtomicI32::new(0)),
+            gpu_accelerator,
+            gpu_enabled,
+            gpu_puct_cache: Arc::new(RwLock::new(HashMap::new())),
+            gpu_cache_timestamp: Arc::new(Mutex::new(Instant::now())),
+            simulations_since_gpu_update: Arc::new(AtomicI32::new(0)),
+            gpu_last_batch_size: Arc::new(AtomicI32::new(0)),
+            gpu_simulation_sender,
+            gpu_pending_evaluations: pending_evaluations,
+        };
+
+        (mcts, message)
     }
 
     /// Gets the exploration parameter used in the UCB1 formula
@@ -419,6 +806,44 @@ impl<S: GameState> MCTS<S> {
     /// Maximum node count before tree pruning occurs
     pub fn get_max_nodes(&self) -> usize {
         self.max_nodes
+    }
+
+    /// Returns whether GPU acceleration is enabled
+    ///
+    /// # Returns
+    /// True if GPU acceleration is enabled and available
+    #[cfg(feature = "gpu")]
+    pub fn is_gpu_enabled(&self) -> bool {
+        self.gpu_enabled
+    }
+
+    /// Returns GPU debug information if available
+    ///
+    /// # Returns
+    /// Optional string with GPU statistics and info
+    #[cfg(feature = "gpu")]
+    pub fn get_gpu_info(&self) -> Option<String> {
+        if let Some(ref accelerator) = self.gpu_accelerator {
+            Some(accelerator.lock().debug_info())
+        } else {
+            None
+        }
+    }
+
+    /// Enables or disables GPU acceleration at runtime
+    ///
+    /// This allows toggling GPU usage without recreating the MCTS engine.
+    /// Useful for comparing GPU vs CPU performance or when GPU encounters issues.
+    ///
+    /// # Arguments
+    /// * `enabled` - Whether to enable GPU acceleration
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu_enabled(&mut self, enabled: bool) {
+        if enabled && self.gpu_accelerator.is_some() {
+            self.gpu_enabled = true;
+        } else if !enabled {
+            self.gpu_enabled = false;
+        }
     }
 
     /// Advances the root of the tree to the node corresponding to the given move.
@@ -593,6 +1018,23 @@ impl<S: GameState> MCTS<S> {
             ),
         ];
 
+        // Add GPU status if feature is enabled
+        #[cfg(feature = "gpu")]
+        {
+            if self.gpu_enabled {
+                if let Some(ref accelerator) = self.gpu_accelerator {
+                    let acc = accelerator.lock();
+                    let (total_us, dispatches, avg_us) = acc.stats();
+                    debug_lines.push(format!(
+                        "GPU: enabled, {} dispatches, {:.2}ms total, {:.2}µs avg",
+                        dispatches, total_us as f64 / 1000.0, avg_us
+                    ));
+                }
+            } else {
+                debug_lines.push("GPU: disabled".to_string());
+            }
+        }
+
         // Add top child statistics (limited to prevent UI overflow)
         let children = self.root.children.read();
         if !children.is_empty() {
@@ -700,6 +1142,10 @@ impl<S: GameState> MCTS<S> {
 
         self.ensure_root_expanded(state);
 
+        // Initialize GPU PUCT cache if GPU is enabled
+        #[cfg(feature = "gpu")]
+        self.update_gpu_puct_cache(true);
+
         let possible_moves = state.get_possible_moves();
         if possible_moves.len() == 1 {
             return (possible_moves[0].clone(), SearchStatistics::default());
@@ -757,6 +1203,98 @@ impl<S: GameState> MCTS<S> {
                         }
                     }
                     std::thread::sleep(check_interval);
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Start a GPU cache refresh thread if GPU is enabled
+        #[cfg(feature = "gpu")]
+        let gpu_refresh_handle = if self.gpu_enabled && self.gpu_accelerator.is_some() {
+            let stop_flag = stop_searching.clone();
+            let gpu_accelerator = self.gpu_accelerator.clone();
+            let root = self.root.clone();
+            let exploration_parameter = self.exploration_parameter;
+            let gpu_puct_cache = self.gpu_puct_cache.clone();
+            let simulations_counter = self.simulations_since_gpu_update.clone();
+            
+            Some(std::thread::spawn(move || {
+                let refresh_interval = Duration::from_millis(50); // Refresh every 50ms for better GPU utilization
+                const MAX_DEPTH: u32 = 50;
+                const MAX_NODES: usize = 65536;
+                
+                while !stop_flag.load(Ordering::Relaxed) {
+                    std::thread::sleep(refresh_interval);
+                    
+                    // Check if enough simulations have passed
+                    let sims = simulations_counter.load(Ordering::Relaxed);
+                    if sims < 500 {
+                        continue;
+                    }
+                    simulations_counter.store(0, Ordering::Relaxed);
+                    
+                    // Deep tree traversal to collect all parent-child pairs
+                    let mut node_data: Vec<gpu::GpuNodeData> = Vec::with_capacity(MAX_NODES);
+                    let mut cache_keys: Vec<(usize, usize)> = Vec::with_capacity(MAX_NODES);
+                    let mut stack: Vec<(Arc<Node<S::Move>>, u32)> = Vec::with_capacity(1024);
+                    stack.push((root.clone(), 0));
+                    
+                    while let Some((parent_node, depth)) = stack.pop() {
+                        if depth >= MAX_DEPTH || node_data.len() >= MAX_NODES {
+                            break;
+                        }
+                        
+                        let children = parent_node.children.read();
+                        if children.is_empty() {
+                            continue;
+                        }
+                        
+                        let parent_visits = parent_node.visits.load(Ordering::Relaxed);
+                        let num_children = children.len();
+                        let prior_prob = 1.0 / num_children as f32;
+                        let parent_id = Arc::as_ptr(&parent_node) as usize;
+                        
+                        for (_mv, child_node) in children.iter() {
+                            if node_data.len() >= MAX_NODES {
+                                break;
+                            }
+                            
+                            let child_id = Arc::as_ptr(child_node) as usize;
+                            
+                            node_data.push(gpu::GpuNodeData::new(
+                                child_node.visits.load(Ordering::Relaxed),
+                                child_node.wins.load(Ordering::Relaxed),
+                                child_node.virtual_losses.load(Ordering::Relaxed),
+                                parent_visits,
+                                prior_prob,
+                                exploration_parameter as f32,
+                            ));
+                            cache_keys.push((parent_id, child_id));
+                            
+                            // Add visited children to stack for deeper traversal
+                            if child_node.visits.load(Ordering::Relaxed) > 0 {
+                                stack.push((child_node.clone(), depth + 1));
+                            }
+                        }
+                    }
+                    
+                    if node_data.is_empty() {
+                        continue;
+                    }
+                    
+                    // Compute PUCT on GPU
+                    if let Some(ref accelerator) = gpu_accelerator {
+                        let mut acc = accelerator.lock();
+                        if let Ok(results) = acc.compute_puct_batch(&node_data) {
+                            let mut cache = gpu_puct_cache.write();
+                            cache.clear();
+                            cache.reserve(results.len());
+                            for (i, result) in results.iter().enumerate() {
+                                cache.insert(cache_keys[i], result.puct_score as f64);
+                            }
+                        }
+                    }
                 }
             }))
         } else {
@@ -846,6 +1384,27 @@ impl<S: GameState> MCTS<S> {
                         }
                     }
                 }
+            }
+        }
+
+        // Clean up GPU refresh thread
+        #[cfg(feature = "gpu")]
+        if let Some(handle) = gpu_refresh_handle {
+            // The stop_searching flag is already set, GPU thread will exit
+            let _ = handle.join();
+        }
+
+        // Wait for pending GPU evaluations to complete (with timeout)
+        #[cfg(feature = "gpu")]
+        if self.gpu_simulation_sender.is_some() {
+            let wait_start = Instant::now();
+            let max_wait = Duration::from_millis(500); // Wait up to 500ms for pending evaluations
+            while self.gpu_pending_evaluations.load(Ordering::Relaxed) > 0 {
+                if wait_start.elapsed() > max_wait {
+                    // Timeout - some evaluations may be lost, but we need to return
+                    break;
+                }
+                std::thread::sleep(Duration::from_micros(100));
             }
         }
 
@@ -1144,6 +1703,12 @@ impl<S: GameState> MCTS<S> {
             return;
         }
 
+        // Increment GPU simulation counter for cache updates
+        #[cfg(feature = "gpu")]
+        {
+            self.simulations_since_gpu_update.fetch_add(1, Ordering::Relaxed);
+        }
+
         let mut current_state = state.clone();
         let mut path: Vec<Arc<Node<S::Move>>> = Vec::with_capacity(64); // Pre-allocate reasonable capacity
         let mut path_players: Vec<i32> = Vec::with_capacity(64); // Track which player made each move
@@ -1189,6 +1754,16 @@ impl<S: GameState> MCTS<S> {
                         .iter()
                         .filter_map(|m| children_guard.get(m).map(|n| (m, n)))
                         .map(|(m, n)| {
+                            // Use GPU-cached PUCT for any level if available
+                            #[cfg(feature = "gpu")]
+                            let puct = self.get_cached_puct_by_node(&current_node, n).unwrap_or_else(|| {
+                                n.puct(
+                                    parent_visits,
+                                    self.exploration_parameter,
+                                    prior_probability,
+                                )
+                            });
+                            #[cfg(not(feature = "gpu"))]
                             let puct = n.puct(
                                 parent_visits,
                                 self.exploration_parameter,
@@ -1327,50 +1902,79 @@ impl<S: GameState> MCTS<S> {
         // --- Simulation Phase ---
         // Run a random playout from the new node to the end of the game.
         let mut sim_state = current_state.clone();
-        let mut simulation_moves = 0;
-        const MAX_SIMULATION_MOVES: usize = 1000; // Safeguard against infinite loops
 
-        // Track timing for intelligent stop flag checking
-        let sim_phase_start = std::time::Instant::now();
-        let mut last_stop_check = sim_phase_start;
-        const STOP_CHECK_INTERVAL_MS: u64 = 5; // Check every 5ms
+        #[cfg(feature = "gpu")]
+        if let Some(ref sender) = self.gpu_simulation_sender {
+            if !sim_state.is_terminal() {
+                // Check pending evaluations to prevent huge backlog
+                // If GPU is saturated, fall back to CPU simulation
+                let pending = self.gpu_pending_evaluations.load(Ordering::Relaxed);
+                if pending < 10000 {
+                    // Send to GPU. Multiple threads can evaluate the same position - this is fine.
+                    self.gpu_pending_evaluations.fetch_add(1, Ordering::Relaxed);
+                    let request = EvaluationRequest {
+                        state: sim_state.clone(), // Clone state for GPU
+                        path: path.clone(), // Clone path for GPU
+                        path_players: path_players.clone(), // Clone path_players for GPU
+                    };
 
-        while !sim_state.is_terminal() && simulation_moves < MAX_SIMULATION_MOVES {
-            // Intelligent stop flag checking: only check periodically based on time, not move count
-            let now = std::time::Instant::now();
-            if now.duration_since(last_stop_check).as_millis() >= STOP_CHECK_INTERVAL_MS as u128 {
-                if stop_flag.load(Ordering::Relaxed) {
-                    break; // Exit simulation early if stop flag is set
+                    if sender.send(request).is_ok() {
+                        // Successfully sent. The GPU thread will handle backprop and VL removal.
+                        // Virtual losses stay applied until GPU finishes backpropagation.
+                        return;
+                    } else {
+                        // Failed to send (GPU thread died). Decrement counter and fall through to CPU.
+                        self.gpu_pending_evaluations.fetch_sub(1, Ordering::Relaxed);
+                    }
                 }
-                last_stop_check = now;
             }
-
-            moves_cache.clear();
-            moves_cache.extend(sim_state.get_possible_moves());
-            if moves_cache.is_empty() {
-                // This should not happen if get_possible_moves() is implemented correctly
-                // but we break to prevent infinite loops
-                break;
-            }
-
-            // Extra safety check to prevent empty range panic
-            let moves_len = moves_cache.len();
-            if moves_len == 0 {
-                // This should be caught by the above check, but being extra safe
-                break;
-            }
-
-            let move_index = random_range(0, moves_len);
-            let mv = &moves_cache[move_index];
-            sim_state.make_move(mv);
-            simulation_moves += 1;
         }
 
-        // If we hit the simulation limit, treat it as a draw
-        let winner = if simulation_moves >= MAX_SIMULATION_MOVES {
-            None // Treat as draw/timeout
-        } else {
+        #[cfg(not(feature = "gpu"))]
+        let gpu_result: Option<Option<i32>> = None;
+
+        // If we are here, either GPU is disabled or the game state is terminal.
+        // We proceed with CPU simulation (random rollout) or just get the winner if terminal.
+        
+        let winner = if sim_state.is_terminal() {
             sim_state.get_winner()
+        } else {
+            let mut simulation_moves = 0;
+            const MAX_SIMULATION_MOVES: usize = 1000; // Safeguard against infinite loops
+
+            // Track timing for intelligent stop flag checking
+            let sim_phase_start = std::time::Instant::now();
+            let mut last_stop_check = sim_phase_start;
+            const STOP_CHECK_INTERVAL_MS: u64 = 5; // Check every 5ms
+
+            while !sim_state.is_terminal() && simulation_moves < MAX_SIMULATION_MOVES {
+                // Intelligent stop flag checking: only check periodically based on time, not move count
+                let now = std::time::Instant::now();
+                if now.duration_since(last_stop_check).as_millis() >= STOP_CHECK_INTERVAL_MS as u128 {
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break; // Exit simulation early if stop flag is set
+                    }
+                    last_stop_check = now;
+                }
+
+                moves_cache.clear();
+                moves_cache.extend(sim_state.get_possible_moves());
+                if moves_cache.is_empty() {
+                    break;
+                }
+
+                let move_index = random_range(0, moves_cache.len());
+                let mv = &moves_cache[move_index];
+                sim_state.make_move(mv);
+                simulation_moves += 1;
+            }
+
+            // If we hit the simulation limit, treat it as a draw
+            if simulation_moves >= MAX_SIMULATION_MOVES {
+                None // Treat as draw/timeout
+            } else {
+                sim_state.get_winner()
+            }
         };
 
         // --- Backpropagation Phase with Virtual Loss Removal ---
@@ -1431,6 +2035,129 @@ impl<S: GameState> MCTS<S> {
             // Slightly higher alpha since we measure less frequently now
             *current_avg = 0.85 * (*current_avg) + 0.15 * clamped_overhead;
         }
+    }
+
+    /// Updates the GPU PUCT cache for root children
+    ///
+    /// This method traverses the entire tree and computes PUCT scores on the GPU
+    /// for all children of all expanded nodes. This enables processing thousands
+    /// of nodes in a single GPU batch for maximum GPU utilization.
+    ///
+    /// # Arguments
+    /// * `force` - If true, update the cache regardless of the simulation count
+    #[cfg(feature = "gpu")]
+    fn update_gpu_puct_cache(&self, force: bool) {
+        if !self.gpu_enabled || self.gpu_accelerator.is_none() {
+            return;
+        }
+
+        // Only update every 1000 simulations or if forced
+        let sims = self.simulations_since_gpu_update.load(Ordering::Relaxed);
+        if !force && sims < 1000 {
+            return;
+        }
+
+        // Reset the counter
+        self.simulations_since_gpu_update.store(0, Ordering::Relaxed);
+
+        // Traverse the entire tree and collect all parent-child pairs
+        // Use BFS to process level by level
+        let mut node_data: Vec<gpu::GpuNodeData> = Vec::with_capacity(65536);
+        let mut cache_keys: Vec<(usize, usize)> = Vec::with_capacity(65536);
+        
+        // Stack for DFS traversal: (node, depth)
+        let mut stack: Vec<(Arc<Node<S::Move>>, u32)> = Vec::with_capacity(1024);
+        stack.push((self.root.clone(), 0));
+        
+        const MAX_DEPTH: u32 = 50; // Limit depth to avoid infinite recursion
+        const MAX_NODES: usize = 65536; // Limit to avoid GPU buffer overflow
+        
+        while let Some((parent_node, depth)) = stack.pop() {
+            if depth >= MAX_DEPTH || node_data.len() >= MAX_NODES {
+                break;
+            }
+            
+            let children = parent_node.children.read();
+            if children.is_empty() {
+                continue;
+            }
+            
+            let parent_visits = parent_node.visits.load(Ordering::Relaxed);
+            let num_children = children.len();
+            let prior_prob = 1.0 / num_children as f32;
+            let parent_id = Arc::as_ptr(&parent_node) as usize;
+            
+            for (_mv, child_node) in children.iter() {
+                if node_data.len() >= MAX_NODES {
+                    break;
+                }
+                
+                let child_id = Arc::as_ptr(child_node) as usize;
+                
+                node_data.push(gpu::GpuNodeData::new(
+                    child_node.visits.load(Ordering::Relaxed),
+                    child_node.wins.load(Ordering::Relaxed),
+                    child_node.virtual_losses.load(Ordering::Relaxed),
+                    parent_visits,
+                    prior_prob,
+                    self.exploration_parameter as f32,
+                ));
+                cache_keys.push((parent_id, child_id));
+                
+                // Only add children with visits to the stack (they might have their own children)
+                if child_node.visits.load(Ordering::Relaxed) > 0 {
+                    stack.push((child_node.clone(), depth + 1));
+                }
+            }
+        }
+
+        if node_data.is_empty() {
+            return;
+        }
+
+        let batch_size = node_data.len();
+        self.gpu_last_batch_size.store(batch_size as i32, Ordering::Relaxed);
+
+        // Compute PUCT scores on GPU
+        if let Some(ref accelerator) = self.gpu_accelerator {
+            let mut acc = accelerator.lock();
+            if let Ok(results) = acc.compute_puct_batch(&node_data) {
+                // Update the cache
+                let mut cache = self.gpu_puct_cache.write();
+                cache.clear();
+                cache.reserve(results.len());
+                
+                for (i, result) in results.iter().enumerate() {
+                    cache.insert(cache_keys[i], result.puct_score as f64);
+                }
+                
+                // Update timestamp
+                let mut ts = self.gpu_cache_timestamp.lock();
+                *ts = Instant::now();
+                
+                // Debug output
+                if force {
+                    eprintln!("[GPU] Deep tree PUCT batch: {} nodes processed", batch_size);
+                }
+            }
+        }
+    }
+
+    /// Gets a cached PUCT score from the GPU cache using node pointers
+    ///
+    /// Returns the cached PUCT score for a parent-child node pair if available,
+    /// or None if the cache doesn't have this pair.
+    #[cfg(feature = "gpu")]
+    fn get_cached_puct_by_node(&self, parent: &Arc<Node<S::Move>>, child: &Arc<Node<S::Move>>) -> Option<f64> {
+        if !self.gpu_enabled {
+            return None;
+        }
+        
+        let parent_id = Arc::as_ptr(parent) as usize;
+        let child_id = Arc::as_ptr(child) as usize;
+        
+        let cache = self.gpu_puct_cache.read();
+        cache.get(&(parent_id, child_id)).copied()
     }
 
     /// Prunes children based on visit percentage relative to the best child

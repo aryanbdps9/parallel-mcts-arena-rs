@@ -35,6 +35,7 @@ A multi-threaded Monte Carlo Tree Search engine that plays four classic board ga
 **AI Engine**
 - Parallel Monte Carlo Tree Search (MCTS) algorithm
 - Multi-threaded search with configurable thread count
+- **GPU acceleration** for batch PUCT calculations (optional)
 - Virtual losses to prevent thread collisions
 - Memory-efficient node recycling
 - Tree reuse between moves for improved performance
@@ -66,6 +67,18 @@ cd parallel-mcts-arena-rs
 cargo build --release --features gui
 cargo run --release --features gui
 ```
+
+**Build with GPU Acceleration**
+```bash
+# Enable GPU acceleration for faster PUCT calculations
+cargo build --release --features "gui,gpu"
+cargo run --release --features "gui,gpu"
+```
+
+The GPU feature uses WebGPU (wgpu) for cross-platform GPU compute and provides:
+- Batch PUCT score calculation on the GPU
+- Automatic fallback to CPU when GPU is unavailable
+- Support for DirectX 12, Vulkan, Metal backends
 
 **Alternative execution methods:**
 ```bash
@@ -170,6 +183,7 @@ cargo run --release --features gui -- --ai-only --timeout-secs 10
 - Clap: Command line argument parsing
 - Tokio: Asynchronous runtime
 - Num CPUs: CPU information and control
+- wgpu (optional): GPU compute for accelerated MCTS calculations
 
 ## Troubleshooting
 

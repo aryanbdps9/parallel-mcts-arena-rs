@@ -24,7 +24,7 @@
 //! Uses axial coordinates (q, r) for hexagonal grid representation.
 //! The hexagons use "pointy-top" orientation.
 
-use mcts::GameState;
+use crate::GameState;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
@@ -706,6 +706,101 @@ impl GameState for HiveState {
         // This is a bit of a hack - Hive doesn't fit well into a grid
         // We return a cached approximation for compatibility
         &self.cached_board
+    }
+
+    fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {
+        let width = 32;
+        let height = 32;
+        let mut data = vec![0; width * height];
+        
+        // Center offset
+        let offset_q = 16;
+        let offset_r = 16;
+        
+        for (coord, stack) in &self.board {
+            let q = coord.q + offset_q;
+            let r = coord.r + offset_r;
+            
+            if q >= 0 && q < width as i32 && r >= 0 && r < height as i32 {
+                let idx = (r * width as i32 + q) as usize;
+                
+                // Encode stack: (count << 16) | (player << 8) | piece_type
+                // Player: 1 -> 1, -1 -> 2
+                // PieceType: Queen=0, Beetle=1, Spider=2, Grasshopper=3, Ant=4
+                
+                if let Some(top_piece) = stack.last() {
+                    let p_val = if top_piece.player == 1 { 1 } else { 2 };
+                    let t_val = match top_piece.piece_type {
+                        PieceType::Queen => 0,
+                        PieceType::Beetle => 1,
+                        PieceType::Spider => 2,
+                        PieceType::Grasshopper => 3,
+                        PieceType::Ant => 4,
+                    };
+                    
+                    let val = (stack.len() as i32) << 16 | (p_val << 8) | t_val;
+                    data[idx] = val;
+                }
+            }
+        }
+        
+        // Add extra row for hands and state
+        let mut extra_row = vec![0; width];
+        
+        // Encode hands
+        // Indices 0-4: P1 counts, 5-9: P2 counts
+        let piece_types = [
+            PieceType::Queen, PieceType::Beetle, PieceType::Spider, 
+            PieceType::Grasshopper, PieceType::Ant
+        ];
+        
+        for (i, &pt) in piece_types.iter().enumerate() {
+            let p1_count = self.hands.get(&(1, pt)).copied().unwrap_or(0);
+            let p2_count = self.hands.get(&(-1, pt)).copied().unwrap_or(0);
+            
+            extra_row[i] = p1_count as i32;
+            extra_row[i + 5] = p2_count as i32;
+        }
+        
+        // Game state
+        extra_row[10] = self.turn as i32;
+        extra_row[11] = self.pieces_placed[0] as i32;
+        extra_row[12] = self.pieces_placed[1] as i32;
+        extra_row[13] = if self.queen_placed[0] { 1 } else { 0 };
+        extra_row[14] = if self.queen_placed[1] { 1 } else { 0 };
+
+        // Find Queen positions
+        let mut p1_queen_q = -100;
+        let mut p1_queen_r = -100;
+        let mut p2_queen_q = -100;
+        let mut p2_queen_r = -100;
+
+        if self.queen_placed[0] || self.queen_placed[1] {
+            for (coord, stack) in &self.board {
+                if let Some(piece) = stack.last() {
+                    if piece.piece_type == PieceType::Queen {
+                        if piece.player == 1 {
+                            p1_queen_q = coord.q + offset_q;
+                            p1_queen_r = coord.r + offset_r;
+                        } else {
+                            p2_queen_q = coord.q + offset_q;
+                            p2_queen_r = coord.r + offset_r;
+                        }
+                    }
+                }
+            }
+        }
+
+        extra_row[15] = p1_queen_q;
+        extra_row[16] = p1_queen_r;
+        extra_row[17] = p2_queen_q;
+        extra_row[18] = p2_queen_r;
+        
+        data.extend(extra_row);
+        
+        let encoded_params = (if self.current_player == 1 { 1 } else { 2 }) | (4 << 16); // 4 = GAME_HIVE
+        
+        Some((data, width, height + 1, encoded_params))
     }
 
     fn get_current_player(&self) -> i32 {

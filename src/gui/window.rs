@@ -396,7 +396,7 @@ unsafe extern "system" fn window_proc(
 
 /// Handle keyboard input
 fn handle_key(app: &mut GuiApp, vk: u16, hwnd: HWND) -> bool {
-    let num_settings = 12; // 10 settings + separator + Back
+    let num_settings = 14; // 12 settings + separator + Back
     let num_games = super::app::GameType::all().len() + 2; // games + Settings + Quit
     
     // Get window dimensions for layout calculations
@@ -445,18 +445,18 @@ fn handle_key(app: &mut GuiApp, vk: u16, hwnd: HWND) -> bool {
                     app.selected_settings_index += 1;
                 }
             } else if vk == VK_LEFT.0 {
-                if app.selected_settings_index < 10 {
+                if app.selected_settings_index < 12 {
                     app.adjust_setting(app.selected_settings_index, -1);
                 }
             } else if vk == VK_RIGHT.0 || vk == VK_SPACE.0 {
-                if app.selected_settings_index < 10 {
+                if app.selected_settings_index < 12 {
                     app.adjust_setting(app.selected_settings_index, 1);
                 }
             } else if vk == VK_RETURN.0 {
                 if app.selected_settings_index == num_settings - 1 {
                     // Back
                     app.mode = GuiMode::GameSelection;
-                } else if app.selected_settings_index >= 8 && app.selected_settings_index <= 9 {
+                } else if app.selected_settings_index >= 9 && app.selected_settings_index <= 10 {
                     // Toggle bool settings
                     app.adjust_setting(app.selected_settings_index, 1);
                 }
@@ -990,7 +990,7 @@ fn render_player_config(renderer: &Renderer, app: &GuiApp) {
         
         let bg_color = match player_type {
             PlayerType::Human => if is_selected { Colors::BUTTON_SELECTED } else { Colors::STATUS_WIN },
-            PlayerType::AI => if is_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG },
+            PlayerType::AiCpu | PlayerType::AiGpu => if is_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG },
         };
         renderer.fill_rounded_rect(button_rect, 8.0, bg_color);
         
@@ -1003,11 +1003,19 @@ fn render_player_config(renderer: &Renderer, app: &GuiApp) {
                     4 => "Green",
                     _ => "Player",
                 };
-                format!("{}: {}", color_name, if *player_type == PlayerType::Human { "Human" } else { "AI" })
+                format!("{}: {}", color_name, match player_type {
+                    PlayerType::Human => "Human",
+                    PlayerType::AiCpu => "AI (CPU)",
+                    PlayerType::AiGpu => "AI (GPU)",
+                })
             }
             _ => {
                 let player_name = if *player_id == 1 { "Player 1" } else { "Player 2" };
-                format!("{}: {}", player_name, if *player_type == PlayerType::Human { "Human" } else { "AI" })
+                format!("{}: {}", player_name, match player_type {
+                    PlayerType::Human => "Human",
+                    PlayerType::AiCpu => "AI (CPU)",
+                    PlayerType::AiGpu => "AI (GPU)",
+                })
             }
         };
         
@@ -1039,11 +1047,24 @@ fn render_in_game(renderer: &Renderer, app: &GuiApp) {
     // Current player indicator
     let current_player = app.game.get_current_player();
     let player_name = app.game_renderer.player_name(current_player);
+    
+    let player_type = app.player_types
+        .iter()
+        .find(|(id, _)| *id == current_player)
+        .map(|(_, pt)| *pt)
+        .unwrap_or(PlayerType::Human);
+
+    let type_suffix = match player_type {
+        PlayerType::Human => "",
+        PlayerType::AiCpu => " (CPU)",
+        PlayerType::AiGpu => " (GPU)",
+    };
+
     let status_text = if app.ai_thinking {
         let elapsed = app.ai_thinking_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-        format!("{} (AI thinking... {}s)", player_name, elapsed)
+        format!("{}{}{} (thinking... {}s)", player_name, type_suffix, if type_suffix.is_empty() { "AI " } else { "" }, elapsed)
     } else {
-        format!("{}'s turn", player_name)
+        format!("{}{}'s turn", player_name, type_suffix)
     };
     let status_rect = Rect::new(client.width - 350.0, 0.0, 340.0, 50.0);
     let status_color = if app.ai_thinking { Colors::AI_THINKING } else { Colors::TEXT_PRIMARY };
@@ -1221,7 +1242,20 @@ fn render_game_over(renderer: &Renderer, app: &GuiApp) {
     let result_text = match app.game_status {
         GameStatus::Win(player) => {
             let winner_name = app.game_renderer.player_name(player);
-            format!("{} wins!", winner_name)
+            
+            let player_type = app.player_types
+                .iter()
+                .find(|(id, _)| *id == player)
+                .map(|(_, pt)| *pt)
+                .unwrap_or(PlayerType::Human);
+                
+            let type_suffix = match player_type {
+                PlayerType::Human => "",
+                PlayerType::AiCpu => " (CPU)",
+                PlayerType::AiGpu => " (GPU)",
+            };
+            
+            format!("{}{} wins!", winner_name, type_suffix)
         }
         GameStatus::Draw => "It's a draw!".to_string(),
         GameStatus::InProgress => "Game in progress".to_string(),

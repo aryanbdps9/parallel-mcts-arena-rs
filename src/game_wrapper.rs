@@ -71,6 +71,7 @@ use std::fmt; // Formatting traits for display
 /// All contained game states implement Clone + Send + Sync, making the
 /// wrapper safe to use in multi-threaded contexts like parallel MCTS.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum GameWrapper {
     /// Gomoku (Five in a Row) game state
     ///
@@ -253,8 +254,15 @@ macro_rules! impl_game_dispatch {
                     $(GameWrapper::$variant(g) => g.get_board(),)*
                 }
             }
+
+            fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {
+                match self {
+                    $(GameWrapper::$variant(g) => g.get_gpu_simulation_data(),)*
+                }
+            }
         }
 
+        #[allow(dead_code)]
         impl GameWrapper {
             /// Returns the size of the game board
             pub fn get_board_size(&self) -> usize {
