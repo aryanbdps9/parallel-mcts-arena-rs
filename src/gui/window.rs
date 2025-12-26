@@ -16,7 +16,7 @@ use windows::{
             CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
             LoadCursorW, PostQuitMessage, RegisterClassW, ShowWindow, TranslateMessage,
             CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, IDC_SIZEWE, MSG,
-            SW_SHOW, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
             WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
             WM_RBUTTONDOWN, WM_RBUTTONUP,
             SetTimer, KillTimer, SetCursor,
@@ -94,7 +94,7 @@ pub fn run_gui(app: GuiApp) -> windows::core::Result<()> {
         });
 
         // Show window
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOWMAXIMIZED);
 
         // Set up update timer
         SetTimer(Some(hwnd), UPDATE_TIMER_ID, UPDATE_INTERVAL_MS, None);
@@ -342,6 +342,14 @@ unsafe extern "system" fn window_proc(
                             if delta > 0 { app.scroll_how_to_play_up(); } else { app.scroll_how_to_play_down(); }
                             return true;
                         },
+                        GuiMode::GameSelection => {
+                            if delta > 0 { app.game_selection_scroll -= 40; } else { app.game_selection_scroll += 40; }
+                            return true;
+                        },
+                        GuiMode::Settings => {
+                            if delta > 0 { app.settings_scroll -= 40; } else { app.settings_scroll += 40; }
+                            return true;
+                        },
                         _ => {}
                     }
                     false
@@ -413,13 +421,31 @@ fn handle_key(app: &mut GuiApp, vk: u16, hwnd: HWND) -> bool {
 
     match app.mode {
         GuiMode::GameSelection => {
+            let games_len = super::app::GameType::all().len();
             if vk == VK_UP.0 {
                 if app.selected_game_index > 0 {
                     app.selected_game_index -= 1;
+                    // Auto-scroll
+                    if app.selected_game_index < games_len {
+                        let item_height = 90.0; // 80 + 10
+                        let target_y = app.selected_game_index as f32 * item_height;
+                        if target_y < app.game_selection_scroll as f32 {
+                            app.game_selection_scroll = target_y as i32;
+                        }
+                    }
                 }
             } else if vk == VK_DOWN.0 {
                 if app.selected_game_index < num_games - 1 {
                     app.selected_game_index += 1;
+                    // Auto-scroll
+                    if app.selected_game_index < games_len {
+                        let item_height = 90.0;
+                        let list_height = height - 140.0 - 160.0;
+                        let target_y = (app.selected_game_index + 1) as f32 * item_height;
+                        if target_y > app.game_selection_scroll as f32 + list_height {
+                            app.game_selection_scroll = (target_y - list_height) as i32;
+                        }
+                    }
                 }
             } else if vk == VK_RETURN.0 {
                 let games = super::app::GameType::all();
@@ -436,13 +462,31 @@ fn handle_key(app: &mut GuiApp, vk: u16, hwnd: HWND) -> bool {
             }
         }
         GuiMode::Settings => {
+            let settings_len = app.get_settings_items().len();
             if vk == VK_UP.0 {
                 if app.selected_settings_index > 0 {
                     app.selected_settings_index -= 1;
+                    // Auto-scroll
+                    if app.selected_settings_index < settings_len {
+                        let item_height = 45.0; // 40 + 5
+                        let target_y = app.selected_settings_index as f32 * item_height;
+                        if target_y < app.settings_scroll as f32 {
+                            app.settings_scroll = target_y as i32;
+                        }
+                    }
                 }
             } else if vk == VK_DOWN.0 {
                 if app.selected_settings_index < num_settings - 1 {
                     app.selected_settings_index += 1;
+                    // Auto-scroll
+                    if app.selected_settings_index < settings_len {
+                        let item_height = 45.0;
+                        let list_height = height - 100.0 - 100.0;
+                        let target_y = (app.selected_settings_index + 1) as f32 * item_height;
+                        if target_y > app.settings_scroll as f32 + list_height {
+                            app.settings_scroll = (target_y - list_height) as i32;
+                        }
+                    }
                 }
             } else if vk == VK_LEFT.0 {
                 if app.selected_settings_index < 12 {
@@ -563,24 +607,49 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32, width: f32, height: f32) -> (b
 
     match app.mode {
         GuiMode::GameSelection => {
-            // Check button clicks
+            // Layout constants (must match render_game_selection)
+            let bottom_area_height = 160.0;
+            let list_area = Rect::new(0.0, 140.0, width, height - 140.0 - bottom_area_height);
+            let item_height = 80.0;
+            let item_width = 480.0_f32.min(width * 0.8);
+            let spacing = 10.0;
+            
+            // Calculate scroll exactly as in render_game_selection
             let games = super::app::GameType::all();
-            for (i, _) in games.iter().enumerate() {
-                let button_rect = get_game_button_rect(i, width, height);
-                if button_rect.contains(x, y) {
-                    app.select_game(i);
-                    return (true, false);
+            let total_content_height = games.len() as f32 * (item_height + spacing);
+            let max_scroll = (total_content_height - list_area.height).max(0.0);
+            let scroll = (app.game_selection_scroll as f32).clamp(0.0, max_scroll);
+
+            // Check game list
+            if list_area.contains(x, y) {
+                for (i, _) in games.iter().enumerate() {
+                    let item_y = list_area.y + (i as f32 * (item_height + spacing)) - scroll;
+                    let item_x = (width - item_width) / 2.0;
+                    let button_rect = Rect::new(item_x, item_y, item_width, item_height);
+                    
+                    // Only check if visible
+                    if item_y + item_height >= list_area.y && item_y <= list_area.y + list_area.height {
+                        if button_rect.contains(x, y) {
+                            app.select_game(i);
+                            return (true, false);
+                        }
+                    }
                 }
             }
-            // Check Settings button
-            let settings_rect = get_game_button_rect(games.len(), width, height);
+
+            // Check fixed buttons
+            let bottom_start_y = height - bottom_area_height + 20.0;
+            
+            // Settings
+            let settings_rect = Rect::new((width - item_width) / 2.0, bottom_start_y, item_width, 50.0);
             if settings_rect.contains(x, y) {
                 app.mode = GuiMode::Settings;
                 app.selected_settings_index = 0;
                 return (true, false);
             }
-            // Check How To Play button
-            let help_rect = get_game_button_rect(games.len() + 1, width, height);
+            
+            // How To Play
+            let help_rect = Rect::new((width - item_width) / 2.0, bottom_start_y + 60.0, item_width, 50.0);
             if help_rect.contains(x, y) {
                 app.mode = GuiMode::HowToPlay;
                 app.selected_how_to_play_game = 0;
@@ -646,21 +715,45 @@ fn handle_click(app: &mut GuiApp, x: f32, y: f32, width: f32, height: f32) -> (b
             }
         }
         GuiMode::Settings => {
-            // Check settings item clicks
+            // Layout constants (must match render_settings)
+            let bottom_area_height = 100.0;
+            let list_area = Rect::new(0.0, 100.0, width, height - 100.0 - bottom_area_height);
+            let item_height = 40.0;
+            let item_width = 600.0_f32.min(width * 0.9);
+            let spacing = 5.0;
+            
+            // Calculate scroll exactly as in render_settings
             let settings = app.get_settings_items();
-            for i in 0..settings.len() + 2 {
-                let item_rect = get_settings_item_rect(i, width, height);
-                if item_rect.contains(x, y) {
-                    app.selected_settings_index = i;
-                    if i == settings.len() + 1 {
-                        // Back button
-                        app.go_back();
-                    } else if i >= 8 && i <= 9 {
-                        // Toggle bool settings
-                        app.adjust_setting(i, 1);
+            let total_content_height = (settings.len() + 1) as f32 * (item_height + spacing);
+            let max_scroll = (total_content_height - list_area.height).max(0.0);
+            let scroll = (app.settings_scroll as f32).clamp(0.0, max_scroll);
+
+            // Check settings list
+            if list_area.contains(x, y) {
+                for i in 0..settings.len() {
+                    let item_y = list_area.y + (i as f32 * (item_height + spacing)) - scroll;
+                    let item_x = (width - item_width) / 2.0;
+                    let item_rect = Rect::new(item_x, item_y, item_width, item_height);
+                    
+                    if item_y + item_height >= list_area.y && item_y <= list_area.y + list_area.height {
+                        if item_rect.contains(x, y) {
+                            app.selected_settings_index = i;
+                            if i >= 8 && i <= 9 {
+                                // Toggle bool settings
+                                app.adjust_setting(i, 1);
+                            }
+                            return (true, false);
+                        }
                     }
-                    return (true, false);
                 }
+            }
+            
+            // Check Back button
+            let back_y = height - bottom_area_height + 20.0;
+            let back_rect = Rect::new((width - item_width) / 2.0, back_y, item_width, 50.0);
+            if back_rect.contains(x, y) {
+                app.go_back();
+                return (true, false);
             }
         }
         GuiMode::HowToPlay => {
@@ -776,13 +869,44 @@ fn render_game_selection(renderer: &Renderer, app: &GuiApp) {
     let subtitle_rect = Rect::new(0.0, 100.0, client.width, 30.0);
     renderer.draw_text(subtitle_text, subtitle_rect, Colors::TEXT_SECONDARY, true);
 
-    // Game buttons
+    // Fixed bottom area for Settings and How To Play
+    let bottom_area_height = 160.0;
+    let list_area = Rect::new(
+        0.0, 
+        140.0, 
+        client.width, 
+        client.height - 140.0 - bottom_area_height
+    );
+
+    // Game List
     let games = super::app::GameType::all();
+    let item_height = 80.0;
+    let item_width = 480.0_f32.min(client.width * 0.8);
+    let spacing = 10.0;
+    
+    // Calculate visible range
+    let total_content_height = games.len() as f32 * (item_height + spacing);
+    let max_scroll = (total_content_height - list_area.height).max(0.0);
+    
+    // Clamp scroll
+    let scroll = (app.game_selection_scroll as f32).clamp(0.0, max_scroll);
+
+    renderer.set_clip(list_area);
+    
     for (i, game) in games.iter().enumerate() {
-        let button_rect = get_game_button_rect(i, client.width, client.height);
-        let is_selected = i == app.selected_game_index;
+        let y = list_area.y + (i as f32 * (item_height + spacing)) - scroll;
         
+        // Optimization: Skip if out of view
+        if y + item_height < list_area.y || y > list_area.y + list_area.height {
+            continue;
+        }
+
+        let x = (client.width - item_width) / 2.0;
+        let button_rect = Rect::new(x, y, item_width, item_height);
+        
+        let is_selected = i == app.selected_game_index;
         let bg_color = if is_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
+        
         renderer.fill_rounded_rect(button_rect, 8.0, bg_color);
         
         // Game name
@@ -793,24 +917,41 @@ fn render_game_selection(renderer: &Renderer, app: &GuiApp) {
         let desc_rect = Rect::new(button_rect.x, button_rect.y + 45.0, button_rect.width, 25.0);
         renderer.draw_small_text(game.description(), desc_rect, Colors::TEXT_SECONDARY, true);
     }
+    
+    renderer.remove_clip();
 
+    // Scrollbar
+    if max_scroll > 0.0 {
+        let scroll_pct = scroll / max_scroll;
+        let bar_height = (list_area.height * (list_area.height / total_content_height)).max(30.0);
+        let bar_y = list_area.y + (list_area.height - bar_height) * scroll_pct;
+        let bar_rect = Rect::new(client.width - 10.0, bar_y, 6.0, bar_height);
+        renderer.fill_rounded_rect(bar_rect, 3.0, Colors::GRID_LINE);
+    }
+
+    // Bottom buttons
+    let bottom_start_y = client.height - bottom_area_height + 20.0;
+    
     // Settings button
-    let settings_rect = get_game_button_rect(games.len(), client.width, client.height);
+    let settings_rect = Rect::new((client.width - item_width) / 2.0, bottom_start_y, item_width, 50.0);
     let is_settings_selected = app.selected_game_index == games.len();
-    let settings_bg = if is_settings_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
+    let settings_bg = if is_settings_selected { Colors::BUTTON_SELECTED } else { Colors::PANEL_BG };
     renderer.fill_rounded_rect(settings_rect, 8.0, settings_bg);
-    renderer.draw_text("Settings", Rect::new(settings_rect.x, settings_rect.y + 20.0, settings_rect.width, 30.0), Colors::TEXT_PRIMARY, true);
+    if !is_settings_selected {
+        renderer.draw_rounded_rect(settings_rect, 8.0, Colors::GRID_LINE, 2.0);
+    }
+    renderer.draw_text("Settings", Rect::new(settings_rect.x, settings_rect.y + 10.0, settings_rect.width, 30.0), Colors::TEXT_PRIMARY, true);
 
     // How To Play button
-    let help_button_rect = get_game_button_rect(games.len() + 1, client.width, client.height);
+    let help_rect = Rect::new((client.width - item_width) / 2.0, bottom_start_y + 60.0, item_width, 50.0);
     let is_help_selected = app.selected_game_index == games.len() + 1;
     let help_bg = if is_help_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
-    renderer.fill_rounded_rect(help_button_rect, 8.0, help_bg);
-    renderer.draw_text("How To Play", Rect::new(help_button_rect.x, help_button_rect.y + 20.0, help_button_rect.width, 30.0), Colors::TEXT_PRIMARY, true);
+    renderer.fill_rounded_rect(help_rect, 8.0, help_bg);
+    renderer.draw_text("How To Play", Rect::new(help_rect.x, help_rect.y + 10.0, help_rect.width, 30.0), Colors::TEXT_PRIMARY, true);
 
     // Instructions
-    let help_rect = Rect::new(0.0, client.height - 50.0, client.width, 30.0);
-    renderer.draw_small_text("↑↓ Navigate • Enter Select • Escape Quit", help_rect, Colors::TEXT_SECONDARY, true);
+    let instr_rect = Rect::new(0.0, client.height - 30.0, client.width, 30.0);
+    renderer.draw_small_text("↑↓ Navigate • Enter Select • Escape Quit", instr_rect, Colors::TEXT_SECONDARY, true);
 }
 
 /// Render settings screen
@@ -821,13 +962,45 @@ fn render_settings(renderer: &Renderer, app: &GuiApp) {
     let title_rect = Rect::new(0.0, 30.0, client.width, 50.0);
     renderer.draw_title("Settings", title_rect, Colors::TEXT_PRIMARY, true);
     
-    // Settings list
+    // Fixed bottom area for Back button
+    let bottom_area_height = 100.0;
+    let list_area = Rect::new(
+        0.0, 
+        100.0, 
+        client.width, 
+        client.height - 100.0 - bottom_area_height
+    );
+
+    // Settings List
     let settings = app.get_settings_items();
+    let item_height = 40.0;
+    let item_width = 600.0_f32.min(client.width * 0.9);
+    let spacing = 5.0;
+    
+    // Calculate visible range
+    // +1 for separator
+    let total_content_height = (settings.len() + 1) as f32 * (item_height + spacing);
+    let max_scroll = (total_content_height - list_area.height).max(0.0);
+    
+    // Clamp scroll
+    let scroll = (app.settings_scroll as f32).clamp(0.0, max_scroll);
+
+    renderer.set_clip(list_area);
+    
     for (i, (name, value)) in settings.iter().enumerate() {
-        let item_rect = get_settings_item_rect(i, client.width, client.height);
-        let is_selected = i == app.selected_settings_index;
+        let y = list_area.y + (i as f32 * (item_height + spacing)) - scroll;
         
+        // Optimization: Skip if out of view
+        if y + item_height < list_area.y || y > list_area.y + list_area.height {
+            continue;
+        }
+
+        let x = (client.width - item_width) / 2.0;
+        let item_rect = Rect::new(x, y, item_width, item_height);
+        
+        let is_selected = i == app.selected_settings_index;
         let bg_color = if is_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
+        
         renderer.fill_rounded_rect(item_rect, 5.0, bg_color);
         
         // Setting name
@@ -839,23 +1012,40 @@ fn render_settings(renderer: &Renderer, app: &GuiApp) {
         renderer.draw_text(value, value_rect, Colors::TEXT_ACCENT, false);
     }
     
-    // Separator (empty row)
+    // Separator
     let sep_index = settings.len();
-    let sep_rect = get_settings_item_rect(sep_index, client.width, client.height);
-    renderer.draw_line(sep_rect.x + 50.0, sep_rect.y + sep_rect.height / 2.0, 
-                       sep_rect.x + sep_rect.width - 50.0, sep_rect.y + sep_rect.height / 2.0,
-                       Colors::GRID_LINE, 1.0);
+    let sep_y = list_area.y + (sep_index as f32 * (item_height + spacing)) - scroll;
+    if sep_y + item_height >= list_area.y && sep_y <= list_area.y + list_area.height {
+        let x = (client.width - item_width) / 2.0;
+        let sep_rect = Rect::new(x, sep_y, item_width, item_height);
+        renderer.draw_line(sep_rect.x + 50.0, sep_rect.y + sep_rect.height / 2.0, 
+                           sep_rect.x + sep_rect.width - 50.0, sep_rect.y + sep_rect.height / 2.0,
+                           Colors::GRID_LINE, 1.0);
+    }
+    
+    renderer.remove_clip();
+
+    // Scrollbar
+    if max_scroll > 0.0 {
+        let scroll_pct = scroll / max_scroll;
+        let bar_height = (list_area.height * (list_area.height / total_content_height)).max(30.0);
+        let bar_y = list_area.y + (list_area.height - bar_height) * scroll_pct;
+        let bar_rect = Rect::new(client.width - 10.0, bar_y, 6.0, bar_height);
+        renderer.fill_rounded_rect(bar_rect, 3.0, Colors::GRID_LINE);
+    }
     
     // Back button
     let back_index = settings.len() + 1;
-    let back_rect = get_settings_item_rect(back_index, client.width, client.height);
+    let back_y = client.height - bottom_area_height + 20.0;
+    let back_rect = Rect::new((client.width - item_width) / 2.0, back_y, item_width, 50.0);
+    
     let is_back_selected = app.selected_settings_index == back_index;
     let back_bg = if is_back_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG };
     renderer.fill_rounded_rect(back_rect, 5.0, back_bg);
     renderer.draw_text("Back", back_rect, Colors::TEXT_PRIMARY, true);
     
     // Instructions
-    let help_rect = Rect::new(0.0, client.height - 50.0, client.width, 30.0);
+    let help_rect = Rect::new(0.0, client.height - 30.0, client.width, 30.0);
     renderer.draw_small_text("↑↓ Navigate • ←→ Adjust • Enter Confirm • Escape Back", help_rect, Colors::TEXT_SECONDARY, true);
 }
 
@@ -1277,16 +1467,6 @@ fn render_game_over(renderer: &Renderer, app: &GuiApp) {
 
 // Layout helper functions
 
-fn get_game_button_rect(index: usize, width: f32, height: f32) -> Rect {
-    let button_width = 480.0_f32.min(width * 0.8);
-    let button_height = 70.0_f32.min(height * 0.1);
-    let start_y = height * 0.2;
-    let spacing = button_height * 1.2;
-    let x = (width - button_width) / 2.0;
-    let y = start_y + index as f32 * spacing;
-    Rect::new(x, y, button_width, button_height)
-}
-
 fn get_player_button_rect(index: usize, width: f32, height: f32) -> Rect {
     let button_width = 400.0_f32.min(width * 0.8);
     let button_height = 50.0_f32.min(height * 0.08);
@@ -1310,16 +1490,6 @@ fn get_game_area(width: f32, height: f32) -> Rect {
     let margin = 20.0;
     let header_height = 60.0;
     Rect::new(margin, header_height, width - 2.0 * margin, height - header_height - margin)
-}
-
-fn get_settings_item_rect(index: usize, width: f32, height: f32) -> Rect {
-    let item_width = 600.0_f32.min(width * 0.9);
-    let item_height = 40.0_f32.min(height * 0.06);
-    let start_y = height * 0.15;
-    let spacing = item_height * 1.1;
-    let x = (width - item_width) / 2.0;
-    let y = start_y + index as f32 * spacing;
-    Rect::new(x, y, item_width, item_height)
 }
 
 fn get_how_to_play_tab_rect(index: usize, width: f32, _height: f32) -> Rect {

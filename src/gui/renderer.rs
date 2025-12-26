@@ -433,6 +433,24 @@ impl Renderer {
             unsafe { self.device_context.DrawLine(p0, p1, &brush, stroke_width, None); }
         }
     }
+
+    /// Set clipping rectangle
+    pub fn set_clip(&self, rect: Rect) {
+        unsafe {
+            self.device_context.PushAxisAlignedClip(
+                &rect.to_d2d(),
+                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            );
+        }
+    }
+
+    /// Remove clipping
+    pub fn remove_clip(&self) {
+        unsafe {
+            self.device_context.PopAxisAlignedClip();
+        }
+    }
+
     
     /// Draw text with title format (large, bold)
     pub fn draw_title(&self, text: &str, rect: Rect, color: D2D1_COLOR_F, centered: bool) {
