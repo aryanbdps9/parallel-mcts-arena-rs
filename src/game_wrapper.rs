@@ -295,3 +295,19 @@ macro_rules! impl_game_dispatch {
 }
 
 impl_game_dispatch!(Gomoku, Connect4, Blokus, Othello, Hive);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::games::gomoku::{GomokuMove, GomokuState};
+
+    #[test]
+    fn test_display() {
+        let move_wrapper = MoveWrapper::Gomoku(GomokuMove(1, 2));
+        assert_eq!(format!("{}", move_wrapper), "G(1,2)");
+
+        let game_wrapper = GameWrapper::Gomoku(GomokuState::new(15, 5));
+        // GomokuState Display might be complex, but we can check it doesn't panic
+        let _ = format!("{}", game_wrapper);
+    }
+}

@@ -465,4 +465,33 @@ mod tests {
         assert_eq!(controller.get_move_history()[0].player, 1);
         assert_eq!(controller.get_move_history()[1].player, -1);
     }
+
+    #[test]
+    fn test_reset() {
+        let state = GameWrapper::Gomoku(GomokuState::new(15, 5));
+        let mut controller = GameController::new(state);
+
+        let mv = MoveWrapper::Gomoku(crate::games::gomoku::GomokuMove(7, 7));
+        controller.try_make_move(mv);
+        assert_eq!(controller.move_count(), 1);
+
+        let new_state = GameWrapper::Gomoku(GomokuState::new(15, 5));
+        controller.reset(new_state);
+        
+        assert_eq!(controller.move_count(), 0);
+        assert!(matches!(controller.status, GameStatus::InProgress));
+    }
+
+    #[test]
+    fn test_format_history() {
+        let state = GameWrapper::Gomoku(GomokuState::new(15, 5));
+        let mut controller = GameController::new(state);
+
+        let mv = MoveWrapper::Gomoku(crate::games::gomoku::GomokuMove(7, 7));
+        controller.try_make_move(mv);
+
+        let history = controller.format_history_for_clipboard();
+        assert!(history.contains("Gomoku Game History"));
+        assert!(history.contains("1. Player 1 - G(7,7)"));
+    }
 }
