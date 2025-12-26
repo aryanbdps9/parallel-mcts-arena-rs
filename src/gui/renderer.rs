@@ -678,7 +678,8 @@ impl Renderer {
     /// tilt: Y-axis compression factor (1.0 = no tilt, 0.5 = 50% Y compression)
     /// rotation: rotation angle in radians
     /// scale: zoom factor (1.0 = normal size)
-    pub fn set_board_transform(&self, cx: f32, cy: f32, tilt: f32, rotation: f32, scale: f32) {
+    /// pan_x, pan_y: additional translation
+    pub fn set_board_transform(&self, cx: f32, cy: f32, tilt: f32, rotation: f32, scale: f32, pan_x: f32, pan_y: f32) {
         let cos_r = rotation.cos();
         let sin_r = rotation.sin();
         
@@ -686,15 +687,15 @@ impl Renderer {
         let s_sin_r = sin_r * scale;
         let s_tilt = tilt * scale;
         
-        // Combined matrix: translate to origin, scale, apply tilt, rotate, translate back
-        // M = T(cx,cy) * R(rotation) * S(1, tilt) * S(scale, scale) * T(-cx,-cy)
+        // Combined matrix: translate to origin, scale, apply tilt, rotate, translate back, then pan
+        // M = T(pan_x, pan_y) * T(cx,cy) * R(rotation) * S(1, tilt) * S(scale, scale) * T(-cx,-cy)
         let transform = Matrix3x2 {
             m11: s_cos_r,
             m12: s_sin_r,
             m21: -sin_r * s_tilt,
             m22: cos_r * s_tilt,
-            m31: cx - cx * s_cos_r + cy * sin_r * s_tilt,
-            m32: cy - cx * s_sin_r - cy * cos_r * s_tilt,
+            m31: cx - cx * s_cos_r + cy * sin_r * s_tilt + pan_x,
+            m32: cy - cx * s_sin_r - cy * cos_r * s_tilt + pan_y,
         };
         
         unsafe {

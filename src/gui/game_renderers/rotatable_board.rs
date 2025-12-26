@@ -130,7 +130,7 @@ impl RotatableBoard {
     /// * `center_x` - X coordinate of rotation center
     /// * `center_y` - Y coordinate of rotation center
     pub fn begin_draw(&self, renderer: &Renderer, center_x: f32, center_y: f32) {
-        renderer.set_board_transform(center_x + self.pan_x, center_y + self.pan_y, self.tilt, self.rotation, self.scale);
+        renderer.set_board_transform(center_x, center_y, self.tilt, self.rotation, self.scale, self.pan_x, self.pan_y);
     }
 
     /// End drawing and reset the transform.

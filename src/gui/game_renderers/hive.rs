@@ -49,17 +49,11 @@ pub struct HexLayout {
     /// View offset for panning (in hex coordinates)
     pub offset_q: f32,
     pub offset_r: f32,
-    /// Isometric tilt factor
-    pub iso_tilt: f32,
-    /// Rotation angle in radians (around the center)
-    pub rotation: f32,
-    /// Zoom scale
-    pub scale: f32,
 }
 
 impl HexLayout {
     /// Calculate hex layout based on available area and board bounds
-    fn calculate(area: Rect, state: &HiveState, iso_tilt: f32, rotation: f32, scale: f32) -> Self {
+    fn calculate(area: Rect, state: &HiveState) -> Self {
         // Find bounds of placed pieces
         let mut min_q: i32 = 0;
         let mut max_q: i32 = 0;
@@ -105,9 +99,6 @@ impl HexLayout {
             center_y: area.y + area.height / 2.0,
             offset_q: center_q,
             offset_r: center_r,
-            iso_tilt,
-            rotation,
-            scale,
         }
     }
     
@@ -136,27 +127,13 @@ impl HexLayout {
         (x, y - y_offset - z_offset)
     }
     
-    /// Convert screen coordinates to hex coordinates (approximate, accounting for tilt and rotation)
-    fn screen_to_hex(&self, x: f32, y: f32) -> HexCoord {
+
+    /// Convert local (flat, unscaled) coordinates to hex coordinates
+    fn local_to_hex(&self, x: f32, y: f32) -> HexCoord {
         let sqrt3 = 3.0_f32.sqrt();
         
-        // Translate to local coordinates (relative to center)
-        let x_local = x - self.center_x;
-        let y_local = y - self.center_y;
-        
-        // Reverse the rotation
-        let cos_r = self.rotation.cos();
-        let sin_r = self.rotation.sin();
-        let x_unrotated = x_local * cos_r + y_local * sin_r;
-        let y_unrotated = -x_local * sin_r + y_local * cos_r;
-        
-        // Reverse scale
-        let x_unscaled = x_unrotated / self.scale;
-        let y_unscaled = y_unrotated / self.scale;
-
-        // Reverse the isometric tilt
-        let r = y_unscaled / (self.hex_size * 1.5 * self.iso_tilt);
-        let q = x_unscaled / (self.hex_size * sqrt3) - r / 2.0;
+        let r = y / (self.hex_size * 1.5);
+        let q = x / (self.hex_size * sqrt3) - r / 2.0;
         
         // Round to nearest hex
         let q_adj = q + self.offset_q;
@@ -544,7 +521,7 @@ impl GameRenderer for HiveRenderer {
         renderer.fill_rect(board_area, HEX_BG_COLOR);
         
         // Calculate layout using board_view tilt/rotation
-        let layout = HexLayout::calculate(board_area, state, self.board_view.tilt(), self.board_view.rotation(), self.board_view.scale());
+        let layout = HexLayout::calculate(board_area, state);
         
         // Set board transform (tilt + rotation around center)
         self.board_view.begin_draw(renderer, layout.center_x, layout.center_y);
@@ -647,7 +624,7 @@ impl GameRenderer for HiveRenderer {
         // Calculate layout for coordinate conversion
         let panel_width = (area.width * 0.2).max(150.0).min(200.0);
         let board_area = Rect::new(area.x, area.y, area.width - panel_width - 10.0, area.height);
-        let layout = HexLayout::calculate(board_area, state, self.board_view.tilt(), self.board_view.rotation(), self.board_view.scale());
+        let layout = HexLayout::calculate(board_area, state);
 
         // Let board_view handle drag inputs for tilt/rotation
         if let Some(result) = self.board_view.handle_input(&input, layout.center_x, layout.center_y) {
@@ -689,7 +666,8 @@ impl GameRenderer for HiveRenderer {
                 
                 // Check if click is in board area
                 if x < board_area.x + board_area.width {
-                    let hex = layout.screen_to_hex(x, y);
+                    let (lx, ly) = self.board_view.screen_to_local(x, y, layout.center_x, layout.center_y);
+                    let hex = layout.local_to_hex(lx, ly);
                     
                     match self.mode {
                         InputMode::SelectPiece | InputMode::SelectMove => {
@@ -734,7 +712,8 @@ impl GameRenderer for HiveRenderer {
                 let old_hover = self.hover_hex;
                 
                 if x < board_area.x + board_area.width {
-                    self.hover_hex = Some(layout.screen_to_hex(x, y));
+                    let (lx, ly) = self.board_view.screen_to_local(x, y, layout.center_x, layout.center_y);
+                    self.hover_hex = Some(layout.local_to_hex(lx, ly));
                 } else {
                     self.hover_hex = None;
                 }
