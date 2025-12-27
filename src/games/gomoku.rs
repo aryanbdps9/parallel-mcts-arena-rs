@@ -117,7 +117,11 @@ impl GameState for GomokuState {
                 data.push(cell * multiplier);
             }
         }
-        Some((data, self.board_size, self.board_size, 1))
+        // Encode line_size in the player field (upper bits)
+        // Format: player in bits 0-7, line_size in bits 8-15
+        // Game type 0 is Gomoku (default)
+        let encoded_params = 1 | ((self.line_size as i32) << 8);
+        Some((data, self.board_size, self.board_size, encoded_params))
     }
 
     fn get_possible_moves(&self) -> Vec<Self::Move> {

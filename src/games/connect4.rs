@@ -84,8 +84,9 @@ impl GameState for Connect4State {
             }
         }
         // Encode line_size in the player field (upper bits)
-        // Format: player in bits 0-7, line_size in bits 8-15
-        let encoded_params = 1 | ((self.line_size as i32) << 8);
+        // Format: player in bits 0-7, line_size in bits 8-15, game_type in bits 16-23
+        // Game type 1 is Connect4
+        let encoded_params = 1 | ((self.line_size as i32) << 8) | (1 << 16);
         Some((data, self.width, self.height, encoded_params))
     }
 

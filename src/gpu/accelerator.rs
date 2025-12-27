@@ -11,6 +11,8 @@ use std::sync::Arc;
 use super::context::{GpuContext, GpuError};
 
 // Game type constants matching shaders.rs
+const GAME_GOMOKU: i32 = 0;
+const GAME_CONNECT4: i32 = 1;
 const GAME_OTHELLO: i32 = 2;
 const GAME_BLOKUS: i32 = 3;
 const GAME_HIVE: i32 = 4;
@@ -300,17 +302,14 @@ impl GpuMctsAccelerator {
         // Determine which pipeline to use based on game type
         let encoded = params.current_player;
         let explicit_game_type = (encoded >> 16) & 0xFF;
-        let line_size = (encoded >> 8) & 0xFF;
+        // let line_size = (encoded >> 8) & 0xFF;
         
         let pipeline = match explicit_game_type {
+            GAME_CONNECT4 => &self.context.connect4_eval_pipeline,
             GAME_OTHELLO => &self.context.othello_eval_pipeline,
             GAME_BLOKUS => &self.context.blokus_eval_pipeline,
             GAME_HIVE => &self.context.hive_eval_pipeline,
-            _ => if line_size > 0 && line_size < 10 {
-                &self.context.connect4_eval_pipeline
-            } else {
-                &self.context.gomoku_eval_pipeline
-            },
+            GAME_GOMOKU | _ => &self.context.gomoku_eval_pipeline,
         };
 
         {
