@@ -365,27 +365,31 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     /// * `parent_visits` - The no. of visits to the parent node.
     /// * `exploration_parameter` - A constant to tune the level of exploration (C_puct).
     /// * `prior_probability` - The prior probability of selecting this move (usually from a neural network).
-    fn puct(&self, parent_visits: i32, exploration_parameter: f64, prior_probability: f64) -> f64 {
+    /// * `virtual_loss_weight` - Weight applied to virtual losses.
+    fn puct(&self, parent_visits: i32, exploration_parameter: f64, prior_probability: f64, virtual_loss_weight: f64) -> f64 {
         let visits = self.visits.load(Ordering::Relaxed);
         let virtual_losses = self.virtual_losses.load(Ordering::Relaxed);
-        let effective_visits = visits + virtual_losses;
+        
+        // Calculate effective visits including virtual losses
+        // This increases the denominator in both Q and U terms
+        let effective_visits = visits as f64 + (virtual_losses as f64 * virtual_loss_weight);
 
-        if effective_visits == 0 {
+        if effective_visits <= 1e-9 {
             // For unvisited nodes, return only the exploration term
             exploration_parameter * prior_probability * (parent_visits as f64).sqrt()
         } else {
             let wins = self.wins.load(Ordering::Relaxed) as f64;
-            let effective_visits_f = effective_visits as f64;
-            // PUCT formula with virtual losses: Q(s,a) + C_puct * P(s,a) * sqrt(N(s)) / (1 + N(s,a) + VL(s,a))
-            // Virtual losses effectively reduce the Q value, making the node less attractive
-            let q_value = if visits > 0 {
-                (wins / visits as f64) / 2.0
-            } else {
-                0.0 // If only virtual losses, assume worst case
-            };
+            
+            // PUCT formula with virtual losses:
+            // Q = Wins / (Visits + VirtualLosses)
+            // We treat virtual losses as "losses" (value 0), so we add them to the denominator
+            // but not the numerator. This temporarily lowers the winrate.
+            let q_value = (wins / effective_visits) / 2.0;
+            
             let exploration_term =
                 exploration_parameter * prior_probability * (parent_visits as f64).sqrt()
-                    / (1.0 + effective_visits_f);
+                    / (1.0 + effective_visits);
+            
             q_value + exploration_term
         }
     }
@@ -880,17 +884,114 @@ impl<S: GameState> MCTS<S> {
 
             let info = debug_info.unwrap_or("Unknown");
 
+            // --- Debug Stats Collection ---
+            let root_visits = self.root.visits.load(Ordering::Relaxed);
+            let root_wins = self.root.wins.load(Ordering::Relaxed);
+            let root_q = if root_visits > 0 { (root_wins as f64 / root_visits as f64) / 2.0 } else { 0.0 };
+            
+            // Stats for the chosen move (New Root)
+            let (new_root_visits, new_root_q, new_root_u) = if let Some(node) = children.get(mv) {
+                 let v = node.visits.load(Ordering::Relaxed);
+                 let w = node.wins.load(Ordering::Relaxed);
+                 let q = if v > 0 { (w as f64 / v as f64) / 2.0 } else { 0.0 };
+                 let prior = if !children.is_empty() { 1.0 / children.len() as f64 } else { 0.0 };
+                 let u = self.exploration_parameter * prior * (root_visits as f64).sqrt() / (1.0 + v as f64);
+                 (v, q, u)
+            } else {
+                 (0, 0.0, 0.0)
+            };
+
+            // Stats for the Second Best move (for comparison)
+            let mut sorted_children: Vec<_> = children.iter().collect();
+            sorted_children.sort_by_key(|(_, node)| -node.visits.load(Ordering::Relaxed));
+            
+            // Helper to clean move strings
+            let clean_move = |mv: &S::Move| -> String {
+                let s = format!("{:?}", mv);
+                let mut result = s;
+                loop {
+                    let old_len = result.len();
+                    if let Some(start) = result.find('(') {
+                        if let Some(end) = result.rfind(')') {
+                            let prefix = &result[..start];
+                            if prefix.chars().all(|c| c.is_alphanumeric() || c == '_') && !prefix.is_empty() {
+                                result = result[start+1..end].to_string();
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                    if result.len() == old_len { break; }
+                }
+                result
+            };
+
+            let mut second_best_stats = (0, 0.0, 0.0); // visits, q, u
+            let mut second_best_move_str = "None".to_string();
+
+            for (child_mv, node) in sorted_children {
+                if child_mv != mv {
+                     let v = node.visits.load(Ordering::Relaxed);
+                     let w = node.wins.load(Ordering::Relaxed);
+                     let q = if v > 0 { (w as f64 / v as f64) / 2.0 } else { 0.0 };
+                     let prior = if !children.is_empty() { 1.0 / children.len() as f64 } else { 0.0 };
+                     let u = self.exploration_parameter * prior * (root_visits as f64).sqrt() / (1.0 + v as f64);
+                     second_best_stats = (v, q, u);
+                     second_best_move_str = clean_move(child_mv);
+                     break;
+                }
+            }
+
+            // CSV Output
+            // Format: Info, RootVisits, RootQ, Move, MoveVisits, MoveQ, MoveU, AltMove, AltVisits, AltQ, AltU
+            let csv_line = format!("{}\t{}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\n",
+                info, root_visits, root_q, clean_move(mv), new_root_visits, new_root_q, new_root_u,
+                second_best_move_str, second_best_stats.0, second_best_stats.1, second_best_stats.2
+            );
+
+            // Print to terminal
+            println!("CSV_DATA: {}", csv_line.trim());
+
+            // Append to file
+            use std::io::Write;
+            let file_path = std::path::Path::new("mcts_stats.tsv");
+            
+            // Use a static flag to track if we've initialized the file in this run
+            // This ensures we overwrite on the first write, then append for subsequent writes
+            static FILE_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            
+            let is_first_write = !FILE_INITIALIZED.swap(true, Ordering::Relaxed);
+            
+            let mut options = std::fs::OpenOptions::new();
+            if is_first_write {
+                options.create(true).write(true).truncate(true);
+            } else {
+                options.create(true).append(true);
+            }
+
+            if let Ok(mut file) = options.open(file_path) {
+                if is_first_write {
+                    let _ = file.write_all(b"Info\tRootVisits\tRootQ\tMove\tMoveVisits\tMoveQ\tMoveU\tAltMove\tAltVisits\tAltQ\tAltU\n");
+                }
+                let _ = file.write_all(csv_line.as_bytes());
+            }
+            // -----------------------------
+
             // Calculate the size of the new subtree
             let new_tree_size = if children.contains_key(mv) {
                 let visits = new_root.visits.load(Ordering::Relaxed);
                 let root_visits = self.root.visits.load(Ordering::Relaxed);
                 let root_nodes = self.node_count.load(Ordering::Relaxed);
-                println!("[{}] Advancing root to existing child. Child Visits: {}, Root Visits: {}, Root Nodes: {}", info, visits, root_visits, root_nodes);
+                println!("[{}] Advancing root to existing child. Child Visits: {}, Q: {:.4}, U: {:.4}, Root Visits: {}, Root Nodes: {}, Root Q: {:.4}", info, visits, new_root_q, new_root_u, root_visits, root_nodes, root_q);
                 1 + self.count_subtree_nodes(&new_root)
             } else {
                 let root_visits = self.root.visits.load(Ordering::Relaxed);
                 let root_nodes = self.node_count.load(Ordering::Relaxed);
-                println!("[{}] Advancing root to NEW node (child not found). Root Visits: {}, Root Nodes: {}", info, root_visits, root_nodes);
+                println!("[{}] Advancing root to NEW node (child not found). Root Visits: {}, Root Nodes: {}, Root Q: {:.4}", info, root_visits, root_nodes, root_q);
                 1 // Just the new root node
             };
 
@@ -1731,6 +1832,15 @@ impl<S: GameState> MCTS<S> {
             let parent_visits = current_node.visits.load(Ordering::Relaxed);
             // Use uniform prior probability for all moves since we don't have a neural network
             let prior_probability = 1.0 / moves_cache.len() as f64;
+
+            // Determine virtual loss weight based on configuration
+            // We use 1.0 for both CPU and GPU to ensure proper diversity.
+            // For GPU with large batches, this is critical to prevent stampeding.
+            #[cfg(feature = "gpu")]
+            let virtual_loss_weight = 1.0;
+            #[cfg(not(feature = "gpu"))]
+            let virtual_loss_weight = 1.0;
+
             let (best_move, next_node) = {
                 candidates.clear();
                 candidates.extend(
@@ -1745,6 +1855,7 @@ impl<S: GameState> MCTS<S> {
                                     parent_visits,
                                     self.exploration_parameter,
                                     prior_probability,
+                                    virtual_loss_weight,
                                 )
                             });
                             #[cfg(not(feature = "gpu"))]
@@ -1752,6 +1863,7 @@ impl<S: GameState> MCTS<S> {
                                 parent_visits,
                                 self.exploration_parameter,
                                 prior_probability,
+                                virtual_loss_weight,
                             );
                             (m.clone(), n.clone(), puct)
                         }),

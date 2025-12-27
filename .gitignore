@@ -1,2 +1,10 @@
-/target
-/checkpoints
+**/target
+**/checkpoints
+*.csv
+*.tsv
+*.log
+*.json
+*.d
+*.exe
+*.dll
+*.pdb
