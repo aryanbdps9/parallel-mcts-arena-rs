@@ -310,30 +310,35 @@ impl<M: Clone + Eq + std::hash::Hash> Node<M> {
     /// Prunes weak children to save memory
     /// Keeps only children with visit count >= threshold
     ///
-    /// Removes children that haven't been visited enough times.
-    /// This helps control memory usage in long-running searches.
-    /// The pruned nodes are returned so they can be recycled.
+    /// Instead of removing the node entirely, we just clear its children (prune its subtree).
+    /// This preserves the node's statistics (visits, wins) but frees up the memory used by its descendants.
     ///
     /// # Arguments
-    /// * `min_visits` - Minimum number of visits required to keep a child
+    /// * `min_visits` - Minimum number of visits required to keep a child's subtree
     ///
     /// # Returns
     /// Vector of pruned nodes that can be recycled
     fn prune_weak_children(&self, min_visits: i32) -> Vec<Arc<Node<M>>> {
-        let mut children = self.children.write();
+        let children = self.children.read();
         let mut pruned_nodes = Vec::new();
 
-        children.retain(|_, node| {
+        for node in children.values() {
             let visits = node.visits.load(Ordering::Relaxed);
             if visits < min_visits {
-                // Collect the pruned subtree for recycling
-                pruned_nodes.extend(node.collect_subtree_nodes());
-                pruned_nodes.push(node.clone());
-                false
-            } else {
-                true
+                // Prune the subtree of this weak node, but keep the node itself
+                // We do this by clearing its children map
+                let mut node_children = node.children.write();
+                if !node_children.is_empty() {
+                    // Collect all descendants for recycling
+                    for child in node_children.values() {
+                        pruned_nodes.extend(child.collect_subtree_nodes());
+                        pruned_nodes.push(child.clone());
+                    }
+                    // Clear the children map
+                    node_children.clear();
+                }
             }
-        });
+        }
 
         pruned_nodes
     }
@@ -864,7 +869,8 @@ impl<S: GameState> MCTS<S> {
     ///
     /// # Arguments
     /// * `mv` - The move that was made in the game
-    pub fn advance_root(&mut self, mv: &S::Move) {
+    /// * `debug_info` - Optional debug info about the player who made the move
+    pub fn advance_root(&mut self, mv: &S::Move, debug_info: Option<&str>) {
         let (new_root, nodes_to_recycle, new_tree_size) = {
             let children = self.root.children.read();
             let new_root = children
@@ -872,10 +878,19 @@ impl<S: GameState> MCTS<S> {
                 .map(Arc::clone)
                 .unwrap_or_else(|| Arc::new(Node::new()));
 
+            let info = debug_info.unwrap_or("Unknown");
+
             // Calculate the size of the new subtree
             let new_tree_size = if children.contains_key(mv) {
+                let visits = new_root.visits.load(Ordering::Relaxed);
+                let root_visits = self.root.visits.load(Ordering::Relaxed);
+                let root_nodes = self.node_count.load(Ordering::Relaxed);
+                println!("[{}] Advancing root to existing child. Child Visits: {}, Root Visits: {}, Root Nodes: {}", info, visits, root_visits, root_nodes);
                 1 + self.count_subtree_nodes(&new_root)
             } else {
+                let root_visits = self.root.visits.load(Ordering::Relaxed);
+                let root_nodes = self.node_count.load(Ordering::Relaxed);
+                println!("[{}] Advancing root to NEW node (child not found). Root Visits: {}, Root Nodes: {}", info, root_visits, root_nodes);
                 1 // Just the new root node
             };
 
@@ -934,29 +949,42 @@ impl<S: GameState> MCTS<S> {
     /// # Arguments
     /// * `min_visits_threshold` - Minimum number of visits required to keep a node
     pub fn prune_tree(&mut self, min_visits_threshold: i32) {
-        let pruned_nodes = self.root.prune_weak_children(min_visits_threshold);
-        if !pruned_nodes.is_empty() {
-            self.node_pool.return_nodes(pruned_nodes);
+        let mut total_pruned_count = 0;
+        let mut stack = vec![self.root.clone()];
+
+        while let Some(node) = stack.pop() {
+            // Prune weak children of this node
+            let pruned_nodes = node.prune_weak_children(min_visits_threshold);
+            
+            if !pruned_nodes.is_empty() {
+                total_pruned_count += pruned_nodes.len();
+                self.node_pool.return_nodes(pruned_nodes);
+            }
+
+            // Add surviving children to stack to check them too
+            let children = node.children.read();
+            for child in children.values() {
+                // Optimization: only recurse if child has enough visits to potentially have children
+                // If child visits are low (but > threshold), it might not have many children anyway
+                if child.visits.load(Ordering::Relaxed) > min_visits_threshold {
+                    stack.push(child.clone());
+                }
+            }
         }
 
-        // Recursively prune children that survived the initial pruning
-        let children = self.root.children.read();
-        for child in children.values() {
-            let child_pruned = child.prune_weak_children(min_visits_threshold);
-            if !child_pruned.is_empty() {
-                self.node_pool.return_nodes(child_pruned);
-            }
+        if total_pruned_count > 0 {
+            self.node_count.fetch_sub(total_pruned_count as i32, Ordering::Relaxed);
         }
     }
 
     /// Automatically prunes the tree based on visit statistics
     ///
-    /// Removes children with less than 1% of the root's visits to keep the tree
+    /// Removes children with less than 0.1% of the root's visits to keep the tree
     /// focused on the most promising moves. This is a heuristic-based pruning
     /// that doesn't require manual threshold setting.
     pub fn auto_prune(&mut self) {
         let root_visits = self.root.visits.load(Ordering::Relaxed);
-        let min_visits = std::cmp::max(1, root_visits / 100); // At least 1% of root visits
+        let min_visits = std::cmp::max(1, root_visits / 1000); // At least 0.1% of root visits
         self.prune_tree(min_visits);
     }
 
@@ -1225,132 +1253,70 @@ impl<S: GameState> MCTS<S> {
         let gpu_refresh_handle: Option<std::thread::JoinHandle<()>> = None;
         /*
         let gpu_refresh_handle = if self.gpu_enabled && self.gpu_accelerator.is_some() {
-            let stop_flag = stop_searching.clone();
-            let gpu_accelerator = self.gpu_accelerator.clone();
-            let root = self.root.clone();
-            let exploration_parameter = self.exploration_parameter;
-            let gpu_puct_cache = self.gpu_puct_cache.clone();
-            let simulations_counter = self.simulations_since_gpu_update.clone();
-            
-            Some(std::thread::spawn(move || {
-                let refresh_interval = Duration::from_millis(50); // Refresh every 50ms for better GPU utilization
-                const MAX_DEPTH: u32 = 50;
-                const MAX_NODES: usize = 65536;
-                
-                while !stop_flag.load(Ordering::Relaxed) {
-                    std::thread::sleep(refresh_interval);
-                    
-                    // Check if enough simulations have passed
-                    let sims = simulations_counter.load(Ordering::Relaxed);
-                    if sims < 500 {
-                        continue;
-                    }
-                    simulations_counter.store(0, Ordering::Relaxed);
-                    
-                    // Deep tree traversal to collect all parent-child pairs
-                    let mut node_data: Vec<gpu::GpuNodeData> = Vec::with_capacity(MAX_NODES);
-                    let mut cache_keys: Vec<(usize, usize)> = Vec::with_capacity(MAX_NODES);
-                    let mut stack: Vec<(Arc<Node<S::Move>>, u32)> = Vec::with_capacity(1024);
-                    stack.push((root.clone(), 0));
-                    
-                    while let Some((parent_node, depth)) = stack.pop() {
-                        if depth >= MAX_DEPTH || node_data.len() >= MAX_NODES {
-                            break;
-                        }
-                        
-                        let children = parent_node.children.read();
-                        if children.is_empty() {
-                            continue;
-                        }
-                        
-                        let parent_visits = parent_node.visits.load(Ordering::Relaxed);
-                        let num_children = children.len();
-                        let prior_prob = 1.0 / num_children as f32;
-                        let parent_id = Arc::as_ptr(&parent_node) as usize;
-                        
-                        for (_mv, child_node) in children.iter() {
-                            if node_data.len() >= MAX_NODES {
-                                break;
-                            }
-                            
-                            let child_id = Arc::as_ptr(child_node) as usize;
-                            
-                            node_data.push(gpu::GpuNodeData::new(
-                                child_node.visits.load(Ordering::Relaxed),
-                                child_node.wins.load(Ordering::Relaxed),
-                                child_node.virtual_losses.load(Ordering::Relaxed),
-                                parent_visits,
-                                prior_prob,
-                                exploration_parameter as f32,
-                            ));
-                            cache_keys.push((parent_id, child_id));
-                            
-                            // Add visited children to stack for deeper traversal
-                            if child_node.visits.load(Ordering::Relaxed) > 0 {
-                                stack.push((child_node.clone(), depth + 1));
-                            }
-                        }
-                    }
-                    
-                    if node_data.is_empty() {
-                        continue;
-                    }
-                    
-                    // Compute PUCT on GPU
-                    if let Some(ref accelerator) = gpu_accelerator {
-                        let mut acc = accelerator.lock();
-                        if let Ok(results) = acc.compute_puct_batch(&node_data) {
-                            let mut cache = gpu_puct_cache.write();
-                            cache.clear();
-                            cache.reserve(results.len());
-                            for (i, result) in results.iter().enumerate() {
-                                cache.insert(cache_keys[i], result.puct_score as f64);
-                            }
-                        }
-                    }
-                }
-            }))
+            // ... (existing commented out code) ...
         } else {
             None
         };
         */
 
-        self.pool.install(|| {
-            let _ = (0..iterations)
-                .into_par_iter()
-                .try_for_each(|_| -> Result<(), ()> {
-                    // Double-check stop flag at the very start of each iteration
-                    if stop_searching.load(Ordering::Relaxed) {
-                        return Err(()); // Stop this thread immediately
-                    }
+        // Run simulations in batches to allow for periodic pruning
+        let batch_size = 5000;
+        let mut iterations_remaining = iterations;
+        let mut prune_memory_count = 0;
 
-                    // Check external stop flag at the start of each iteration
-                    if let Some(ref ext_stop) = external_stop {
-                        if ext_stop.load(Ordering::Relaxed) {
-                            stop_searching.store(true, Ordering::Relaxed);
+        while iterations_remaining > 0 && !stop_searching.load(Ordering::Relaxed) {
+            // Check if we need to prune the tree
+            let current_nodes = self.node_count.load(Ordering::Relaxed) as usize;
+            
+            // Prune ONLY if we are close to the limit (> 90%)
+            let memory_pressure = current_nodes > self.max_nodes * 9 / 10;
+
+            if memory_pressure {
+                prune_memory_count += 1;
+                self.auto_prune();
+            }
+
+            let current_batch = iterations_remaining.min(batch_size);
+
+            self.pool.install(|| {
+                let _ = (0..current_batch)
+                    .into_par_iter()
+                    .try_for_each(|_| -> Result<(), ()> {
+                        // Double-check stop flag at the very start of each iteration
+                        if stop_searching.load(Ordering::Relaxed) {
+                            return Err(()); // Stop this thread immediately
+                        }
+
+                        // Check external stop flag at the start of each iteration
+                        if let Some(ref ext_stop) = external_stop {
+                            if ext_stop.load(Ordering::Relaxed) {
+                                stop_searching.store(true, Ordering::Relaxed);
+                                return Err(());
+                            }
+                        }
+
+                        self.run_simulation(state, &stop_searching);
+                        completed_iterations.fetch_add(1, Ordering::Relaxed);
+
+                        // Check stop flag again after simulation (set by timeout monitor)
+                        if stop_searching.load(Ordering::Relaxed) {
                             return Err(());
                         }
-                    }
 
-                    self.run_simulation(state, &stop_searching);
-                    completed_iterations.fetch_add(1, Ordering::Relaxed);
-
-                    // Check stop flag again after simulation (set by timeout monitor)
-                    if stop_searching.load(Ordering::Relaxed) {
-                        return Err(());
-                    }
-
-                    if let Some(interval) = stats_interval {
-                        let mut last_time = last_stats_time.lock();
-                        if last_time.elapsed() >= interval {
-                            // Stats are now displayed in the TUI debug panel instead of console output
-                            // to prevent interference with the TUI display
-                            *last_time = Instant::now();
+                        if let Some(interval) = stats_interval {
+                            let mut last_time = last_stats_time.lock();
+                            if last_time.elapsed() >= interval {
+                                // Stats are now displayed in the TUI debug panel instead of console output
+                                // to prevent interference with the TUI display
+                                *last_time = Instant::now();
+                            }
                         }
-                    }
-                    Ok(())
-                });
-        });
+                        Ok(())
+                    });
+            });
+
+            iterations_remaining -= current_batch;
+        }
 
         // Clean up timeout monitor thread and measure actual overhead (optimized frequency)
         if let Some(handle) = timeout_monitor_handle {
@@ -1457,6 +1423,10 @@ impl<S: GameState> MCTS<S> {
                 .map(|(m, (w, v))| (format!("{:?}", m), (w, v)))
                 .collect(),
         };
+
+        if prune_memory_count > 0 {
+            println!("Pruning summary: {} total (memory pressure)", prune_memory_count);
+        }
 
         (best_move, stats)
     }

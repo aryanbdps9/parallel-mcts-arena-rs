@@ -123,7 +123,7 @@ pub struct MoveEntry {
 #[derive(Debug)]
 pub enum AIRequest {
     Search(GameWrapper, u64, PlayerType, i32),
-    AdvanceRoot(MoveWrapper),
+    AdvanceRoot(MoveWrapper, String),
     Stop,
 }
 
@@ -219,12 +219,12 @@ impl AIWorker {
                             }
                         }
                     }
-                    AIRequest::AdvanceRoot(move_made) => {
+                    AIRequest::AdvanceRoot(move_made, debug_info) => {
                         for mcts in mcts_cpu_map.values_mut() {
-                            mcts.advance_root(&move_made);
+                            mcts.advance_root(&move_made, Some(&debug_info));
                         }
                         for mcts in mcts_gpu_map.values_mut() {
-                            mcts.advance_root(&move_made);
+                            mcts.advance_root(&move_made, Some(&debug_info));
                         }
                     }
                     AIRequest::Stop => break,
@@ -257,8 +257,8 @@ impl AIWorker {
     /// 
     /// This allows the AI to reuse previous search results by promoting
     /// the child node corresponding to the move as the new root.
-    pub fn advance_root(&self, move_made: &MoveWrapper) {
-        let _ = self.tx.send(AIRequest::AdvanceRoot(move_made.clone()));
+    pub fn advance_root(&self, move_made: &MoveWrapper, debug_info: String) {
+        let _ = self.tx.send(AIRequest::AdvanceRoot(move_made.clone(), debug_info));
     }
 }
 
@@ -425,7 +425,7 @@ impl GuiApp {
         let new_game = match self.selected_game_type {
             GameType::Gomoku => GameWrapper::Gomoku(GomokuState::new(self.board_size, self.line_size)),
             GameType::Connect4 => GameWrapper::Connect4(Connect4State::new(7, 6, self.line_size)),
-            GameType::Othello => GameWrapper::Othello(OthelloState::new(self.board_size)),
+            GameType::Othello => GameWrapper::Othello(OthelloState::new(8)),
             GameType::Blokus => GameWrapper::Blokus(BlokusState::new()),
             GameType::Hive => GameWrapper::Hive(HiveState::new()),
         };
@@ -496,7 +496,14 @@ impl GuiApp {
                 
                 // Advance MCTS tree root to maintain tree reuse
                 // This must happen for EVERY move (human or AI) so the tree stays in sync
-                self.ai_worker.advance_root(&mv);
+                let player_type = self.player_types
+                    .iter()
+                    .find(|(id, _)| *id == player)
+                    .map(|(_, pt)| *pt)
+                    .unwrap_or(PlayerType::Human);
+                
+                let debug_info = format!("Player {} ({:?})", player, player_type);
+                self.ai_worker.advance_root(&mv, debug_info);
                 
                 // Add to move history for UI display
                 self.move_history.push(MoveEntry {
