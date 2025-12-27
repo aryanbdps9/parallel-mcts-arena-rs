@@ -1,15 +1,47 @@
 #![no_std]
 #![feature(asm_experimental_arch)]
 
+//! # MCTS GPU Shaders (rust-gpu)
+//!
+//! This crate contains GPU compute shaders written in Rust, compiled to SPIR-V via rust-gpu,
+//! then translated to WGSL at build time for wgpu consumption.
+//!
+//! ## ⚠️ PERFORMANCE WARNING
+//!
+//! This approach suffers from a **5.8x GPU performance regression** compared to hand-written
+//! WGSL shaders. See `docs/RUST_GPU_INVESTIGATION.md` for full details.
+//!
+//! ### Root Cause
+//!
+//! SPIR-V requires inlining of ALL functions with pointer/reference parameters.
+//! Functions like `check_win(board: &[i32; 400])` get duplicated at every call site,
+//! causing 100x code bloat (13,000+ lines for Gomoku vs ~200 hand-written).
+//!
+//! ### Recommendation
+//!
+//! Use hand-written WGSL shaders on the `main` branch for production.
+//!
+//! ## Build Pipeline
+//!
+//! ```text
+//! build.rs → spirv-builder → SPIR-V → naga → WGSL → embedded in binary
+//! ```
+//!
+//! ## Constraints
+//!
+//! - No `core::cmp::{min,max}` - requires Int8 capability (Ordering is repr(i8))
+//! - No std library - `#![no_std]` required
+//! - All pointer-taking functions will be inlined (unavoidable)
+
 use spirv_std::glam::{UVec3, UVec4};
 use spirv_std::spirv;
 
-// Avoid core::cmp::{min,max} in shaders: they pull in Ordering (repr(i8)),
-// which requires Int8 capability in SPIR-V.
+// ============================================================================
+// GPU BUFFER STRUCTS
+// ============================================================================
+// These must match the CPU-side definitions exactly (repr(C) layout).
 
-// NOTE: This crate is compiled to SPIR-V via rust-gpu and then translated to WGSL at build time.
-// The runtime consumes the generated WGSL to avoid requiring SPIR-V passthrough support.
-
+/// Parameters for game simulation dispatches.
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct SimulationParams {
@@ -20,12 +52,14 @@ pub struct SimulationParams {
     pub seed: u32,
 }
 
+/// Result of a single game evaluation.
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct SimulationResult {
     pub score: f32,
 }
 
+/// MCTS node data for PUCT calculation.
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct NodeData {
@@ -39,6 +73,7 @@ pub struct NodeData {
     pub _pad1: f32,
 }
 
+/// PUCT score output.
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct PuctResult {
@@ -48,14 +83,18 @@ pub struct PuctResult {
     pub node_index: u32,
 }
 
+/// PUCT calculation parameters (16-byte aligned for uniform buffer).
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct PuctParams {
-    // Pack params into a single 16-byte vector to satisfy Uniform std140-style alignment rules.
-    // x = num_elements, y/z/w reserved.
-    pub packed: UVec4,
+    pub packed: UVec4, // x = num_elements, y/z/w reserved
 }
 
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Safe array load with bounds checking.
 #[inline(always)]
 fn load_i32(slice: &[i32], idx: usize) -> i32 {
     if idx < slice.len() {
@@ -65,6 +104,7 @@ fn load_i32(slice: &[i32], idx: usize) -> i32 {
     }
 }
 
+/// Safe array store with bounds checking.
 #[inline(always)]
 fn store_i32(slice: &mut [i32], idx: usize, val: i32) {
     if idx < slice.len() {
@@ -72,14 +112,22 @@ fn store_i32(slice: &mut [i32], idx: usize, val: i32) {
     }
 }
 
-// Game type constants
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+/// Game type discriminants (must match GameType enum on CPU side).
 const GAME_GOMOKU: u32 = 0;
 const GAME_CONNECT4: u32 = 1;
 const GAME_OTHELLO: u32 = 2;
 const GAME_BLOKUS: u32 = 3;
 const GAME_HIVE: u32 = 4;
 
-// PCG Random Number Generator
+// ============================================================================
+// RANDOM NUMBER GENERATOR
+// ============================================================================
+
+/// PCG-based RNG for GPU simulations.
 struct Rng {
     state: u32,
 }
@@ -106,6 +154,11 @@ impl Rng {
     }
 }
 
+// ============================================================================
+// BOARD ACCESS HELPERS
+// ============================================================================
+
+/// Extract line size from encoded current_player parameter.
 fn get_line_size(params: &SimulationParams) -> i32 {
     let encoded = params.current_player;
     let line_size = (encoded >> 8) & 0xFF;
@@ -116,6 +169,7 @@ fn get_line_size(params: &SimulationParams) -> i32 {
     }
 }
 
+/// Get cell value from board buffer (bounds-checked).
 fn get_cell(boards: &[i32], params: &SimulationParams, board_idx: u32, x: i32, y: i32) -> i32 {
     let w = params.board_width as i32;
     let h = params.board_height as i32;
@@ -363,6 +417,249 @@ fn count_pattern(boards: &[i32], params: &SimulationParams, board_idx: u32, play
     count_total
 }
 
+// Helper function to access a local array with bounds checking
+#[inline(always)]
+fn array_get(board: &[i32; 400], w: i32, h: i32, x: i32, y: i32) -> i32 {
+    if x < 0 || x >= w || y < 0 || y >= h {
+        return 0;
+    }
+    let idx = (y * w + x) as usize;
+    if idx < 400 { board[idx] } else { 0 }
+}
+
+// Check if the last move created a winning line (local array version)
+fn check_move_win_array(board: &[i32; 400], w: i32, h: i32, win_count: i32, move_idx: u32, player: i32) -> bool {
+    if move_idx >= 400 {
+        return false;
+    }
+
+    let row = (move_idx / (w as u32)) as i32;
+    let col = (move_idx % (w as u32)) as i32;
+
+    // Horizontal
+    let mut count = 1;
+    let mut x = col - 1;
+    let mut steps = 0;
+    while x >= 0 && steps < win_count - 1 {
+        let idx_lin = (row * w + x) as usize;
+        if idx_lin < 400 && board[idx_lin] == player {
+            count += 1;
+        } else {
+            break;
+        }
+        x -= 1;
+        steps += 1;
+    }
+    x = col + 1;
+    steps = 0;
+    while x < w && steps < win_count - 1 {
+        let idx_lin = (row * w + x) as usize;
+        if idx_lin < 400 && board[idx_lin] == player {
+            count += 1;
+        } else {
+            break;
+        }
+        x += 1;
+        steps += 1;
+    }
+    if count >= win_count {
+        return true;
+    }
+
+    // Vertical
+    count = 1;
+    let mut y = row - 1;
+    steps = 0;
+    while y >= 0 && steps < win_count - 1 {
+        let idx_lin = (y * w + col) as usize;
+        if idx_lin < 400 && board[idx_lin] == player {
+            count += 1;
+        } else {
+            break;
+        }
+        y -= 1;
+        steps += 1;
+    }
+    y = row + 1;
+    steps = 0;
+    while y < h && steps < win_count - 1 {
+        let idx_lin = (y * w + col) as usize;
+        if idx_lin < 400 && board[idx_lin] == player {
+            count += 1;
+        } else {
+            break;
+        }
+        y += 1;
+        steps += 1;
+    }
+    if count >= win_count {
+        return true;
+    }
+
+    // Diagonal TL-BR
+    count = 1;
+    let mut cx = col - 1;
+    let mut cy = row - 1;
+    steps = 0;
+    while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
+        let idx_lin = (cy * w + cx) as usize;
+        if idx_lin < 400 && board[idx_lin] == player {
+            count += 1;
+        } else {
+            break;
+        }
+        cx -= 1;
+        cy -= 1;
+        steps += 1;
+    }
+    cx = col + 1;
+    cy = row + 1;
+    steps = 0;
+    while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
+        let idx_lin = (cy * w + cx) as usize;
+        if idx_lin < 400 && board[idx_lin] == player {
+            count += 1;
+        } else {
+            break;
+        }
+        cx += 1;
+        cy += 1;
+        steps += 1;
+    }
+    if count >= win_count {
+        return true;
+    }
+
+    // Diagonal TR-BL
+    count = 1;
+    cx = col + 1;
+    cy = row - 1;
+    steps = 0;
+    while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
+        let idx_lin = (cy * w + cx) as usize;
+        if idx_lin < 400 && board[idx_lin] == player {
+            count += 1;
+        } else {
+            break;
+        }
+        cx += 1;
+        cy -= 1;
+        steps += 1;
+    }
+    cx = col - 1;
+    cy = row + 1;
+    steps = 0;
+    while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
+        let idx_lin = (cy * w + cx) as usize;
+        if idx_lin < 400 && board[idx_lin] == player {
+            count += 1;
+        } else {
+            break;
+        }
+        cx -= 1;
+        cy += 1;
+        steps += 1;
+    }
+    count >= win_count
+}
+
+// Full board scan for winning line (local array version)
+fn check_line_win_array(board: &[i32; 400], w: i32, h: i32, player: i32, line_size: i32) -> bool {
+    // Horizontal
+    let mut y = 0;
+    while y < h {
+        let mut x = 0;
+        while x <= w - line_size {
+            let mut k = 0;
+            while k < line_size {
+                if array_get(board, w, h, x + k, y) != player {
+                    break;
+                }
+                k += 1;
+            }
+            if k == line_size {
+                return true;
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+
+    // Vertical
+    let mut x = 0;
+    while x < w {
+        let mut y2 = 0;
+        while y2 <= h - line_size {
+            let mut k = 0;
+            while k < line_size {
+                if array_get(board, w, h, x, y2 + k) != player {
+                    break;
+                }
+                k += 1;
+            }
+            if k == line_size {
+                return true;
+            }
+            y2 += 1;
+        }
+        x += 1;
+    }
+
+    // Diagonal (TL-BR)
+    let mut y3 = 0;
+    while y3 <= h - line_size {
+        let mut x3 = 0;
+        while x3 <= w - line_size {
+            let mut k = 0;
+            while k < line_size {
+                if array_get(board, w, h, x3 + k, y3 + k) != player {
+                    break;
+                }
+                k += 1;
+            }
+            if k == line_size {
+                return true;
+            }
+            x3 += 1;
+        }
+        y3 += 1;
+    }
+
+    // Diagonal (TR-BL)
+    let mut y4 = 0;
+    while y4 <= h - line_size {
+        let mut x4 = line_size - 1;
+        while x4 < w {
+            let mut k = 0;
+            while k < line_size {
+                if array_get(board, w, h, x4 - k, y4 + k) != player {
+                    break;
+                }
+                k += 1;
+            }
+            if k == line_size {
+                return true;
+            }
+            x4 += 1;
+        }
+        y4 += 1;
+    }
+
+    false
+}
+
+// ============================================================================
+// GAME ROLLOUT SIMULATIONS
+// ============================================================================
+// ⚠️ WARNING: These functions generate MASSIVE code due to mandatory inlining.
+// The `gomoku_random_rollout` function alone generates ~13,000 lines of WGSL.
+// See docs/RUST_GPU_INVESTIGATION.md for details.
+
+/// Monte Carlo rollout for Gomoku/Connect4 games.
+///
+/// This function copies the board to a local array and simulates random play
+/// until a win or draw. The local array access requires pointer parameters
+/// to helper functions, which rust-gpu MUST inline for SPIR-V legality.
 fn gomoku_random_rollout(
     boards: &mut [i32],
     params: &SimulationParams,
@@ -403,142 +700,6 @@ fn gomoku_random_rollout(
 
     let current_player = current_player;
 
-    #[inline(always)]
-    fn check_move_win_local(board: &[i32; 400], w: i32, h: i32, win_count: i32, move_idx: u32, player: i32) -> bool {
-        if move_idx >= 400 {
-            return false;
-        }
-
-        let row = (move_idx / (w as u32)) as i32;
-        let col = (move_idx % (w as u32)) as i32;
-
-        // Horizontal
-        let mut count = 1;
-        let mut x = col - 1;
-        let mut steps = 0;
-        while x >= 0 && steps < win_count - 1 {
-            let idx_lin = (row * w + x) as usize;
-            if idx_lin < 400 && board[idx_lin] == player {
-                count += 1;
-            } else {
-                break;
-            }
-            x -= 1;
-            steps += 1;
-        }
-        x = col + 1;
-        steps = 0;
-        while x < w && steps < win_count - 1 {
-            let idx_lin = (row * w + x) as usize;
-            if idx_lin < 400 && board[idx_lin] == player {
-                count += 1;
-            } else {
-                break;
-            }
-            x += 1;
-            steps += 1;
-        }
-        if count >= win_count {
-            return true;
-        }
-
-        // Vertical
-        count = 1;
-        let mut y = row - 1;
-        steps = 0;
-        while y >= 0 && steps < win_count - 1 {
-            let idx_lin = (y * w + col) as usize;
-            if idx_lin < 400 && board[idx_lin] == player {
-                count += 1;
-            } else {
-                break;
-            }
-            y -= 1;
-            steps += 1;
-        }
-        y = row + 1;
-        steps = 0;
-        while y < h && steps < win_count - 1 {
-            let idx_lin = (y * w + col) as usize;
-            if idx_lin < 400 && board[idx_lin] == player {
-                count += 1;
-            } else {
-                break;
-            }
-            y += 1;
-            steps += 1;
-        }
-        if count >= win_count {
-            return true;
-        }
-
-        // Diagonal TL-BR
-        count = 1;
-        let mut cx = col - 1;
-        let mut cy = row - 1;
-        steps = 0;
-        while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
-            let idx_lin = (cy * w + cx) as usize;
-            if idx_lin < 400 && board[idx_lin] == player {
-                count += 1;
-            } else {
-                break;
-            }
-            cx -= 1;
-            cy -= 1;
-            steps += 1;
-        }
-        cx = col + 1;
-        cy = row + 1;
-        steps = 0;
-        while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
-            let idx_lin = (cy * w + cx) as usize;
-            if idx_lin < 400 && board[idx_lin] == player {
-                count += 1;
-            } else {
-                break;
-            }
-            cx += 1;
-            cy += 1;
-            steps += 1;
-        }
-        if count >= win_count {
-            return true;
-        }
-
-        // Diagonal TR-BL
-        count = 1;
-        cx = col + 1;
-        cy = row - 1;
-        steps = 0;
-        while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
-            let idx_lin = (cy * w + cx) as usize;
-            if idx_lin < 400 && board[idx_lin] == player {
-                count += 1;
-            } else {
-                break;
-            }
-            cx += 1;
-            cy -= 1;
-            steps += 1;
-        }
-        cx = col - 1;
-        cy = row + 1;
-        steps = 0;
-        while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
-            let idx_lin = (cy * w + cx) as usize;
-            if idx_lin < 400 && board[idx_lin] == player {
-                count += 1;
-            } else {
-                break;
-            }
-            cx -= 1;
-            cy += 1;
-            steps += 1;
-        }
-        count >= win_count
-    }
-
     // Mirror CPU behavior: terminal detection is based on the last move only.
     // This avoids full-board scans and matches GomokuState::get_winner().
     if last_move_idx >= 0 {
@@ -546,7 +707,7 @@ fn gomoku_random_rollout(
         if lm < safe_board_size {
             let p = sim_board[lm as usize];
             if p != 0 {
-                if check_move_win_local(&sim_board, w, h, win_count, lm, p) {
+                if check_move_win_array(&sim_board, w, h, win_count, lm, p) {
                     return if p == current_player { 4000.0 } else { -4000.0 };
                 }
             }
@@ -554,104 +715,10 @@ fn gomoku_random_rollout(
     } else {
         // Fallback: if we don't have last_move_idx, do a rare full-board scan.
         // This should mostly only happen for the initial empty board.
-        #[inline(always)]
-        fn sim_get(board: &[i32; 400], w: i32, h: i32, x: i32, y: i32) -> i32 {
-            if x < 0 || x >= w || y < 0 || y >= h {
-                return 0;
-            }
-            let idx = (y * w + x) as usize;
-            if idx < 400 { board[idx] } else { 0 }
-        }
-
-        #[inline(always)]
-        fn check_line_win_local(board: &[i32; 400], w: i32, h: i32, player: i32, line_size: i32) -> bool {
-            // Horizontal
-            let mut y = 0;
-            while y < h {
-                let mut x = 0;
-                while x <= w - line_size {
-                    let mut k = 0;
-                    while k < line_size {
-                        if sim_get(board, w, h, x + k, y) != player {
-                            break;
-                        }
-                        k += 1;
-                    }
-                    if k == line_size {
-                        return true;
-                    }
-                    x += 1;
-                }
-                y += 1;
-            }
-
-            // Vertical
-            let mut x = 0;
-            while x < w {
-                let mut y2 = 0;
-                while y2 <= h - line_size {
-                    let mut k = 0;
-                    while k < line_size {
-                        if sim_get(board, w, h, x, y2 + k) != player {
-                            break;
-                        }
-                        k += 1;
-                    }
-                    if k == line_size {
-                        return true;
-                    }
-                    y2 += 1;
-                }
-                x += 1;
-            }
-
-            // Diagonal (TL-BR)
-            let mut y3 = 0;
-            while y3 <= h - line_size {
-                let mut x3 = 0;
-                while x3 <= w - line_size {
-                    let mut k = 0;
-                    while k < line_size {
-                        if sim_get(board, w, h, x3 + k, y3 + k) != player {
-                            break;
-                        }
-                        k += 1;
-                    }
-                    if k == line_size {
-                        return true;
-                    }
-                    x3 += 1;
-                }
-                y3 += 1;
-            }
-
-            // Diagonal (TR-BL)
-            let mut y4 = 0;
-            while y4 <= h - line_size {
-                let mut x4 = line_size - 1;
-                while x4 < w {
-                    let mut k = 0;
-                    while k < line_size {
-                        if sim_get(board, w, h, x4 - k, y4 + k) != player {
-                            break;
-                        }
-                        k += 1;
-                    }
-                    if k == line_size {
-                        return true;
-                    }
-                    x4 += 1;
-                }
-                y4 += 1;
-            }
-
-            false
-        }
-
-        if check_line_win_local(&sim_board, w, h, current_player, line_size) {
+        if check_line_win_array(&sim_board, w, h, current_player, line_size) {
             return 4000.0;
         }
-        if check_line_win_local(&sim_board, w, h, -current_player, line_size) {
+        if check_line_win_array(&sim_board, w, h, -current_player, line_size) {
             return -4000.0;
         }
     }
@@ -748,7 +815,7 @@ fn gomoku_random_rollout(
 
         sim_board[move_idx as usize] = sim_player;
 
-        if check_move_win_local(&sim_board, w, h, win_count, move_idx, sim_player) {
+        if check_move_win_array(&sim_board, w, h, win_count, move_idx, sim_player) {
             return if sim_player == current_player { 4000.0 } else { -4000.0 };
         }
 
@@ -1854,8 +1921,21 @@ fn hive_random_rollout(boards: &mut [i32], params: &SimulationParams, board_idx:
     0.0
 }
 
-// ----- Entry points -----
+// ============================================================================
+// SHADER ENTRY POINTS
+// ============================================================================
+// These are the actual GPU compute shader entry points, marked with #[spirv(compute(...))].
+//
+// Generated WGSL sizes (as of Dec 2024):
+// - compute_puct:     62 lines   ✓ (simple, no array params)
+// - evaluate_connect4: 126 lines  ✓ (uses common rollout)
+// - evaluate_gomoku:  13,468 lines ❌ (massive due to inlining)
+// - evaluate_othello: 114 lines  ✓ (simple flip logic)
+// - evaluate_blokus:  2,124 lines ⚠️ (moderate bloat)
+// - evaluate_hive:    15,966 lines ❌ (complex game = massive code)
 
+/// PUCT score calculation for MCTS node selection.
+/// This shader is efficient because it doesn't use local array parameters.
 #[spirv(compute(threads(256)))]
 pub fn compute_puct(
     #[spirv(global_invocation_id)] global_id: UVec3,

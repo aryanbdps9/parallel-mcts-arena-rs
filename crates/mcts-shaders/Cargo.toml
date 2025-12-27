@@ -3,6 +3,12 @@ name = "mcts-shaders"
 version = "0.1.0"
 edition = "2021"
 publish = false
+description = """
+GPU compute shaders for MCTS game evaluation, written in Rust and compiled to SPIR-V via rust-gpu.
+
+⚠️ EXPERIMENTAL: This approach has a 5.8x GPU performance regression vs hand-written WGSL.
+See docs/RUST_GPU_INVESTIGATION.md for details.
+"""
 
 [lib]
 crate-type = ["dylib"]

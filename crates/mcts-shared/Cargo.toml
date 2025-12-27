@@ -2,5 +2,6 @@
 name = "mcts-shared"
 version = "0.1.0"
 edition = "2021"
+description = "Shared types between CPU and GPU shader code for MCTS game evaluation."
 
 [dependencies]
