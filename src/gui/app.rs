@@ -150,6 +150,12 @@ impl AIWorker {
         shared_tree: bool,
         gpu_threads: usize,
         gpu_use_heuristic: bool,
+        wgpu_backend: Option<String>,
+        gpu_readback_timeout_ms: u64,
+        gpu_readback_poll_sleep_ms: u64,
+        gpu_min_batch_threshold: usize,
+        gpu_prefer_high_performance: bool,
+        gpu_debug_mode: bool,
     ) -> Self {
         use std::sync::mpsc::channel;
         use std::collections::HashMap;
@@ -184,6 +190,12 @@ impl AIWorker {
                                     if !mcts_gpu_map.contains_key(&key) {
                                         let gpu_config = mcts::gpu::GpuConfig {
                                             max_batch_size: gpu_threads,
+                                            prefer_high_performance: gpu_prefer_high_performance,
+                                            min_batch_threshold: gpu_min_batch_threshold,
+                                            debug_mode: gpu_debug_mode,
+                                            backend_override: wgpu_backend.clone(),
+                                            readback_timeout_ms: gpu_readback_timeout_ms,
+                                            readback_poll_sleep_ms: gpu_readback_poll_sleep_ms,
                                             ..Default::default()
                                         };
                                         let (new_mcts, gpu_msg) = MCTS::with_gpu_config(gpu_exploration_constant, num_threads, max_nodes, gpu_config, gpu_use_heuristic);
@@ -307,6 +319,13 @@ pub struct GuiApp {
     pub timeout_secs: u64,
     pub ai_threads: usize,
     pub gpu_threads: usize,
+    // GPU runtime config (CLI-driven)
+    pub wgpu_backend: Option<String>,
+    pub gpu_readback_timeout_ms: u64,
+    pub gpu_readback_poll_sleep_ms: u64,
+    pub gpu_min_batch_threshold: usize,
+    pub gpu_prefer_high_performance: bool,
+    pub gpu_debug_mode: bool,
     pub max_nodes: usize,
     pub search_iterations: u32,
     pub cpu_exploration_constant: f64,
@@ -353,6 +372,12 @@ impl GuiApp {
         shared_tree: bool,
         gpu_threads: usize,
         gpu_use_heuristic: bool,
+        wgpu_backend: Option<String>,
+        gpu_readback_timeout_ms: u64,
+        gpu_readback_poll_sleep_ms: u64,
+        gpu_min_batch_threshold: usize,
+        gpu_prefer_high_performance: bool,
+        gpu_debug_mode: bool,
         board_size: usize,
         line_size: usize,
         timeout_secs: u64,
@@ -375,7 +400,22 @@ impl GuiApp {
             game_status: GameStatus::InProgress,
             move_history: Vec::new(),
             game_renderer: renderer,
-            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic),
+            ai_worker: AIWorker::new(
+                cpu_exploration_constant,
+                gpu_exploration_constant,
+                num_threads,
+                max_nodes,
+                search_iterations,
+                shared_tree,
+                gpu_threads,
+                gpu_use_heuristic,
+                wgpu_backend.clone(),
+                gpu_readback_timeout_ms,
+                gpu_readback_poll_sleep_ms,
+                gpu_min_batch_threshold,
+                gpu_prefer_high_performance,
+                gpu_debug_mode,
+            ),
             ai_thinking: false,
             ai_thinking_start: None,
             last_search_stats: None,
@@ -384,6 +424,12 @@ impl GuiApp {
             timeout_secs,
             ai_threads: num_threads,
             gpu_threads,
+            wgpu_backend,
+            gpu_readback_timeout_ms,
+            gpu_readback_poll_sleep_ms,
+            gpu_min_batch_threshold,
+            gpu_prefer_high_performance,
+            gpu_debug_mode,
             max_nodes,
             search_iterations,
             cpu_exploration_constant,
@@ -454,6 +500,12 @@ impl GuiApp {
             self.shared_tree,
             self.gpu_threads,
             self.gpu_use_heuristic,
+            self.wgpu_backend.clone(),
+            self.gpu_readback_timeout_ms,
+            self.gpu_readback_poll_sleep_ms,
+            self.gpu_min_batch_threshold,
+            self.gpu_prefer_high_performance,
+            self.gpu_debug_mode,
         );
 
         // Check if AI should move first

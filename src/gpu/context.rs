@@ -12,9 +12,76 @@ use wgpu::{
 use std::sync::Arc;
 use std::env;
 use std::borrow::Cow;
+use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+#[cfg(feature = "gpu")]
+use futures::FutureExt;
+#[cfg(feature = "gpu")]
+use std::pin::pin;
 
 use super::GpuConfig;
 use super::shaders;
+
+#[cfg(windows)]
+fn find_dxc_binaries() -> Option<(PathBuf, PathBuf)> {
+    // Allow explicit override first.
+    if let (Ok(dxc), Ok(dxil)) = (env::var("MCTS_DXC_PATH"), env::var("MCTS_DXIL_PATH")) {
+        let dxc = PathBuf::from(dxc);
+        let dxil = PathBuf::from(dxil);
+        if dxc.is_file() && dxil.is_file() {
+            return Some((dxc, dxil));
+        }
+    }
+
+    // Try common Windows SDK locations.
+    let program_files_x86 = env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+    let Some(pfx86) = program_files_x86 else {
+        return None;
+    };
+
+    let kits_root = pfx86.join("Windows Kits").join("10");
+    let dxil_candidate = kits_root.join("Redist").join("D3D").join("x64").join("dxil.dll");
+    if !dxil_candidate.is_file() {
+        return None;
+    }
+
+    let bin_root = kits_root.join("bin");
+
+    // Prefer versioned bin directories (e.g. bin/10.0.22621.0/x64/dxcompiler.dll).
+    let mut best: Option<PathBuf> = None;
+    if let Ok(entries) = std::fs::read_dir(&bin_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let candidate = path.join("x64").join("dxcompiler.dll");
+            if candidate.is_file() {
+                // Pick the lexicographically greatest version dir name, which tends to match latest.
+                match &best {
+                    None => best = Some(candidate),
+                    Some(prev) => {
+                        if candidate.parent().and_then(|p| p.parent()).map(|p| p.file_name()).flatten()
+                            > prev.parent().and_then(|p| p.parent()).map(|p| p.file_name()).flatten()
+                        {
+                            best = Some(candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: non-versioned bin/x64/dxcompiler.dll.
+    let fallback = bin_root.join("x64").join("dxcompiler.dll");
+    if best.is_none() && fallback.is_file() {
+        best = Some(fallback);
+    }
+
+    best.map(|dxc| (dxc, dxil_candidate))
+}
 
 /// GPU operation errors
 #[derive(Debug)]
@@ -22,6 +89,7 @@ pub enum GpuError {
     NoAdapter(String),
     DeviceRequest(String),
     BufferError(String),
+    Cancelled,
 }
 
 impl std::fmt::Display for GpuError {
@@ -30,6 +98,7 @@ impl std::fmt::Display for GpuError {
             GpuError::NoAdapter(msg) => write!(f, "No GPU adapter: {}", msg),
             GpuError::DeviceRequest(msg) => write!(f, "GPU device error: {}", msg),
             GpuError::BufferError(msg) => write!(f, "Buffer error: {}", msg),
+            GpuError::Cancelled => write!(f, "GPU operation cancelled"),
         }
     }
 }
@@ -41,12 +110,13 @@ pub struct GpuContext {
     device: Arc<Device>,
     queue: Arc<Queue>,
     adapter_info: wgpu::AdapterInfo,
+    mcts_shader: ShaderModule,
     puct_pipeline: ComputePipeline,
-    pub gomoku_eval_pipeline: ComputePipeline,
-    pub connect4_eval_pipeline: ComputePipeline,
-    pub othello_eval_pipeline: ComputePipeline,
-    pub blokus_eval_pipeline: ComputePipeline,
-    pub hive_eval_pipeline: ComputePipeline,
+    gomoku_eval_pipeline: Mutex<Option<Arc<ComputePipeline>>>,
+    connect4_eval_pipeline: Mutex<Option<Arc<ComputePipeline>>>,
+    othello_eval_pipeline: Mutex<Option<Arc<ComputePipeline>>>,
+    blokus_eval_pipeline: Mutex<Option<Arc<ComputePipeline>>>,
+    hive_eval_pipeline: Mutex<Option<Arc<ComputePipeline>>>,
     puct_bind_group_layout: BindGroupLayout,
     pub eval_bind_group_layout: BindGroupLayout,
     config: GpuConfig,
@@ -70,8 +140,14 @@ impl GpuContext {
         // Naga's SPIR-V backend at runtime (WGSL->SPIR-V), which can panic for
         // some generated shaders.
         //
-        // Override with `MCTS_WGPU_BACKEND=dx12|vulkan|all` if needed.
-        let override_backend = env::var("MCTS_WGPU_BACKEND").ok();
+        // Backend override precedence:
+        // 1) `GpuConfig.backend_override` (typically driven via CLI args)
+        // 2) `MCTS_WGPU_BACKEND=dx12|vulkan|all` env var (legacy)
+        let override_backend: Option<Cow<'_, str>> = config
+            .backend_override
+            .as_deref()
+            .map(Cow::Borrowed)
+            .or_else(|| env::var("MCTS_WGPU_BACKEND").ok().map(Cow::Owned));
 
         // Request adapter with specified power preference
         let power_preference = if config.prefer_high_performance {
@@ -110,10 +186,47 @@ impl GpuContext {
         let mut adapter: Option<wgpu::Adapter> = None;
         let mut instance: Option<Instance> = None;
         for backends in try_backends {
-            let inst = Instance::new(InstanceDescriptor {
+            let mut desc = InstanceDescriptor {
                 backends,
                 ..Default::default()
-            });
+            };
+            // Prefer DXC on DX12: FXC is significantly less compatible with
+            // modern shader constructs and tends to choke on some Naga output.
+            if cfg!(windows) {
+                #[cfg(windows)]
+                {
+                    let dxc = find_dxc_binaries();
+                    if config.debug_mode {
+                        match &dxc {
+                            Some((dxc_path, dxil_path)) => {
+                                eprintln!("[dx12] Using DXC: {} + {}", dxc_path.display(), dxil_path.display());
+                            }
+                            None => {
+                                eprintln!("[dx12] DXC not found; wgpu may fall back to FXC. Set MCTS_DXC_PATH + MCTS_DXIL_PATH to override.");
+                            }
+                        }
+                    }
+
+                    desc.dx12_shader_compiler = match dxc {
+                        Some((dxc_path, dxil_path)) => wgpu::Dx12Compiler::Dxc {
+                            dxil_path: Some(dxil_path),
+                            dxc_path: Some(dxc_path),
+                        },
+                        None => wgpu::Dx12Compiler::Dxc {
+                            dxil_path: None,
+                            dxc_path: None,
+                        },
+                    };
+                }
+                #[cfg(not(windows))]
+                {
+                    desc.dx12_shader_compiler = wgpu::Dx12Compiler::Dxc {
+                        dxil_path: None,
+                        dxc_path: None,
+                    };
+                }
+            }
+            let inst = Instance::new(desc);
 
             if let Some(a) = pollster::block_on(inst.request_adapter(&request_options)) {
                 adapter = Some(a);
@@ -143,6 +256,13 @@ impl GpuContext {
         ))
         .map_err(|e| GpuError::DeviceRequest(e.to_string()))?;
 
+        // Prevent background threads from panicking the whole AI worker when wgpu
+        // encounters an internal/validation error (e.g. shader compilation on DX12).
+        // Errors are still captured via push/pop_error_scope and propagated as Err.
+        device.on_uncaptured_error(Box::new(|err| {
+            eprintln!("[wgpu] uncaptured error: {err}");
+        }));
+
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
@@ -150,101 +270,140 @@ impl GpuContext {
         let limits = device.limits();
         let max_buffer_size = limits.max_buffer_size;
 
-        // Compile shaders.
-        // On Vulkan, prefer feeding validated rust-gpu SPIR-V directly to avoid
-        // runtime WGSL->SPIR-V codegen (which can panic inside Naga).
-        let mcts_shader = match adapter_info.backend {
-            wgpu::Backend::Vulkan => {
-                let bytes = shaders::MCTS_SHADERS_SPV;
-                if bytes.len() % 4 != 0 {
-                    return Err(GpuError::DeviceRequest("Invalid SPIR-V byte length".to_string()));
-                }
+        // Create shaders + pipelines.
+        // DX12 can overflow the default Rust thread stack during shader translation for large modules.
+        // Run pipeline creation on a larger-stack thread to avoid crashing/hanging the app.
+        let (mcts_shader, puct_bind_group_layout, eval_bind_group_layout, puct_pipeline) = {
+            let device = device.clone();
+            let backend = adapter_info.backend;
+            let debug_mode = config.debug_mode;
 
-                let mut words = Vec::with_capacity(bytes.len() / 4);
-                for chunk in bytes.chunks_exact(4) {
-                    words.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+            let init = move || -> Result<(_, _, _, _), GpuError> {
+                if backend == wgpu::Backend::Dx12 && debug_mode {
+                    eprintln!("[dx12-init] creating shader module");
                 }
+                // Compile shaders.
+                // Prefer feeding validated rust-gpu SPIR-V directly when possible.
+                // - Vulkan: avoids runtime WGSL->SPIR-V codegen (which can panic inside Naga).
+                // On DX12, prefer WGSL to avoid SPIR-V->HLSL translation stalls on some drivers.
+                let mcts_shader = match backend {
+                    wgpu::Backend::Vulkan => {
+                        let bytes = shaders::MCTS_SHADERS_SPV;
+                        if bytes.len() % 4 != 0 {
+                            return Err(GpuError::DeviceRequest("Invalid SPIR-V byte length".to_string()));
+                        }
 
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("MCTS Shaders (rust-gpu SPIR-V)"),
-                    source: wgpu::ShaderSource::SpirV(Cow::Owned(words)),
-                })
+                        let mut words = Vec::with_capacity(bytes.len() / 4);
+                        for chunk in bytes.chunks_exact(4) {
+                            words.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                        }
+
+                        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                            label: Some("MCTS Shaders (rust-gpu SPIR-V)"),
+                            source: wgpu::ShaderSource::SpirV(Cow::Owned(words)),
+                        })
+                    }
+                    _ => device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("MCTS Shaders (generated WGSL)"),
+                        source: wgpu::ShaderSource::Wgsl(shaders::MCTS_SHADERS_WGSL.into()),
+                    }),
+                };
+
+                // Create bind group layouts
+                let puct_bind_group_layout = Self::create_puct_bind_group_layout(&device);
+                let eval_bind_group_layout = Self::create_eval_bind_group_layout(&device);
+
+                // Create PUCT pipeline eagerly (always required).
+                // NOTE: Each pipeline uses its own bind group 0 layout.
+                if backend == wgpu::Backend::Dx12 && debug_mode {
+                    eprintln!("[dx12-init] creating pipeline: PUCT Pipeline");
+                }
+                let puct_pipeline = Self::create_compute_pipeline_checked(
+                    &device,
+                    &mcts_shader,
+                    "compute_puct",
+                    &[&puct_bind_group_layout],
+                    "PUCT Pipeline",
+                )?;
+
+                Ok((mcts_shader, puct_bind_group_layout, eval_bind_group_layout, puct_pipeline))
+            };
+
+            if backend == wgpu::Backend::Dx12 {
+                let join = std::thread::Builder::new()
+                    .name("dx12-pipeline-init".to_string())
+                    .stack_size(64 * 1024 * 1024)
+                    .spawn(init)
+                    .map_err(|e| GpuError::DeviceRequest(format!("Failed to spawn DX12 init thread: {e}")))?;
+                join.join().map_err(|_| GpuError::DeviceRequest("DX12 init thread panicked".to_string()))??
+            } else {
+                init()?
             }
-            _ => device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("MCTS Shaders (generated WGSL)"),
-                source: wgpu::ShaderSource::Wgsl(shaders::MCTS_SHADERS_WGSL.into()),
-            }),
         };
-
-        // Create bind group layouts
-        let puct_bind_group_layout = Self::create_puct_bind_group_layout(&device);
-        let eval_bind_group_layout = Self::create_eval_bind_group_layout(&device);
-
-        // Create pipelines
-        // NOTE: Each pipeline uses its own bind group 0 layout.
-        let puct_pipeline = Self::create_compute_pipeline(
-            &device,
-            &mcts_shader,
-            "compute_puct",
-            &[&puct_bind_group_layout],
-            "PUCT Pipeline",
-        );
-
-        let gomoku_eval_pipeline = Self::create_compute_pipeline(
-            &device,
-            &mcts_shader,
-            "evaluate_gomoku",
-            &[&eval_bind_group_layout],
-            "Gomoku Eval Pipeline",
-        );
-
-        let connect4_eval_pipeline = Self::create_compute_pipeline(
-            &device,
-            &mcts_shader,
-            "evaluate_connect4",
-            &[&eval_bind_group_layout],
-            "Connect4 Eval Pipeline",
-        );
-
-        let othello_eval_pipeline = Self::create_compute_pipeline(
-            &device,
-            &mcts_shader,
-            "evaluate_othello",
-            &[&eval_bind_group_layout],
-            "Othello Eval Pipeline",
-        );
-
-        let blokus_eval_pipeline = Self::create_compute_pipeline(
-            &device,
-            &mcts_shader,
-            "evaluate_blokus",
-            &[&eval_bind_group_layout],
-            "Blokus Eval Pipeline",
-        );
-
-        let hive_eval_pipeline = Self::create_compute_pipeline(
-            &device,
-            &mcts_shader,
-            "evaluate_hive",
-            &[&eval_bind_group_layout],
-            "Hive Eval Pipeline",
-        );
 
         Ok(Self {
             device,
             queue,
             adapter_info,
+            mcts_shader,
             puct_pipeline,
-            gomoku_eval_pipeline,
-            connect4_eval_pipeline,
-            othello_eval_pipeline,
-            blokus_eval_pipeline,
-            hive_eval_pipeline,
+            gomoku_eval_pipeline: Mutex::new(None),
+            connect4_eval_pipeline: Mutex::new(None),
+            othello_eval_pipeline: Mutex::new(None),
+            blokus_eval_pipeline: Mutex::new(None),
+            hive_eval_pipeline: Mutex::new(None),
             puct_bind_group_layout,
             eval_bind_group_layout,
             config: config.clone(),
             max_buffer_size,
         })
+    }
+
+    pub fn eval_pipeline_for_game(&self, game_type: u32) -> Result<Arc<ComputePipeline>, GpuError> {
+        // Keep this in sync with the shader crate's GAME_* constants.
+        const GAME_GOMOKU: u32 = 0;
+        const GAME_CONNECT4: u32 = 1;
+        const GAME_OTHELLO: u32 = 2;
+        const GAME_BLOKUS: u32 = 3;
+        const GAME_HIVE: u32 = 4;
+
+        let (slot, entry_point, label) = match game_type {
+            GAME_GOMOKU => (&self.gomoku_eval_pipeline, "evaluate_gomoku", "Gomoku Eval Pipeline"),
+            GAME_CONNECT4 => (&self.connect4_eval_pipeline, "evaluate_connect4", "Connect4 Eval Pipeline"),
+            GAME_OTHELLO => (&self.othello_eval_pipeline, "evaluate_othello", "Othello Eval Pipeline"),
+            GAME_BLOKUS => (&self.blokus_eval_pipeline, "evaluate_blokus", "Blokus Eval Pipeline"),
+            GAME_HIVE => (&self.hive_eval_pipeline, "evaluate_hive", "Hive Eval Pipeline"),
+            other => {
+                return Err(GpuError::DeviceRequest(format!(
+                    "Unknown game type for eval pipeline: {other}"
+                )))
+            }
+        };
+
+        // Fast path: already created.
+        if let Some(existing) = slot.lock().unwrap().as_ref() {
+            return Ok(existing.clone());
+        }
+
+        // Slow path: create under lock (simple and safe; creation is expensive anyway).
+        let mut guard = slot.lock().unwrap();
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+
+        if self.adapter_info.backend == wgpu::Backend::Dx12 && self.config.debug_mode {
+            eprintln!("[dx12-init] creating pipeline (lazy): {label}");
+        }
+        let pipeline = Self::create_compute_pipeline_checked(
+            &self.device,
+            &self.mcts_shader,
+            entry_point,
+            &[&self.eval_bind_group_layout],
+            label,
+        )?;
+        let arc = Arc::new(pipeline);
+        *guard = Some(arc.clone());
+        Ok(arc)
     }
 
     /// Creates the bind group layout for game evaluation
@@ -277,6 +436,16 @@ impl GpuContext {
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -345,6 +514,47 @@ impl GpuContext {
             module: shader,
             entry_point: entry_point,
         })
+    }
+
+    /// Creates a compute pipeline but captures wgpu validation errors instead of panicking.
+    fn create_compute_pipeline_checked(
+        device: &Device,
+        shader: &ShaderModule,
+        entry_point: &str,
+        bind_group_layouts: &[&BindGroupLayout],
+        label: &str,
+    ) -> Result<ComputePipeline, GpuError> {
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = Self::create_compute_pipeline(device, shader, entry_point, bind_group_layouts, label);
+
+        // Drive wgpu so the error scope can resolve.
+        // On some backends (notably DX12 with large shaders), shader translation can be very slow
+        // or even get stuck; we hard-timeout so callers don't hang indefinitely.
+        let mut fut = pin!(device.pop_error_scope());
+        let start = Instant::now();
+        let timeout = Duration::from_secs(10);
+        loop {
+            device.poll(Maintain::Poll);
+
+            if let Some(err) = fut.as_mut().now_or_never() {
+                if let Some(err) = err {
+                    return Err(GpuError::DeviceRequest(format!(
+                        "Failed to create compute pipeline '{label}': {err}"
+                    )));
+                }
+                break;
+            }
+
+            if start.elapsed() > timeout {
+                return Err(GpuError::DeviceRequest(format!(
+                    "Timed out creating compute pipeline '{label}' after {timeout:?}"
+                )));
+            }
+
+            std::thread::yield_now();
+        }
+
+        Ok(pipeline)
     }
 
     pub fn device(&self) -> &Arc<Device> {

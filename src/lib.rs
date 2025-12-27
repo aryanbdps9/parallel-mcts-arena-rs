@@ -430,9 +430,56 @@ pub struct MCTS<S: GameState> {
     /// Counter for pending GPU evaluations
     #[cfg(feature = "gpu")]
     gpu_pending_evaluations: Arc<AtomicI32>,
+
+    /// Maximum time to wait at the end of a search for pending GPU evaluations
+    /// to complete so that visits/wins reflect completed backprops.
+    #[cfg(feature = "gpu")]
+    gpu_drain_timeout_ms: u64,
 }
 
 impl<S: GameState> MCTS<S> {
+    // Increment this number whenever you make a meaningful change to src/lib.rs.
+    // This is used by the opt-in MCTS_TRACE_LIB_RS trace print.
+    const LIB_RS_TRACE_COUNTER: u32 = 1;
+
+    fn trace_lib_rs_tag() {
+        // Opt-in: set MCTS_TRACE_LIB_RS=1 to verify that src/lib.rs changes
+        // are being compiled/linked into binaries like benchmark/play.
+        if std::env::var_os("MCTS_TRACE_LIB_RS").is_some() {
+            eprintln!(
+                "[mcts::lib.rs] trace: lib.rs is linked (counter={})",
+                Self::LIB_RS_TRACE_COUNTER
+            );
+        }
+    }
+
+    /// Sets how long search methods will wait (at most) for pending GPU evaluations
+    /// to drain before selecting the best move.
+    #[cfg(feature = "gpu")]
+    pub fn set_gpu_drain_timeout_ms(&mut self, ms: u64) {
+        self.gpu_drain_timeout_ms = ms;
+    }
+
+    #[cfg(feature = "gpu")]
+    fn drain_pending_gpu_evaluations(&self) {
+        if self.gpu_simulation_sender.is_none() {
+            return;
+        }
+
+        let max_wait_ms = self.gpu_drain_timeout_ms;
+        if max_wait_ms == 0 {
+            return;
+        }
+
+        let wait_start = Instant::now();
+        let max_wait = Duration::from_millis(max_wait_ms);
+        while self.gpu_pending_evaluations.load(Ordering::Relaxed) > 0 {
+            if wait_start.elapsed() > max_wait {
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(100));
+        }
+    }
     /// Creates a new MCTS engine.
     ///
     /// # Arguments
@@ -440,6 +487,7 @@ impl<S: GameState> MCTS<S> {
     /// * `num_threads` - The number of threads to use for the search. If 0, rayon will use the default.
     /// * `max_nodes` - Maximum number of nodes allowed in the tree.
     pub fn new(exploration_parameter: f64, num_threads: usize, max_nodes: usize) -> Self {
+        Self::trace_lib_rs_tag();
         let pool_builder = ThreadPoolBuilder::new();
         let pool = if num_threads > 0 {
             pool_builder.num_threads(num_threads).build().unwrap()
@@ -472,6 +520,8 @@ impl<S: GameState> MCTS<S> {
             gpu_simulation_sender: None,
             #[cfg(feature = "gpu")]
             gpu_pending_evaluations: Arc::new(AtomicI32::new(0)),
+            #[cfg(feature = "gpu")]
+            gpu_drain_timeout_ms: 500,
         }
     }
 
@@ -518,6 +568,7 @@ impl<S: GameState> MCTS<S> {
     where
         S: 'static,
     {
+        Self::trace_lib_rs_tag();
         let pool_builder = ThreadPoolBuilder::new();
         let pool = if num_threads > 0 {
             pool_builder.num_threads(num_threads).build().unwrap()
@@ -548,8 +599,8 @@ impl<S: GameState> MCTS<S> {
             if let Some(ref accelerator) = gpu_accelerator {
                 let accelerator = accelerator.clone();
                 let (tx, rx) = std::sync::mpsc::channel::<EvaluationRequest<S>>();
-                let max_batch_size = gpu_config.max_batch_size;
                 let use_heuristic_flag = use_heuristic;
+                let max_batch_size = gpu_config.max_batch_size;
                 
                 std::thread::spawn(move || {
                     let mut batch_requests: Vec<EvaluationRequest<S>> = Vec::with_capacity(max_batch_size);
@@ -597,6 +648,7 @@ impl<S: GameState> MCTS<S> {
                         if batch_requests.is_empty() { continue; }
                         
                         let mut flat_data = Vec::new();
+                        let mut flat_last_moves: Vec<i32> = Vec::new();
                         let mut gpu_indices = Vec::new();
                         let mut cpu_indices = Vec::new();
                         let mut params = None;
@@ -620,6 +672,18 @@ impl<S: GameState> MCTS<S> {
                                     });
                                 }
                                 flat_data.extend(data);
+
+                                // Per-board last-move index for CPU-like terminal detection.
+                                // If a game has multiple last-move coords (e.g., multi-piece moves),
+                                // we take the first one.
+                                let last_move_idx = req
+                                    .state
+                                    .get_last_move()
+                                    .and_then(|moves| moves.first().copied())
+                                    .map(|(r, c)| (r as i32) * (w as i32) + (c as i32))
+                                    .unwrap_or(-1);
+                                flat_last_moves.push(last_move_idx);
+
                                 gpu_indices.push(i);
                             } else {
                                 // This game doesn't support GPU simulation, needs CPU rollout
@@ -633,7 +697,7 @@ impl<S: GameState> MCTS<S> {
                         let start_time = Instant::now();
                         if let Some(p) = params {
                             let mut acc = accelerator.lock();
-                            if let Ok(gpu_scores) = acc.simulate_batch(&flat_data, p) {
+                            if let Ok(gpu_scores) = acc.simulate_batch(&flat_data, &flat_last_moves, p) {
                                 for (idx, score) in gpu_indices.into_iter().zip(gpu_scores.into_iter()) {
                                     scores[idx] = score;
                                 }
@@ -789,6 +853,7 @@ impl<S: GameState> MCTS<S> {
             gpu_last_batch_size: Arc::new(AtomicI32::new(0)),
             gpu_simulation_sender,
             gpu_pending_evaluations: pending_evaluations,
+            gpu_drain_timeout_ms: 500,
         };
 
         (mcts, message)
@@ -1288,7 +1353,7 @@ impl<S: GameState> MCTS<S> {
                     // Compute PUCT on GPU
                     if let Some(ref accelerator) = gpu_accelerator {
                         let mut acc = accelerator.lock();
-                        if let Ok(results) = acc.compute_puct_batch(&node_data) {
+                        if let Ok(results) = acc.compute_puct_batch_with_cancel(&node_data, Some(stop_flag.as_ref())) {
                             let mut cache = gpu_puct_cache.write();
                             cache.clear();
                             cache.reserve(results.len());
@@ -1396,19 +1461,9 @@ impl<S: GameState> MCTS<S> {
             let _ = handle.join();
         }
 
-        // Wait for pending GPU evaluations to complete (with timeout)
+        // Wait for pending GPU evaluations to complete (configurable timeout)
         #[cfg(feature = "gpu")]
-        if self.gpu_simulation_sender.is_some() {
-            let wait_start = Instant::now();
-            let max_wait = Duration::from_millis(500); // Wait up to 500ms for pending evaluations
-            while self.gpu_pending_evaluations.load(Ordering::Relaxed) > 0 {
-                if wait_start.elapsed() > max_wait {
-                    // Timeout - some evaluations may be lost, but we need to return
-                    break;
-                }
-                std::thread::sleep(Duration::from_micros(100));
-            }
-        }
+        self.drain_pending_gpu_evaluations();
 
         // After all simulations, the best move is the one most visited.
         let children = self.root.children.read();
@@ -1539,6 +1594,10 @@ impl<S: GameState> MCTS<S> {
                 });
         });
 
+        // Drain pending GPU evaluations before selecting the best move.
+        #[cfg(feature = "gpu")]
+        self.drain_pending_gpu_evaluations();
+
         // After all simulations, the best move is the one most visited.
         let children = self.root.children.read();
         let best_move = if children.is_empty() {
@@ -1624,6 +1683,10 @@ impl<S: GameState> MCTS<S> {
             // Run all iterations at once
             run_iterations(self, iterations, &stop_searching);
         }
+
+        // Drain pending GPU evaluations before selecting the best move.
+        #[cfg(feature = "gpu")]
+        self.drain_pending_gpu_evaluations();
 
         // Don't do final pruning here - let it be done explicitly after statistics are displayed
 
@@ -1908,10 +1971,12 @@ impl<S: GameState> MCTS<S> {
         #[cfg(feature = "gpu")]
         if let Some(ref sender) = self.gpu_simulation_sender {
             if !sim_state.is_terminal() {
-                // Check pending evaluations to prevent huge backlog
-                // If GPU is saturated, fall back to CPU simulation
+                // Check pending evaluations to prevent huge backlog.
+                // If GPU is saturated, fall back to CPU simulation so search still accumulates signal.
                 let pending = self.gpu_pending_evaluations.load(Ordering::Relaxed);
-                if pending < 10000 {
+                let threads = rayon::current_num_threads() as i32;
+                let pending_limit = (threads * 64).max(256).min(8192);
+                if pending < pending_limit {
                     // Send to GPU. Multiple threads can evaluate the same position - this is fine.
                     self.gpu_pending_evaluations.fetch_add(1, Ordering::Relaxed);
                     let request = EvaluationRequest {

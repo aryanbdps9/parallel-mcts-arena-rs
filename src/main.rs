@@ -207,6 +207,34 @@ struct Args {
     /// Random rollouts are slower but work for any game.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     gpu_use_heuristic: bool,
+
+    /// Override wgpu backend selection ("dx12" | "vulkan" | "all").
+    ///
+    /// If not set, the runtime will use its default backend preference.
+    #[arg(long, value_parser = ["dx12", "vulkan", "all"])]
+    wgpu_backend: Option<String>,
+
+    /// Safety timeout for GPU buffer readback mapping (milliseconds).
+    ///
+    /// Prevents indefinite hangs if a backend/driver wedges.
+    #[arg(long, default_value_t = 10_000)]
+    gpu_readback_timeout_ms: u64,
+
+    /// Sleep between GPU readback poll iterations (milliseconds). Use 0 to busy-yield.
+    #[arg(long, default_value_t = 1)]
+    gpu_readback_poll_sleep_ms: u64,
+
+    /// Minimum number of nodes before using GPU (below this CPU is faster).
+    #[arg(long, default_value_t = 256)]
+    gpu_min_batch_threshold: usize,
+
+    /// Prefer high performance GPU adapter (set false to prefer low power).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    gpu_prefer_high_performance: bool,
+
+    /// Enable extra GPU init/debug logging.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    gpu_debug_mode: bool,
 }
 
 /// Main entry point for the Parallel Multi-Game MCTS Engine
@@ -322,6 +350,12 @@ fn main() -> io::Result<()> {
             args.shared_tree,
             args.gpu_threads,
             args.gpu_use_heuristic,
+            args.wgpu_backend.clone(),
+            args.gpu_readback_timeout_ms,
+            args.gpu_readback_poll_sleep_ms,
+            args.gpu_min_batch_threshold,
+            args.gpu_prefer_high_performance,
+            args.gpu_debug_mode,
             args.board_size,
             args.line_size,
             args.timeout_secs,

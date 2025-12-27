@@ -31,6 +31,21 @@ pub struct GpuConfig {
     pub min_batch_threshold: usize,
     /// Enable debug output for GPU operations
     pub debug_mode: bool,
+
+    /// Optional backend override ("dx12" | "vulkan" | "all").
+    ///
+    /// This is preferred over the `MCTS_WGPU_BACKEND` env var when set.
+    pub backend_override: Option<String>,
+
+    /// Safety timeout for GPU readback mapping (in milliseconds).
+    ///
+    /// Prevents indefinite hangs if a backend/driver wedges.
+    pub readback_timeout_ms: u64,
+
+    /// Sleep duration between readback poll iterations (in milliseconds).
+    ///
+    /// Use 0 for a tight loop with `yield_now()`.
+    pub readback_poll_sleep_ms: u64,
 }
 
 impl Default for GpuConfig {
@@ -40,6 +55,10 @@ impl Default for GpuConfig {
             prefer_high_performance: true,
             min_batch_threshold: 256, // Don't use GPU for less than 256 nodes
             debug_mode: false,
+
+            backend_override: None,
+            readback_timeout_ms: 10_000,
+            readback_poll_sleep_ms: 1,
         }
     }
 }

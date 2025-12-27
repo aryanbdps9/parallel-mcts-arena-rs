@@ -35,7 +35,8 @@ pub struct NodeData {
     pub parent_visits: i32,
     pub prior_prob: f32,
     pub exploration: f32,
-    pub _padding: [f32; 2],
+    pub _pad0: f32,
+    pub _pad1: f32,
 }
 
 #[derive(Copy, Clone)]
@@ -369,34 +370,325 @@ fn gomoku_random_rollout(
     current_player: i32,
     line_size: i32,
     game_type: u32,
+    last_move_idx: i32,
 ) -> f32 {
+    // Mirror the main-branch WGSL approach: copy the board into a local array and
+    // do the rollout entirely on that local array. This avoids repeated storage-buffer
+    // accesses (very slow on some DX12 GPUs).
     let mut rng = Rng::new(params.seed.wrapping_add(idx.wrapping_mul(719_393)));
 
     let board_size = params.board_width * params.board_height;
     let safe_board_size = if board_size < 400 { board_size } else { 400 };
 
+    let w_u = params.board_width;
+    let h_u = params.board_height;
+    let w = w_u as i32;
+    let h = h_u as i32;
+    let win_count = line_size;
+
+    let is_connect4 = if game_type == GAME_CONNECT4 { 1u32 } else { 0u32 };
+
+    // NOTE: Avoid `[0i32; 400]` initialization here. rust-gpu occasionally lowers
+    // large array zero-inits into invalid SPIR-V (u32 0 stored into i32 slots).
+    //
+    let mut sim_board: [i32; 400] = unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+    let mut i = 0u32;
+    while i < safe_board_size {
+        let x_u = i % w_u;
+        let y_u = i / w_u;
+        // For i < safe_board_size, (x_u, y_u) is always within the board.
+        sim_board[i as usize] = get_cell(boards, params, idx, x_u as i32, y_u as i32);
+        i += 1;
+    }
+
+    let current_player = current_player;
+
+    #[inline(always)]
+    fn check_move_win_local(board: &[i32; 400], w: i32, h: i32, win_count: i32, move_idx: u32, player: i32) -> bool {
+        if move_idx >= 400 {
+            return false;
+        }
+
+        let row = (move_idx / (w as u32)) as i32;
+        let col = (move_idx % (w as u32)) as i32;
+
+        // Horizontal
+        let mut count = 1;
+        let mut x = col - 1;
+        let mut steps = 0;
+        while x >= 0 && steps < win_count - 1 {
+            let idx_lin = (row * w + x) as usize;
+            if idx_lin < 400 && board[idx_lin] == player {
+                count += 1;
+            } else {
+                break;
+            }
+            x -= 1;
+            steps += 1;
+        }
+        x = col + 1;
+        steps = 0;
+        while x < w && steps < win_count - 1 {
+            let idx_lin = (row * w + x) as usize;
+            if idx_lin < 400 && board[idx_lin] == player {
+                count += 1;
+            } else {
+                break;
+            }
+            x += 1;
+            steps += 1;
+        }
+        if count >= win_count {
+            return true;
+        }
+
+        // Vertical
+        count = 1;
+        let mut y = row - 1;
+        steps = 0;
+        while y >= 0 && steps < win_count - 1 {
+            let idx_lin = (y * w + col) as usize;
+            if idx_lin < 400 && board[idx_lin] == player {
+                count += 1;
+            } else {
+                break;
+            }
+            y -= 1;
+            steps += 1;
+        }
+        y = row + 1;
+        steps = 0;
+        while y < h && steps < win_count - 1 {
+            let idx_lin = (y * w + col) as usize;
+            if idx_lin < 400 && board[idx_lin] == player {
+                count += 1;
+            } else {
+                break;
+            }
+            y += 1;
+            steps += 1;
+        }
+        if count >= win_count {
+            return true;
+        }
+
+        // Diagonal TL-BR
+        count = 1;
+        let mut cx = col - 1;
+        let mut cy = row - 1;
+        steps = 0;
+        while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
+            let idx_lin = (cy * w + cx) as usize;
+            if idx_lin < 400 && board[idx_lin] == player {
+                count += 1;
+            } else {
+                break;
+            }
+            cx -= 1;
+            cy -= 1;
+            steps += 1;
+        }
+        cx = col + 1;
+        cy = row + 1;
+        steps = 0;
+        while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
+            let idx_lin = (cy * w + cx) as usize;
+            if idx_lin < 400 && board[idx_lin] == player {
+                count += 1;
+            } else {
+                break;
+            }
+            cx += 1;
+            cy += 1;
+            steps += 1;
+        }
+        if count >= win_count {
+            return true;
+        }
+
+        // Diagonal TR-BL
+        count = 1;
+        cx = col + 1;
+        cy = row - 1;
+        steps = 0;
+        while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
+            let idx_lin = (cy * w + cx) as usize;
+            if idx_lin < 400 && board[idx_lin] == player {
+                count += 1;
+            } else {
+                break;
+            }
+            cx += 1;
+            cy -= 1;
+            steps += 1;
+        }
+        cx = col - 1;
+        cy = row + 1;
+        steps = 0;
+        while cx >= 0 && cx < w && cy >= 0 && cy < h && steps < win_count - 1 {
+            let idx_lin = (cy * w + cx) as usize;
+            if idx_lin < 400 && board[idx_lin] == player {
+                count += 1;
+            } else {
+                break;
+            }
+            cx -= 1;
+            cy += 1;
+            steps += 1;
+        }
+        count >= win_count
+    }
+
+    // Mirror CPU behavior: terminal detection is based on the last move only.
+    // This avoids full-board scans and matches GomokuState::get_winner().
+    if last_move_idx >= 0 {
+        let lm = last_move_idx as u32;
+        if lm < safe_board_size {
+            let p = sim_board[lm as usize];
+            if p != 0 {
+                if check_move_win_local(&sim_board, w, h, win_count, lm, p) {
+                    return if p == current_player { 4000.0 } else { -4000.0 };
+                }
+            }
+        }
+    } else {
+        // Fallback: if we don't have last_move_idx, do a rare full-board scan.
+        // This should mostly only happen for the initial empty board.
+        #[inline(always)]
+        fn sim_get(board: &[i32; 400], w: i32, h: i32, x: i32, y: i32) -> i32 {
+            if x < 0 || x >= w || y < 0 || y >= h {
+                return 0;
+            }
+            let idx = (y * w + x) as usize;
+            if idx < 400 { board[idx] } else { 0 }
+        }
+
+        #[inline(always)]
+        fn check_line_win_local(board: &[i32; 400], w: i32, h: i32, player: i32, line_size: i32) -> bool {
+            // Horizontal
+            let mut y = 0;
+            while y < h {
+                let mut x = 0;
+                while x <= w - line_size {
+                    let mut k = 0;
+                    while k < line_size {
+                        if sim_get(board, w, h, x + k, y) != player {
+                            break;
+                        }
+                        k += 1;
+                    }
+                    if k == line_size {
+                        return true;
+                    }
+                    x += 1;
+                }
+                y += 1;
+            }
+
+            // Vertical
+            let mut x = 0;
+            while x < w {
+                let mut y2 = 0;
+                while y2 <= h - line_size {
+                    let mut k = 0;
+                    while k < line_size {
+                        if sim_get(board, w, h, x, y2 + k) != player {
+                            break;
+                        }
+                        k += 1;
+                    }
+                    if k == line_size {
+                        return true;
+                    }
+                    y2 += 1;
+                }
+                x += 1;
+            }
+
+            // Diagonal (TL-BR)
+            let mut y3 = 0;
+            while y3 <= h - line_size {
+                let mut x3 = 0;
+                while x3 <= w - line_size {
+                    let mut k = 0;
+                    while k < line_size {
+                        if sim_get(board, w, h, x3 + k, y3 + k) != player {
+                            break;
+                        }
+                        k += 1;
+                    }
+                    if k == line_size {
+                        return true;
+                    }
+                    x3 += 1;
+                }
+                y3 += 1;
+            }
+
+            // Diagonal (TR-BL)
+            let mut y4 = 0;
+            while y4 <= h - line_size {
+                let mut x4 = line_size - 1;
+                while x4 < w {
+                    let mut k = 0;
+                    while k < line_size {
+                        if sim_get(board, w, h, x4 - k, y4 + k) != player {
+                            break;
+                        }
+                        k += 1;
+                    }
+                    if k == line_size {
+                        return true;
+                    }
+                    x4 += 1;
+                }
+                y4 += 1;
+            }
+
+            false
+        }
+
+        if check_line_win_local(&sim_board, w, h, current_player, line_size) {
+            return 4000.0;
+        }
+        if check_line_win_local(&sim_board, w, h, -current_player, line_size) {
+            return -4000.0;
+        }
+    }
+
+    // For Gomoku-style rollouts, build a compact list of empty cells once and
+    // then pick via swap-remove. This avoids scanning the entire board every ply.
+    let mut empty_positions: [u32; 400] = unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+    let mut empty_count = 0u32;
+    if is_connect4 == 0 {
+        let mut j = 0u32;
+        while j < safe_board_size {
+            if sim_board[j as usize] == 0 {
+                empty_positions[empty_count as usize] = j;
+                empty_count += 1;
+            }
+            j += 1;
+        }
+    }
+
     let mut sim_player = current_player;
     let max_moves = safe_board_size as i32;
     let mut moves_made = 0;
-    let win_count = line_size;
-    let w = params.board_width as i32;
-    let h = params.board_height as i32;
-    let is_connect4 = if game_type == GAME_CONNECT4 { 1u32 } else { 0u32 };
 
     loop {
         if moves_made >= max_moves {
             break;
         }
 
-        let mut move_x = 0i32;
-        let mut move_y = 0i32;
+        let mut move_idx = 0u32;
         let mut found_move = 0u32;
 
         if is_connect4 != 0 {
+            // Choose a random valid column based on the top cell.
             let mut valid_cols = 0u32;
             let mut c = 0u32;
-            while c < params.board_width {
-                if get_cell(boards, params, idx, c as i32, 0) == 0 {
+            while c < w_u {
+                if sim_board[c as usize] == 0 {
                     valid_cols += 1;
                 }
                 c += 1;
@@ -411,8 +703,8 @@ fn gomoku_random_rollout(
             let mut chosen_col = 0u32;
 
             let mut c2 = 0u32;
-            while c2 < params.board_width {
-                if get_cell(boards, params, idx, c2 as i32, 0) == 0 {
+            while c2 < w_u {
+                if sim_board[c2 as usize] == 0 {
                     if current_valid == pick {
                         chosen_col = c2;
                         break;
@@ -422,172 +714,41 @@ fn gomoku_random_rollout(
                 c2 += 1;
             }
 
-            let mut r = params.board_height as i32 - 1;
+            let mut r = h_u as i32 - 1;
             while r >= 0 {
-                if get_cell(boards, params, idx, chosen_col as i32, r) == 0 {
-                    move_x = chosen_col as i32;
-                    move_y = r;
+                let idx_lin = (r as u32) * w_u + chosen_col;
+                if idx_lin < 400 && sim_board[idx_lin as usize] == 0 {
+                    move_idx = idx_lin;
                     found_move = 1;
                     break;
                 }
                 r -= 1;
             }
         } else {
-            let mut empty_count = 0u32;
-            let mut i2 = 0u32;
-            while i2 < safe_board_size {
-                let x = (i2 % params.board_width) as i32;
-                let y = (i2 / params.board_width) as i32;
-                if get_cell(boards, params, idx, x, y) == 0 {
-                    empty_count += 1;
-                }
-                i2 += 1;
-            }
+            // Choose a random remaining empty cell and remove it from the list.
             if empty_count == 0 {
                 break;
             }
             let pick = rng.rand_range(0, empty_count);
-            let mut current_empty = 0u32;
+            move_idx = empty_positions[pick as usize];
+            found_move = 1;
 
-            let mut i3 = 0u32;
-            while i3 < safe_board_size {
-                let x = (i3 % params.board_width) as i32;
-                let y = (i3 / params.board_width) as i32;
-                if get_cell(boards, params, idx, x, y) == 0 {
-                    if current_empty == pick {
-                        move_x = x;
-                        move_y = y;
-                        found_move = 1;
-                        break;
-                    }
-                    current_empty += 1;
-                }
-                i3 += 1;
-            }
+            // swap-remove
+            empty_count -= 1;
+            empty_positions[pick as usize] = empty_positions[empty_count as usize];
         }
 
         if found_move == 0 {
             break;
         }
 
-        set_cell(boards, params, idx, move_x, move_y, sim_player);
-
-        let row = move_y;
-        let col = move_x;
-
-        let mut won = 0u32;
-
-        // Horizontal
-        let mut count = 1;
-        let mut x = col - 1;
-        while x >= 0 {
-            if get_cell(boards, params, idx, x, row) == sim_player {
-                count += 1;
-            } else {
-                break;
-            }
-            x -= 1;
-        }
-        x = col + 1;
-        while x < w {
-            if get_cell(boards, params, idx, x, row) == sim_player {
-                count += 1;
-            } else {
-                break;
-            }
-            x += 1;
-        }
-        if count >= win_count {
-            won = 1;
+        if move_idx >= 400 {
+            break;
         }
 
-        if won == 0 {
-            // Vertical
-            count = 1;
-            let mut y = row - 1;
-            while y >= 0 {
-                if get_cell(boards, params, idx, col, y) == sim_player {
-                    count += 1;
-                } else {
-                    break;
-                }
-                y -= 1;
-            }
-            y = row + 1;
-            while y < h {
-                if get_cell(boards, params, idx, col, y) == sim_player {
-                    count += 1;
-                } else {
-                    break;
-                }
-                y += 1;
-            }
-            if count >= win_count {
-                won = 1;
-            }
-        }
+        sim_board[move_idx as usize] = sim_player;
 
-        if won == 0 {
-            // Diagonal TL-BR
-            count = 1;
-            let mut cx = col - 1;
-            let mut cy = row - 1;
-            while cx >= 0 && cx < w && cy >= 0 && cy < h {
-                if get_cell(boards, params, idx, cx, cy) == sim_player {
-                    count += 1;
-                } else {
-                    break;
-                }
-                cx -= 1;
-                cy -= 1;
-            }
-            cx = col + 1;
-            cy = row + 1;
-            while cx >= 0 && cx < w && cy >= 0 && cy < h {
-                if get_cell(boards, params, idx, cx, cy) == sim_player {
-                    count += 1;
-                } else {
-                    break;
-                }
-                cx += 1;
-                cy += 1;
-            }
-            if count >= win_count {
-                won = 1;
-            }
-        }
-
-        if won == 0 {
-            // Diagonal TR-BL
-            count = 1;
-            let mut cx = col + 1;
-            let mut cy = row - 1;
-            while cx >= 0 && cx < w && cy >= 0 && cy < h {
-                if get_cell(boards, params, idx, cx, cy) == sim_player {
-                    count += 1;
-                } else {
-                    break;
-                }
-                cx += 1;
-                cy -= 1;
-            }
-            cx = col - 1;
-            cy = row + 1;
-            while cx >= 0 && cx < w && cy >= 0 && cy < h {
-                if get_cell(boards, params, idx, cx, cy) == sim_player {
-                    count += 1;
-                } else {
-                    break;
-                }
-                cx -= 1;
-                cy += 1;
-            }
-            if count >= win_count {
-                won = 1;
-            }
-        }
-
-        if won != 0 {
+        if check_move_win_local(&sim_board, w, h, win_count, move_idx, sim_player) {
             return if sim_player == current_player { 4000.0 } else { -4000.0 };
         }
 
@@ -598,7 +759,14 @@ fn gomoku_random_rollout(
     0.0
 }
 
-fn evaluate_grid_game_common(boards: &mut [i32], results: &mut [SimulationResult], params: &SimulationParams, idx: u32, game_type: u32) {
+fn evaluate_grid_game_common(
+    boards: &mut [i32],
+    results: &mut [SimulationResult],
+    params: &SimulationParams,
+    idx: u32,
+    game_type: u32,
+    last_move_idx: i32,
+) {
     if params.board_width > 32 || params.board_height > 32 {
         return;
     }
@@ -606,14 +774,18 @@ fn evaluate_grid_game_common(boards: &mut [i32], results: &mut [SimulationResult
     let current_player = 1;
     let line_size = get_line_size(params);
 
-    if check_line_win(boards, params, idx, current_player, line_size) {
-        results[idx as usize].score = 4000.0;
-        return;
-    }
+    // For non-heuristic mode we do terminal detection inside the local-board rollout
+    // to avoid expensive global-buffer scans.
+    if params.use_heuristic != 0 {
+        if check_line_win(boards, params, idx, current_player, line_size) {
+            results[idx as usize].score = 4000.0;
+            return;
+        }
 
-    if check_line_win(boards, params, idx, -current_player, line_size) {
-        results[idx as usize].score = -4000.0;
-        return;
+        if check_line_win(boards, params, idx, -current_player, line_size) {
+            results[idx as usize].score = -4000.0;
+            return;
+        }
     }
 
     if params.use_heuristic != 0 {
@@ -633,7 +805,7 @@ fn evaluate_grid_game_common(boards: &mut [i32], results: &mut [SimulationResult
             + (opp_builds as f32) * 1.0;
         results[idx as usize].score = player_score - opp_score;
     } else {
-        results[idx as usize].score = gomoku_random_rollout(boards, params, idx, current_player, line_size, game_type);
+        results[idx as usize].score = gomoku_random_rollout(boards, params, idx, current_player, line_size, game_type, last_move_idx);
     }
 }
 
@@ -1724,6 +1896,7 @@ pub fn evaluate_connect4(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] boards: &mut [i32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] results: &mut [SimulationResult],
     #[spirv(uniform, descriptor_set = 0, binding = 2)] params: &SimulationParams,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] _last_moves: &[i32],
 ) {
     let idx = global_id.x as usize;
     if idx >= results.len() {
@@ -1750,7 +1923,8 @@ pub fn evaluate_connect4(
     let mut player_count = 0;
     let mut opponent_count = 0;
     
-    for i in 0..board_size {
+    let mut i = 0usize;
+    while i < board_size {
         if board_start + i < boards.len() {
             let cell = boards[board_start + i];
             if cell == current_player {
@@ -1759,6 +1933,7 @@ pub fn evaluate_connect4(
                 opponent_count += 1;
             }
         }
+        i += 1;
     }
     
     // Simple heuristic: more pieces = better position
@@ -1776,12 +1951,15 @@ pub fn evaluate_gomoku(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] boards: &mut [i32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] results: &mut [SimulationResult],
     #[spirv(uniform, descriptor_set = 0, binding = 2)] params: &SimulationParams,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] last_moves: &[i32],
 ) {
     let idx = global_id.x as usize;
     if idx >= results.len() {
         return;
     }
-    evaluate_grid_game_common(boards, results, params, idx as u32, GAME_GOMOKU);
+
+    let last_move_idx = if idx < last_moves.len() { last_moves[idx] } else { -1 };
+    evaluate_grid_game_common(boards, results, params, idx as u32, GAME_GOMOKU, last_move_idx);
 }
 
 #[spirv(compute(threads(64)))]
@@ -1790,6 +1968,7 @@ pub fn evaluate_othello(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] boards: &mut [i32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] results: &mut [SimulationResult],
     #[spirv(uniform, descriptor_set = 0, binding = 2)] params: &SimulationParams,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] _last_moves: &[i32],
 ) {
     let idx = global_id.x as usize;
     if idx >= results.len() {
@@ -1805,6 +1984,7 @@ pub fn evaluate_blokus(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] boards: &mut [i32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] results: &mut [SimulationResult],
     #[spirv(uniform, descriptor_set = 0, binding = 2)] params: &SimulationParams,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] _last_moves: &[i32],
 ) {
     let idx = global_id.x as usize;
     if idx >= results.len() {
@@ -1820,6 +2000,7 @@ pub fn evaluate_hive(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] boards: &mut [i32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] results: &mut [SimulationResult],
     #[spirv(uniform, descriptor_set = 0, binding = 2)] params: &SimulationParams,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] _last_moves: &[i32],
 ) {
     let idx = global_id.x as usize;
     if idx >= results.len() {

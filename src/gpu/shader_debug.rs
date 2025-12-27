@@ -5,6 +5,56 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(all(windows, feature = "gpu"))]
+    fn dump_dx12_hlsl_for_puct() {
+        use crate::gpu::shaders;
+        use naga::back::hlsl;
+        use naga::front::spv;
+        use naga::valid;
+
+        let spv_options = spv::Options {
+            adjust_coordinate_space: false,
+            strict_capabilities: false,
+            block_ctx_dump_prefix: None,
+        };
+
+        let module = spv::parse_u8_slice(shaders::MCTS_SHADERS_SPV, &spv_options)
+            .expect("failed to parse SPIR-V");
+
+        let mut validator = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all());
+        let module_info = validator
+            .validate(&module)
+            .expect("SPIR-V translated module failed validation");
+
+        let options = hlsl::Options {
+            shader_model: hlsl::ShaderModel::V5_1,
+            ..Default::default()
+        };
+
+        let mut hlsl_string = String::new();
+        let mut writer = hlsl::Writer::new(&mut hlsl_string, &options);
+        writer
+            .write(&module, &module_info)
+            .expect("failed to write HLSL");
+
+        // Print the failing line region (wgpu error references line ~234).
+        let lines: Vec<&str> = hlsl_string.lines().collect();
+        let target_line_1_based: usize = 234;
+        let start = target_line_1_based.saturating_sub(8);
+        let end = (target_line_1_based + 8).min(lines.len());
+        eprintln!("--- HLSL snippet around line {target_line_1_based} ---");
+        for (i, line) in lines.iter().enumerate().take(end).skip(start) {
+            eprintln!("{:4}: {}", i + 1, line);
+        }
+
+        // Also write to disk for easier inspection.
+        let out_path = std::path::Path::new("target").join("naga_dx12_compute_puct.hlsl");
+        std::fs::write(&out_path, hlsl_string).expect("failed to write HLSL dump");
+        eprintln!("Wrote HLSL dump to: {}", out_path.display());
+    }
+
+    #[test]
+    #[ignore]
     fn debug_puct_shader() {
         // 1. Setup GPU Context with debug mode
         let config = GpuConfig {
@@ -12,6 +62,7 @@ mod tests {
             prefer_high_performance: true,
             min_batch_threshold: 0, // Force GPU usage even for small batches
             debug_mode: true,
+            ..Default::default()
         };
 
         println!("Initializing GPU Context...");
@@ -79,6 +130,7 @@ mod tests {
             prefer_high_performance: true,
             min_batch_threshold: 0,
             debug_mode: true,
+            ..Default::default()
         };
 
         println!("Initializing GPU Context for Simulation...");
@@ -114,7 +166,10 @@ mod tests {
 
         // 3. Run Simulation
         println!("\nRunning Simulation Shader...");
-        let results = accelerator.simulate_batch(&board, params).expect("Failed to simulate batch");
+        let last_moves = vec![-1i32];
+        let results = accelerator
+            .simulate_batch(&board, &last_moves, params)
+            .expect("Failed to simulate batch");
 
         // 4. Inspect Results
         println!("\nSimulation Results:");
@@ -134,6 +189,7 @@ mod tests {
             prefer_high_performance: true,
             min_batch_threshold: 0,
             debug_mode: true,
+            ..Default::default()
         };
 
         println!("Initializing GPU Context for Connect4...");
@@ -164,7 +220,10 @@ mod tests {
         };
 
         println!("\nRunning Connect4 Shader...");
-        let results = accelerator.simulate_batch(&board, params).expect("Failed to simulate Connect4");
+        let last_moves = vec![-1i32];
+        let results = accelerator
+            .simulate_batch(&board, &last_moves, params)
+            .expect("Failed to simulate Connect4");
 
         println!("\nConnect4 Results:");
         for (i, score) in results.iter().enumerate() {
@@ -182,6 +241,7 @@ mod tests {
             prefer_high_performance: true,
             min_batch_threshold: 0,
             debug_mode: true,
+            ..Default::default()
         };
 
         println!("Initializing GPU Context for Othello...");
@@ -218,7 +278,10 @@ mod tests {
         };
 
         println!("\nRunning Othello Shader...");
-        let results = accelerator.simulate_batch(&board, params).expect("Failed to simulate Othello");
+        let last_moves = vec![-1i32];
+        let results = accelerator
+            .simulate_batch(&board, &last_moves, params)
+            .expect("Failed to simulate Othello");
 
         println!("\nOthello Results:");
         for (i, score) in results.iter().enumerate() {
@@ -236,6 +299,7 @@ mod tests {
             prefer_high_performance: true,
             min_batch_threshold: 0,
             debug_mode: true,
+            ..Default::default()
         };
 
         println!("Initializing GPU Context for Blokus...");
@@ -278,7 +342,10 @@ mod tests {
         };
 
         println!("\nRunning Blokus Shader...");
-        let results = accelerator.simulate_batch(&board, params).expect("Failed to simulate Blokus");
+        let last_moves = vec![-1i32];
+        let results = accelerator
+            .simulate_batch(&board, &last_moves, params)
+            .expect("Failed to simulate Blokus");
 
         println!("\nBlokus Results:");
         for (i, score) in results.iter().enumerate() {
@@ -296,6 +363,7 @@ mod tests {
             prefer_high_performance: true,
             min_batch_threshold: 0,
             debug_mode: true,
+            ..Default::default()
         };
 
         println!("Initializing GPU Context for Hive...");
@@ -337,7 +405,10 @@ mod tests {
         };
 
         println!("\nRunning Hive Shader...");
-        let results = accelerator.simulate_batch(&board, params).expect("Failed to simulate Hive");
+        let last_moves = vec![-1i32];
+        let results = accelerator
+            .simulate_batch(&board, &last_moves, params)
+            .expect("Failed to simulate Hive");
 
         println!("\nHive Results:");
         for (i, score) in results.iter().enumerate() {

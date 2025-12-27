@@ -7,6 +7,8 @@
 use wgpu::{BindGroupDescriptor, BindGroupEntry, Buffer, BufferUsages, CommandEncoderDescriptor, util::DeviceExt};
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use super::context::{GpuContext, GpuError};
 
@@ -93,6 +95,7 @@ pub struct GpuMctsAccelerator {
     sim_output_buffer: Option<Buffer>,
     sim_staging_buffer: Option<Buffer>,
     sim_params_buffer: Option<Buffer>,
+    sim_last_moves_buffer: Option<Buffer>,
     sim_bind_group: Option<wgpu::BindGroup>,
     sim_capacity: usize,
     // Statistics
@@ -112,6 +115,7 @@ impl GpuMctsAccelerator {
             sim_output_buffer: None,
             sim_staging_buffer: None,
             sim_params_buffer: None,
+            sim_last_moves_buffer: None,
             sim_bind_group: None,
             sim_capacity: 0,
             total_gpu_time_us: 0,
@@ -154,6 +158,14 @@ impl GpuMctsAccelerator {
 
     /// Compute PUCT scores for a batch of nodes
     pub fn compute_puct_batch(&mut self, nodes: &[GpuNodeData]) -> Result<Vec<GpuPuctResult>, GpuError> {
+        self.compute_puct_batch_with_cancel(nodes, None)
+    }
+
+    pub fn compute_puct_batch_with_cancel(
+        &mut self,
+        nodes: &[GpuNodeData],
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<GpuPuctResult>, GpuError> {
         let num_nodes = nodes.len();
         if num_nodes == 0 {
             return Ok(Vec::new());
@@ -209,10 +221,11 @@ impl GpuMctsAccelerator {
 
         let output_size = (num_nodes * std::mem::size_of::<GpuPuctResult>()) as u64;
         encoder.copy_buffer_to_buffer(output_buffer, 0, staging_buffer, 0, output_size);
-        self.context.submit_and_wait(encoder.finish());
+        // Submit work; readback waits/polls for completion.
+        self.context.queue().submit(std::iter::once(encoder.finish()));
 
         // Read results
-        let results = self.read_buffer(staging_buffer, num_nodes)?;
+        let results = self.read_buffer(staging_buffer, num_nodes, cancel)?;
 
         self.total_gpu_time_us += start.elapsed().as_micros() as u64;
         self.dispatch_count += 1;
@@ -220,16 +233,60 @@ impl GpuMctsAccelerator {
         Ok(results)
     }
 
-    fn read_buffer<T: Pod>(&self, staging_buffer: &Buffer, count: usize) -> Result<Vec<T>, GpuError> {
+    fn read_buffer<T: Pod>(
+        &self,
+        staging_buffer: &Buffer,
+        count: usize,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<T>, GpuError> {
         let buffer_slice = staging_buffer.slice(..);
-        
-        let (tx, rx) = futures::channel::oneshot::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| { let _ = tx.send(result); });
-        self.context.device().poll(wgpu::Maintain::Wait);
-        
-        pollster::block_on(rx)
-            .map_err(|_| GpuError::BufferError("Mapping cancelled".to_string()))?
-            .map_err(|e| GpuError::BufferError(format!("{:?}", e)))?;
+
+        // Use an mpsc channel so we can poll/cancel instead of blocking forever.
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+
+        // Safety timeout: if a driver/backend wedges, we must not hang the whole search.
+        let deadline = Instant::now() + Duration::from_millis(self.context.config().readback_timeout_ms);
+        let poll_sleep_ms = self.context.config().readback_poll_sleep_ms;
+        loop {
+            if let Some(flag) = cancel {
+                if flag.load(Ordering::Relaxed) {
+                    staging_buffer.unmap();
+                    return Err(GpuError::Cancelled);
+                }
+            }
+
+            // Progress mapping callbacks without blocking.
+            self.context.device().poll(wgpu::Maintain::Poll);
+
+            match rx.try_recv() {
+                Ok(result) => {
+                    result.map_err(|e| GpuError::BufferError(format!("{:?}", e)))?;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if Instant::now() >= deadline {
+                        staging_buffer.unmap();
+                        return Err(GpuError::BufferError(
+                            "Timed out waiting for GPU buffer mapping".to_string(),
+                        ));
+                    }
+                    if poll_sleep_ms == 0 {
+                        std::thread::yield_now();
+                    } else {
+                        std::thread::sleep(Duration::from_millis(poll_sleep_ms));
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    staging_buffer.unmap();
+                    return Err(GpuError::BufferError(
+                        "GPU buffer mapping channel disconnected".to_string(),
+                    ));
+                }
+            }
+        }
 
         let data = buffer_slice.get_mapped_range();
         // Use pod_read_unaligned to handle potential alignment issues with mapped memory
@@ -267,7 +324,12 @@ impl GpuMctsAccelerator {
     }
 
     /// Evaluate Gomoku boards on GPU
-    pub fn simulate_batch(&mut self, board_data: &[i32], params: GpuSimulationParams) -> Result<Vec<f32>, GpuError> {
+    pub fn simulate_batch(
+        &mut self,
+        board_data: &[i32],
+        last_moves: &[i32],
+        params: GpuSimulationParams,
+    ) -> Result<Vec<f32>, GpuError> {
         let start = std::time::Instant::now();
         let board_size = (params.board_width * params.board_height) as usize;
         if board_size == 0 {
@@ -277,6 +339,14 @@ impl GpuMctsAccelerator {
         
         if num_boards == 0 {
             return Ok(Vec::new());
+        }
+
+        if last_moves.len() != num_boards {
+            return Err(GpuError::BufferError(format!(
+                "last_moves length mismatch: got {}, expected {}",
+                last_moves.len(),
+                num_boards
+            )));
         }
 
         // Debug print to verify params
@@ -291,6 +361,11 @@ impl GpuMctsAccelerator {
 
         // Upload data
         self.context.queue().write_buffer(self.sim_input_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(board_data));
+
+        // Upload last moves (per board)
+        self.context
+            .queue()
+            .write_buffer(self.sim_last_moves_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(last_moves));
         
         // Update params
         self.context.queue().write_buffer(self.sim_params_buffer.as_ref().unwrap(), 0, bytemuck::bytes_of(&params));
@@ -305,22 +380,27 @@ impl GpuMctsAccelerator {
         let explicit_game_type = (encoded >> 16) & 0xFF;
         let line_size = (encoded >> 8) & 0xFF;
         
-        let pipeline = match explicit_game_type {
-            GAME_OTHELLO => &self.context.othello_eval_pipeline,
-            GAME_BLOKUS => &self.context.blokus_eval_pipeline,
-            GAME_HIVE => &self.context.hive_eval_pipeline,
-            _ => if line_size > 0 && line_size < 10 {
-                &self.context.connect4_eval_pipeline
-            } else {
-                &self.context.gomoku_eval_pipeline
-            },
+        // Keep in sync with shader crate constants.
+        const GAME_GOMOKU: u32 = 0;
+        const GAME_CONNECT4: u32 = 1;
+
+        let pipeline_game_type: u32 = match explicit_game_type {
+            GAME_OTHELLO | GAME_BLOKUS | GAME_HIVE => explicit_game_type as u32,
+            _ => {
+                if line_size > 0 && line_size < 10 {
+                    GAME_CONNECT4
+                } else {
+                    GAME_GOMOKU
+                }
+            }
         };
+        let pipeline = self.context.eval_pipeline_for_game(pipeline_game_type)?;
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Sim Pass"),
             });
-            pass.set_pipeline(pipeline);
+            pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, self.sim_bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups((num_boards as u32 + 63) / 64, 1, 1);
         }
@@ -331,15 +411,47 @@ impl GpuMctsAccelerator {
             self.sim_staging_buffer.as_ref().unwrap(), 0,
             output_size,
         );
-        self.context.submit_and_wait(encoder.finish());
+        // Submit work; readback waits/polls for completion.
+        self.context.queue().submit(std::iter::once(encoder.finish()));
 
         // Read results
         let staging = self.sim_staging_buffer.as_ref().unwrap();
         let buffer_slice = staging.slice(..output_size);
         let (tx, rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
-        self.context.device().poll(wgpu::Maintain::Wait);
-        rx.recv().unwrap().map_err(|e| GpuError::BufferError(e.to_string()))?;
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
+            let _ = tx.send(v);
+        });
+
+        let deadline = Instant::now() + Duration::from_millis(self.context.config().readback_timeout_ms);
+        let poll_sleep_ms = self.context.config().readback_poll_sleep_ms;
+        loop {
+            self.context.device().poll(wgpu::Maintain::Poll);
+            match rx.try_recv() {
+                Ok(result) => {
+                    result.map_err(|e| GpuError::BufferError(e.to_string()))?;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if Instant::now() >= deadline {
+                        staging.unmap();
+                        return Err(GpuError::BufferError(
+                            "Timed out waiting for GPU simulation buffer mapping".to_string(),
+                        ));
+                    }
+                    if poll_sleep_ms == 0 {
+                        std::thread::yield_now();
+                    } else {
+                        std::thread::sleep(Duration::from_millis(poll_sleep_ms));
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    staging.unmap();
+                    return Err(GpuError::BufferError(
+                        "GPU simulation mapping channel disconnected".to_string(),
+                    ));
+                }
+            }
+        }
 
         let data = buffer_slice.get_mapped_range();
         // Use pod_read_unaligned to handle potential alignment issues with mapped memory
@@ -364,6 +476,7 @@ impl GpuMctsAccelerator {
             let new_capacity = num_boards.next_power_of_two().max(256);
             let input_size = (new_capacity * board_size * std::mem::size_of::<i32>()) as u64;
             let output_size = (new_capacity * std::mem::size_of::<GpuSimulationResult>()) as u64;
+            let last_moves_size = (new_capacity * std::mem::size_of::<i32>()) as u64;
 
             self.sim_input_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Sim Input"), size: input_size,
@@ -385,6 +498,13 @@ impl GpuMctsAccelerator {
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST, mapped_at_creation: false,
             }));
 
+            self.sim_last_moves_buffer = Some(self.context.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Sim Last Moves"),
+                size: last_moves_size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
             self.sim_bind_group = Some(self.context.device().create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Sim Bind Group"),
                 layout: &self.context.eval_bind_group_layout,
@@ -392,6 +512,7 @@ impl GpuMctsAccelerator {
                     BindGroupEntry { binding: 0, resource: self.sim_input_buffer.as_ref().unwrap().as_entire_binding() },
                     BindGroupEntry { binding: 1, resource: self.sim_output_buffer.as_ref().unwrap().as_entire_binding() },
                     BindGroupEntry { binding: 2, resource: self.sim_params_buffer.as_ref().unwrap().as_entire_binding() },
+                    BindGroupEntry { binding: 3, resource: self.sim_last_moves_buffer.as_ref().unwrap().as_entire_binding() },
                 ],
             }));
             
