@@ -102,6 +102,9 @@ Launch the application and use the menu system:
 
 **Command Line Mode**
 ```bash
+# The OG command:
+.\target\release\play.exe -n 16 -b 8 -l 4 --stats-interval-secs 1 --gpu-use-heuristic false --timeout-secs 5 --gpu-exploration-factor 2 -m 10000000
+
 # Start specific game with AI vs AI
 cargo run --release --features gui -- --game Gomoku --ai-only
 
