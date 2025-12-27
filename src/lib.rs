@@ -553,9 +553,10 @@ impl<S: GameState> MCTS<S> {
                 
                 std::thread::spawn(move || {
                     let mut batch_requests: Vec<EvaluationRequest<S>> = Vec::with_capacity(max_batch_size);
-                    
-                    // Track execution time to adapt batching strategy
-                    let mut last_execution_time = Duration::from_micros(0);
+                    let mut flat_data = Vec::with_capacity(max_batch_size * 256);
+                    let mut gpu_indices = Vec::with_capacity(max_batch_size);
+                    let mut cpu_indices = Vec::with_capacity(max_batch_size);
+                    let mut scores = Vec::with_capacity(max_batch_size);
                     
                     loop {
                         let first = match rx.recv() {
@@ -565,40 +566,40 @@ impl<S: GameState> MCTS<S> {
                         
                         batch_requests.push(first);
 
-                        // Adaptive batching: if GPU is slow (>2ms), wait up to 500us to fill larger batches
-                        let heavy_load = last_execution_time.as_micros() > 2000;
-                        let target_batch = if heavy_load { 
-                            (max_batch_size / 2).max(64).min(2048) 
-                        } else { 
-                            (max_batch_size / 4).max(64).min(512) 
-                        };
-                        
-                        let deadline = if heavy_load { 
-                            Some(Instant::now() + Duration::from_micros(500)) 
-                        } else { 
-                            None 
-                        };
+                        // Aggressive batching: Wait for more requests to form a decent batch
+                        // This is crucial for GPU throughput.
+                        // We spin-wait because latency is critical and we want to grab requests ASAP.
+                        let min_batch = 64; // Reduced from 1024 to improve latency
+                        let max_wait = Duration::from_micros(200); // Reduced from 1000us to 200us
+                        let start_wait = Instant::now();
 
-                        while batch_requests.len() < target_batch {
+                        while batch_requests.len() < max_batch_size {
                             match rx.try_recv() {
                                 Ok(req) => batch_requests.push(req),
                                 Err(_) => {
-                                    match deadline {
-                                        Some(d) => {
-                                            if batch_requests.len() >= 64 || Instant::now() >= d { break; }
-                                            std::thread::yield_now();
-                                        }
-                                        None => break,
+                                    // If we have enough requests, stop waiting
+                                    if batch_requests.len() >= min_batch {
+                                        break;
                                     }
+                                    // If we timed out, stop waiting
+                                    if start_wait.elapsed() >= max_wait {
+                                        break;
+                                    }
+                                    // Yield to let other threads produce
+                                    std::thread::yield_now();
                                 }
                             }
                         }
                         
                         if batch_requests.is_empty() { continue; }
                         
-                        let mut flat_data = Vec::new();
-                        let mut gpu_indices = Vec::new();
-                        let mut cpu_indices = Vec::new();
+                        // Clear buffers for reuse
+                        flat_data.clear();
+                        gpu_indices.clear();
+                        cpu_indices.clear();
+                        scores.clear();
+                        scores.resize(batch_requests.len(), 0.0);
+                        
                         let mut params = None;
                         
                         // Generate a unique base seed for this batch using high-resolution timing
@@ -627,28 +628,20 @@ impl<S: GameState> MCTS<S> {
                             }
                         }
                         
-                        let mut scores = vec![0.0f32; batch_requests.len()];
-
                         // GPU evaluation for supported games
-                        let start_time = Instant::now();
                         if let Some(p) = params {
                             let mut acc = accelerator.lock();
                             if let Ok(gpu_scores) = acc.simulate_batch(&flat_data, p) {
-                                for (idx, score) in gpu_indices.into_iter().zip(gpu_scores.into_iter()) {
-                                    scores[idx] = score;
+                                for (idx, score) in gpu_indices.iter().zip(gpu_scores.into_iter()) {
+                                    scores[*idx] = score;
                                 }
                             }
                         }
-                        // Update execution time metric (only if GPU was actually used)
-                        if params.is_some() {
-                            last_execution_time = start_time.elapsed();
-                        } else {
-                            last_execution_time = Duration::from_micros(0);
-                        }
+
                         
                         // CPU random rollout for games that don't support GPU simulation
                         // This ensures all games work, even without custom GPU shaders
-                        for idx in cpu_indices {
+                        for &idx in &cpu_indices {
                             let mut sim_state = batch_requests[idx].state.clone();
                             let leaf_player = sim_state.get_current_player();
                             
@@ -689,77 +682,61 @@ impl<S: GameState> MCTS<S> {
                         }
 
                         // Process results: Expand and Backpropagate in parallel
+                        // Offload to Rayon global pool to avoid blocking the GPU worker
                         let requests: Vec<_> = batch_requests.drain(..).collect();
-                        requests.into_par_iter().zip(scores.into_par_iter()).for_each(|(req, score)| {
-                            let leaf_node = req.path.last().unwrap();
-                            
-                            // 1. Expand
-                            if !req.state.is_terminal() {
-                                // Check max_nodes to respect tree size limit
-                                let current_nodes = node_count_clone.load(Ordering::Relaxed) as usize;
-                                if current_nodes < max_nodes {
-                                    let mut children_guard = leaf_node.children.write();
-                                    if children_guard.is_empty() {
-                                        let possible_moves = req.state.get_possible_moves();
-                                        let new_depth = leaf_node.depth + 1;
-                                        let mut new_nodes_count = 0;
-                                        
-                                        for mv in possible_moves {
-                                            let new_node = Arc::new(Node {
-                                                children: RwLock::new(HashMap::new()),
-                                                visits: AtomicI32::new(0),
-                                                wins: AtomicI32::new(0),
-                                                virtual_losses: AtomicI32::new(0),
-                                                depth: new_depth,
-                                            });
-                                            children_guard.insert(mv, new_node);
-                                            new_nodes_count += 1;
-                                        }
-                                        node_count_clone.fetch_add(new_nodes_count, Ordering::Relaxed);
-                                    }
-                                }
-                            }
+                        let scores_for_processing = scores.clone();
+                        let node_count_clone = node_count_clone.clone();
+                        let pending_evals_clone = pending_evals_clone.clone();
+                        
+                        rayon::spawn(move || {
+                            let process_item = |req: EvaluationRequest<S>, score: f32| {
+                                // Backpropagate
+                                // Map score to [0, 1] win probability for current_player (at leaf)
+                                let leaf_player = req.state.get_current_player();
+                                
+                                let win_prob = if score >= 4000.0 {
+                                    1.0
+                                } else if score <= -4000.0 {
+                                    0.0
+                                } else {
+                                    // Map heuristic score to win probability
+                                    0.5 + 0.5 * (score / 200.0).tanh() as f64
+                                };
 
-                            // 2. Backpropagate
-                            // Map score to [0, 1] win probability for current_player (at leaf)
-                            let leaf_player = req.state.get_current_player();
-                            
-                            let win_prob = if score >= 4000.0 {
-                                1.0
-                            } else if score <= -4000.0 {
-                                0.0
-                            } else {
-                                // Map heuristic score to win probability
-                                // Use tanh to squash score into [-1, 1], then map to [0, 1]
-                                // Adjusted scale: score of 500 (5 four-patterns) gives ~99% win probability
-                                // score of 100 (1 four-pattern) gives ~76% win probability  
-                                // score of 10 (1 three-pattern) gives ~54% win probability
-                                0.5 + 0.5 * (score / 200.0).tanh() as f64
+                                for (node, &player_who_moved) in req.path.iter().zip(req.path_players.iter()).rev() {
+                                    node.remove_virtual_loss();
+                                    node.visits.fetch_add(1, Ordering::Relaxed);
+                                    
+                                    // Calculate reward for this node's perspective
+                                    let reward_val = if player_who_moved == leaf_player {
+                                        2.0 * win_prob
+                                    } else {
+                                        2.0 * (1.0 - win_prob)
+                                    };
+                                    
+                                    // Stochastic rounding to integer
+                                    let reward_int = reward_val as i32;
+                                    let reward_frac = reward_val - reward_int as f64;
+                                    let final_reward = reward_int + if random_f64() < reward_frac { 1 } else { 0 };
+                                    
+                                    node.wins.fetch_add(final_reward, Ordering::Relaxed);
+                                }
+                                
+                                // Decrement pending evaluations counter
+                                pending_evals_clone.fetch_sub(1, Ordering::Relaxed);
                             };
 
-                            for (node, &player_who_moved) in req.path.iter().zip(req.path_players.iter()).rev() {
-                                node.remove_virtual_loss();
-                                node.visits.fetch_add(1, Ordering::Relaxed);
-                                
-                                // Calculate reward for this node's perspective
-                                // If the player who made the move is the same as the one favored by the score,
-                                // they get a higher reward.
-                                let reward_val = if player_who_moved == leaf_player {
-                                    2.0 * win_prob
-                                } else {
-                                    2.0 * (1.0 - win_prob)
-                                };
-                                
-                                // Stochastic rounding to integer to preserve fractional value in expectation
-                                let reward_int = reward_val as i32;
-                                let reward_frac = reward_val - reward_int as f64;
-                                let final_reward = reward_int + if random_f64() < reward_frac { 1 } else { 0 };
-                                
-                                node.wins.fetch_add(final_reward, Ordering::Relaxed);
+                            // Use parallel iteration only for large batches to avoid overhead
+                            // Small batches are processed serially to reduce scheduler pressure
+                            if requests.len() > 128 {
+                                requests.into_par_iter().zip(scores_for_processing.into_par_iter()).for_each(|(req, score)| {
+                                    process_item(req, score);
+                                });
+                            } else {
+                                for (req, score) in requests.into_iter().zip(scores_for_processing.into_iter()) {
+                                    process_item(req, score);
+                                }
                             }
-                            
-                            // Decrement pending evaluations counter
-                            pending_evals_clone.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
                 });
@@ -1146,7 +1123,8 @@ impl<S: GameState> MCTS<S> {
 
         // Initialize GPU PUCT cache if GPU is enabled
         #[cfg(feature = "gpu")]
-        self.update_gpu_puct_cache(true);
+        // self.update_gpu_puct_cache(true);
+        {}
 
         let possible_moves = state.get_possible_moves();
         if possible_moves.len() == 1 {
@@ -1213,6 +1191,8 @@ impl<S: GameState> MCTS<S> {
 
         // Start a GPU cache refresh thread if GPU is enabled
         #[cfg(feature = "gpu")]
+        let gpu_refresh_handle: Option<std::thread::JoinHandle<()>> = None;
+        /*
         let gpu_refresh_handle = if self.gpu_enabled && self.gpu_accelerator.is_some() {
             let stop_flag = stop_searching.clone();
             let gpu_accelerator = self.gpu_accelerator.clone();
@@ -1302,6 +1282,7 @@ impl<S: GameState> MCTS<S> {
         } else {
             None
         };
+        */
 
         self.pool.install(|| {
             let _ = (0..iterations)
@@ -1855,6 +1836,9 @@ impl<S: GameState> MCTS<S> {
                         } else {
                             // Probabilistic expansion based on depth and visits for non-root nodes
                             let visits = current_node.visits.load(Ordering::Relaxed);
+                            
+                            // Probabilistic expansion based on depth and visits for non-root nodes
+                            let visits = current_node.visits.load(Ordering::Relaxed);
 
                             // Base expansion probability decreases with depth
                             // More visits increase the likelihood of expansion
@@ -2150,16 +2134,9 @@ impl<S: GameState> MCTS<S> {
     /// Returns the cached PUCT score for a parent-child node pair if available,
     /// or None if the cache doesn't have this pair.
     #[cfg(feature = "gpu")]
-    fn get_cached_puct_by_node(&self, parent: &Arc<Node<S::Move>>, child: &Arc<Node<S::Move>>) -> Option<f64> {
-        if !self.gpu_enabled {
-            return None;
-        }
-        
-        let parent_id = Arc::as_ptr(parent) as usize;
-        let child_id = Arc::as_ptr(child) as usize;
-        
-        let cache = self.gpu_puct_cache.read();
-        cache.get(&(parent_id, child_id)).copied()
+    fn get_cached_puct_by_node(&self, _parent: &Arc<Node<S::Move>>, _child: &Arc<Node<S::Move>>) -> Option<f64> {
+        // Disabled to prevent lock contention on gpu_puct_cache
+        None
     }
 
     /// Prunes children based on visit percentage relative to the best child
