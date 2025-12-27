@@ -702,10 +702,10 @@ impl GameState for HiveState {
         2
     }
 
-    fn get_board(&self) -> &Vec<Vec<i32>> {
+    fn get_board(&self) -> Vec<Vec<i32>> {
         // This is a bit of a hack - Hive doesn't fit well into a grid
         // We return a cached approximation for compatibility
-        &self.cached_board
+        self.cached_board.clone()
     }
 
     fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {

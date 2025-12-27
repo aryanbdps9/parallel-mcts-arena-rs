@@ -150,7 +150,7 @@ pub trait GameState: Clone + Send + Sync {
     ///
     /// Used for visualization and analysis. Should return a 2D vector
     /// where each cell contains a player ID (e.g., 1, -1, 0 for empty).
-    fn get_board(&self) -> &Vec<Vec<i32>>;
+    fn get_board(&self) -> Vec<Vec<i32>>;
 
     /// Returns the last move made as a set of coordinates, if applicable.
     ///
@@ -196,6 +196,14 @@ pub trait GameState: Clone + Send + Sync {
     /// Used to determine perspective during reward calculation and
     /// for UI display of current player.
     fn get_current_player(&self) -> i32;
+
+    /// Returns the weight of a move for random rollouts.
+    ///
+    /// Used to bias the random rollout towards better moves.
+    /// Default implementation returns 1.0 (uniform probability).
+    fn get_move_weight(&self, _mv: &Self::Move) -> f64 {
+        1.0
+    }
 }
 
 /// A node in the Monte Carlo Search Tree.
@@ -659,7 +667,30 @@ impl<S: GameState> MCTS<S> {
                                     if moves_cache.is_empty() {
                                         break;
                                     }
-                                    let move_index = random_range(0, moves_cache.len());
+                                    
+                                    // Weighted random selection
+                                    let mut total_weight = 0.0;
+                                    for mv in &moves_cache {
+                                        total_weight += sim_state.get_move_weight(mv);
+                                    }
+
+                                    let mut threshold = random_f64() * total_weight;
+                                    let mut move_index = 0;
+                                    
+                                    for (i, mv) in moves_cache.iter().enumerate() {
+                                        let weight = sim_state.get_move_weight(mv);
+                                        if threshold < weight {
+                                            move_index = i;
+                                            break;
+                                        }
+                                        threshold -= weight;
+                                    }
+                                    
+                                    // Fallback
+                                    if move_index >= moves_cache.len() {
+                                        move_index = 0;
+                                    }
+
                                     let mv = &moves_cache[move_index];
                                     sim_state.make_move(mv);
                                     simulation_moves += 1;
@@ -1835,15 +1866,16 @@ impl<S: GameState> MCTS<S> {
                             true
                         } else {
                             // Probabilistic expansion based on depth and visits for non-root nodes
+                            // Use effective visits (visits + virtual_losses) to account for pending simulations
+                            // This is crucial for GPU batching where real visits are delayed
                             let visits = current_node.visits.load(Ordering::Relaxed);
-                            
-                            // Probabilistic expansion based on depth and visits for non-root nodes
-                            let visits = current_node.visits.load(Ordering::Relaxed);
+                            let virtual_losses = current_node.virtual_losses.load(Ordering::Relaxed);
+                            let effective_visits = visits + virtual_losses;
 
                             // Base expansion probability decreases with depth
                             // More visits increase the likelihood of expansion
                             let depth_factor = 1.0 / (1.0 + (depth as f64) * 0.5);
-                            let visit_factor = (visits as f64).sqrt() / 10.0; // Encourage expansion for well-visited nodes
+                            let visit_factor = (effective_visits as f64).sqrt() / 10.0; // Encourage expansion for well-visited nodes
                             let expansion_probability = (depth_factor + visit_factor).min(1.0);
 
                             random_f64() < expansion_probability
@@ -1949,7 +1981,29 @@ impl<S: GameState> MCTS<S> {
                     break;
                 }
 
-                let move_index = random_range(0, moves_cache.len());
+                // Weighted random selection
+                let mut total_weight = 0.0;
+                for mv in &moves_cache {
+                    total_weight += sim_state.get_move_weight(mv);
+                }
+
+                let mut threshold = random_f64() * total_weight;
+                let mut move_index = 0;
+                
+                for (i, mv) in moves_cache.iter().enumerate() {
+                    let weight = sim_state.get_move_weight(mv);
+                    if threshold < weight {
+                        move_index = i;
+                        break;
+                    }
+                    threshold -= weight;
+                }
+                
+                // Fallback if floating point errors caused us to miss (should be rare)
+                if move_index >= moves_cache.len() {
+                    move_index = 0;
+                }
+
                 let mv = &moves_cache[move_index];
                 sim_state.make_move(mv);
                 simulation_moves += 1;
@@ -1972,21 +2026,16 @@ impl<S: GameState> MCTS<S> {
         if stop_flag.load(Ordering::Relaxed) {
             // Even if we're stopping, we need to remove virtual losses to keep the tree consistent
             // But we can skip the actual visit/win updates
-            for (i, (node, _)) in path.iter().zip(path_players.iter()).rev().enumerate() {
-                if i < path.len() - 1 {
-                    node.remove_virtual_loss();
-                }
+            for (node, _) in path.iter().zip(path_players.iter()).rev() {
+                node.remove_virtual_loss();
             }
             return;
         }
 
-        for (i, (node, &player_who_moved)) in path.iter().zip(path_players.iter()).rev().enumerate()
-        {
-            // Remove virtual loss from all nodes except the last one (the leaf/terminal node)
-            // which didn't have virtual loss applied during selection
-            if i < path.len() - 1 {
-                node.remove_virtual_loss();
-            }
+        for (node, &player_who_moved) in path.iter().zip(path_players.iter()).rev() {
+            // Remove virtual loss from all nodes in the path
+            // They all had virtual loss applied during selection
+            node.remove_virtual_loss();
 
             node.visits.fetch_add(1, Ordering::Relaxed);
             let reward = match winner {
@@ -2330,8 +2379,8 @@ mod tests {
     impl GameState for TestGame {
         type Move = (usize, usize);
 
-        fn get_board(&self) -> &Vec<Vec<i32>> {
-            &self.board
+        fn get_board(&self) -> Vec<Vec<i32>> {
+            self.board.clone()
         }
 
         fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {

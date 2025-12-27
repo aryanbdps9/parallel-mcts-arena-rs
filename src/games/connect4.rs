@@ -27,8 +27,8 @@ pub struct Connect4Move(pub usize);
 /// The board uses 1 for player 1 pieces, -1 for player 2 pieces, and 0 for empty spaces.
 #[derive(Debug, Clone)]
 pub struct Connect4State {
-    /// The game board as a 2D vector (rows x columns)
-    board: Vec<Vec<i32>>,
+    /// The game board as a flat vector (row-major)
+    board: Vec<i32>,
     /// Current player (1 or -1)
     current_player: i32,
     /// Board width (number of columns)
@@ -43,8 +43,9 @@ pub struct Connect4State {
 
 impl fmt::Display for Connect4State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for row in &self.board {
-            for &cell in row {
+        for r in 0..self.height {
+            for c in 0..self.width {
+                let cell = self.board[r * self.width + c];
                 let symbol = match cell {
                     1 => "X",
                     -1 => "O",
@@ -65,8 +66,14 @@ impl GameState for Connect4State {
         2
     }
 
-    fn get_board(&self) -> &Vec<Vec<i32>> {
-        &self.board
+    fn get_board(&self) -> Vec<Vec<i32>> {
+        let mut rows = Vec::with_capacity(self.height);
+        for r in 0..self.height {
+            let start = r * self.width;
+            let end = start + self.width;
+            rows.push(self.board[start..end].to_vec());
+        }
+        rows
     }
 
     fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
@@ -74,15 +81,11 @@ impl GameState for Connect4State {
     }
 
     fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {
-        let mut data = Vec::with_capacity(self.height * self.width);
         // Normalize board so current player is always 1
         // This allows batching states with different current players
         let multiplier = if self.current_player == 1 { 1 } else { -1 };
-        for row in &self.board {
-            for &cell in row {
-                data.push(cell * multiplier);
-            }
-        }
+        let data: Vec<i32> = self.board.iter().map(|&c| c * multiplier).collect();
+        
         // Encode line_size in the player field (upper bits)
         // Format: player in bits 0-7, line_size in bits 8-15, game_type in bits 16-23
         // Game type 1 is Connect4
@@ -92,15 +95,16 @@ impl GameState for Connect4State {
 
     fn get_possible_moves(&self) -> Vec<Self::Move> {
         (0..self.width)
-            .filter(|&c| self.board[0][c] == 0)
+            .filter(|&c| self.board[c] == 0)
             .map(Connect4Move)
             .collect()
     }
 
     fn make_move(&mut self, mv: &Self::Move) {
         for r in (0..self.height).rev() {
-            if self.board[r][mv.0] == 0 {
-                self.board[r][mv.0] = self.current_player;
+            let idx = r * self.width + mv.0;
+            if self.board[idx] == 0 {
+                self.board[idx] = self.current_player;
                 self.last_move = Some((r, mv.0));
                 self.current_player = -self.current_player;
                 return;
@@ -115,7 +119,8 @@ impl GameState for Connect4State {
     fn get_winner(&self) -> Option<i32> {
         let last_move = self.last_move?;
         let (r, c) = last_move;
-        let player = self.board[r][c];
+        let idx = r * self.width + c;
+        let player = self.board[idx];
 
         if player == 0 {
             return None;
@@ -124,14 +129,14 @@ impl GameState for Connect4State {
         // Check horizontal
         let mut count = 1;
         for i in 1..self.line_size {
-            if c >= i && self.board[r][c - i] == player {
+            if c >= i && self.board[r * self.width + (c - i)] == player {
                 count += 1;
             } else {
                 break;
             }
         }
         for i in 1..self.line_size {
-            if c + i < self.width && self.board[r][c + i] == player {
+            if c + i < self.width && self.board[r * self.width + (c + i)] == player {
                 count += 1;
             } else {
                 break;
@@ -144,7 +149,7 @@ impl GameState for Connect4State {
         // Check vertical
         let mut count = 1;
         for i in 1..self.line_size {
-            if r + i < self.height && self.board[r + i][c] == player {
+            if r + i < self.height && self.board[(r + i) * self.width + c] == player {
                 count += 1;
             } else {
                 break;
@@ -157,14 +162,14 @@ impl GameState for Connect4State {
         // Check diagonal (top-left to bottom-right)
         let mut count = 1;
         for i in 1..self.line_size {
-            if r >= i && c >= i && self.board[r - i][c - i] == player {
+            if r >= i && c >= i && self.board[(r - i) * self.width + (c - i)] == player {
                 count += 1;
             } else {
                 break;
             }
         }
         for i in 1..self.line_size {
-            if r + i < self.height && c + i < self.width && self.board[r + i][c + i] == player {
+            if r + i < self.height && c + i < self.width && self.board[(r + i) * self.width + (c + i)] == player {
                 count += 1;
             } else {
                 break;
@@ -177,14 +182,14 @@ impl GameState for Connect4State {
         // Check diagonal (top-right to bottom-left)
         let mut count = 1;
         for i in 1..self.line_size {
-            if r >= i && c + i < self.width && self.board[r - i][c + i] == player {
+            if r >= i && c + i < self.width && self.board[(r - i) * self.width + (c + i)] == player {
                 count += 1;
             } else {
                 break;
             }
         }
         for i in 1..self.line_size {
-            if r + i < self.height && c >= i && self.board[r + i][c - i] == player {
+            if r + i < self.height && c >= i && self.board[(r + i) * self.width + (c - i)] == player {
                 count += 1;
             } else {
                 break;
@@ -206,7 +211,7 @@ impl Connect4State {
     /// Creates a new Connect 4 game with the specified configuration
     pub fn new(width: usize, height: usize, line_size: usize) -> Self {
         Self {
-            board: vec![vec![0; width]; height],
+            board: vec![0; width * height],
             current_player: 1,
             width,
             height,
@@ -234,7 +239,7 @@ impl Connect4State {
     /// # Returns
     /// true if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &Connect4Move) -> bool {
-        mv.0 < self.width && self.board[0][mv.0] == 0
+        mv.0 < self.width && self.board[mv.0] == 0
     }
 }
 

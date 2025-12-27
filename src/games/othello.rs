@@ -29,8 +29,8 @@ pub struct OthelloMove(pub usize, pub usize);
 /// The board uses 1 for black pieces, -1 for white pieces, and 0 for empty spaces.
 #[derive(Debug, Clone)]
 pub struct OthelloState {
-    /// The game board as a 2D vector
-    board: Vec<Vec<i32>>,
+    /// The game board as a flat vector (row-major)
+    board: Vec<i32>,
     /// Current player (1 for black, -1 for white)
     current_player: i32,
     /// Size of the board (NxN)
@@ -41,8 +41,9 @@ pub struct OthelloState {
 
 impl fmt::Display for OthelloState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for row in &self.board {
-            for &cell in row {
+        for r in 0..self.board_size {
+            for c in 0..self.board_size {
+                let cell = self.board[r * self.board_size + c];
                 let symbol = match cell {
                     1 => "X",
                     -1 => "O",
@@ -63,8 +64,14 @@ impl GameState for OthelloState {
         2
     }
 
-    fn get_board(&self) -> &Vec<Vec<i32>> {
-        &self.board
+    fn get_board(&self) -> Vec<Vec<i32>> {
+        let mut rows = Vec::with_capacity(self.board_size);
+        for r in 0..self.board_size {
+            let start = r * self.board_size;
+            let end = start + self.board_size;
+            rows.push(self.board[start..end].to_vec());
+        }
+        rows
     }
 
     fn get_possible_moves(&self) -> Vec<Self::Move> {
@@ -81,7 +88,7 @@ impl GameState for OthelloState {
 
     fn make_move(&mut self, mv: &Self::Move) {
         let (r, c) = (mv.0, mv.1);
-        self.board[r][c] = self.current_player;
+        self.board[r * self.board_size + c] = self.current_player;
         self.last_move = Some((r, c));
         self.flip_pieces(r, c);
         self.current_player = -self.current_player;
@@ -92,16 +99,30 @@ impl GameState for OthelloState {
         }
     }
 
+    fn get_move_weight(&self, mv: &Self::Move) -> f64 {
+        let (r, c) = (mv.0, mv.1);
+        let size = self.board_size;
+        
+        // Corners
+        if (r == 0 || r == size - 1) && (c == 0 || c == size - 1) {
+            return 1.0;
+        }
+        
+        // Edges
+        if r == 0 || r == size - 1 || c == 0 || c == size - 1 {
+            return 1.0;
+        }
+        
+        // Inner
+        1.0
+    }
+
     fn is_terminal(&self) -> bool {
         // Game is terminal if no player has any possible moves
-        let mut temp_state = self.clone();
-        if temp_state.get_possible_moves().is_empty() {
-            temp_state.current_player = -temp_state.current_player;
-            if temp_state.get_possible_moves().is_empty() {
-                return true;
-            }
+        if self.has_moves_for_player(self.current_player) {
+            return false;
         }
-        false
+        !self.has_moves_for_player(-self.current_player)
     }
 
     fn get_last_move(&self) -> Option<Vec<(usize, usize)>> {
@@ -109,15 +130,17 @@ impl GameState for OthelloState {
     }
 
     fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {
-        let mut data = Vec::with_capacity(self.board_size * self.board_size);
+        // If the game is terminal, we must use CPU rollout to get the exact winner
+        // GPU heuristic might return a score that doesn't reflect the win/loss correctly
+        if self.is_terminal() {
+            return None;
+        }
+
         // Normalize board so current player is always 1
         // This allows batching states with different current players
         let multiplier = if self.current_player == 1 { 1 } else { -1 };
-        for row in &self.board {
-            for &cell in row {
-                data.push(cell * multiplier);
-            }
-        }
+        let data: Vec<i32> = self.board.iter().map(|&c| c * multiplier).collect();
+        
         // Encode game type: use a special marker in upper bits to identify Othello
         // Bits 0-7: player (1), Bits 8-15: 0 (no line_size), Bits 16-23: game_type (2 = Othello)
         let encoded_params = 1 | (2 << 16); // game_type 2 = Othello
@@ -131,13 +154,11 @@ impl GameState for OthelloState {
 
         let mut p1_score = 0;
         let mut p2_score = 0;
-        for r in 0..self.board_size {
-            for c in 0..self.board_size {
-                if self.board[r][c] == 1 {
-                    p1_score += 1;
-                } else if self.board[r][c] == -1 {
-                    p2_score += 1;
-                }
+        for cell in &self.board {
+            if *cell == 1 {
+                p1_score += 1;
+            } else if *cell == -1 {
+                p2_score += 1;
             }
         }
 
@@ -168,12 +189,12 @@ impl OthelloState {
             board_size > 0 && board_size % 2 == 0,
             "Board size must be a positive even number."
         );
-        let mut board = vec![vec![0; board_size]; board_size];
+        let mut board = vec![0; board_size * board_size];
         let center = board_size / 2;
-        board[center - 1][center - 1] = -1;
-        board[center][center] = -1;
-        board[center - 1][center] = 1;
-        board[center][center - 1] = 1;
+        board[(center - 1) * board_size + (center - 1)] = -1;
+        board[center * board_size + center] = -1;
+        board[(center - 1) * board_size + center] = 1;
+        board[center * board_size + (center - 1)] = 1;
 
         Self {
             board,
@@ -215,12 +236,16 @@ impl OthelloState {
     /// # Returns
     /// True if the move would flip at least one opponent piece
     fn is_valid_move(&self, mv: (usize, usize)) -> bool {
+        self.is_valid_move_for_player(mv, self.current_player)
+    }
+
+    fn is_valid_move_for_player(&self, mv: (usize, usize), player: i32) -> bool {
         let (r, c) = mv;
-        if self.board[r][c] != 0 {
+        if self.board[r * self.board_size + c] != 0 {
             return false;
         }
 
-        let opponent = -self.current_player;
+        let opponent = -player;
         let directions = [
             (-1, -1),
             (-1, 0),
@@ -233,15 +258,16 @@ impl OthelloState {
         ];
 
         for (dr, dc) in directions.iter() {
-            let mut line = Vec::new();
+            let mut line_len = 0;
             let mut nr = r as i32 + dr;
             let mut nc = c as i32 + dc;
 
             while nr >= 0 && nr < self.board_size as i32 && nc >= 0 && nc < self.board_size as i32 {
-                if self.board[nr as usize][nc as usize] == opponent {
-                    line.push((nr as usize, nc as usize));
-                } else if self.board[nr as usize][nc as usize] == self.current_player {
-                    if !line.is_empty() {
+                let cell = self.board[nr as usize * self.board_size + nc as usize];
+                if cell == opponent {
+                    line_len += 1;
+                } else if cell == player {
+                    if line_len > 0 {
                         return true;
                     }
                     break;
@@ -250,6 +276,17 @@ impl OthelloState {
                 }
                 nr += dr;
                 nc += dc;
+            }
+        }
+        false
+    }
+
+    fn has_moves_for_player(&self, player: i32) -> bool {
+        for r in 0..self.board_size {
+            for c in 0..self.board_size {
+                if self.is_valid_move_for_player((r, c), player) {
+                    return true;
+                }
             }
         }
         false
@@ -283,11 +320,12 @@ impl OthelloState {
             let mut nc = c as i32 + dc;
 
             while nr >= 0 && nr < self.board_size as i32 && nc >= 0 && nc < self.board_size as i32 {
-                if self.board[nr as usize][nc as usize] == opponent {
-                    line.push((nr as usize, nc as usize));
-                } else if self.board[nr as usize][nc as usize] == self.current_player {
-                    for (fr, fc) in line {
-                        self.board[fr][fc] = self.current_player;
+                let idx = nr as usize * self.board_size + nc as usize;
+                if self.board[idx] == opponent {
+                    line.push(idx);
+                } else if self.board[idx] == self.current_player {
+                    for idx_to_flip in line {
+                        self.board[idx_to_flip] = self.current_player;
                     }
                     break;
                 } else {

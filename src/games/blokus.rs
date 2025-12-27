@@ -278,8 +278,8 @@ impl GameState for BlokusState {
         4
     }
 
-    fn get_board(&self) -> &Vec<Vec<i32>> {
-        &self.board
+    fn get_board(&self) -> Vec<Vec<i32>> {
+        self.board.clone()
     }
 
     fn get_gpu_simulation_data(&self) -> Option<(Vec<i32>, usize, usize, i32)> {

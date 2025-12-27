@@ -77,20 +77,22 @@ fn othello_count_valid_moves(board: ptr<function, array<i32, 64>>, player: i32) 
     return count;
 }
 
-fn othello_get_nth_valid_move(board: ptr<function, array<i32, 64>>, player: i32, n: i32) -> vec2<i32> {
+fn othello_get_move_weight(x: i32, y: i32) -> f32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
-    var count = 0;
     
-    for (var y = 0; y < h; y++) {
-        for (var x = 0; x < w; x++) {
-            if (othello_is_valid_move(board, x, y, player)) {
-                if (count == n) { return vec2<i32>(x, y); }
-                count++;
-            }
-        }
+    // Corners are extremely valuable
+    if ((x == 0 || x == w - 1) && (y == 0 || y == h - 1)) {
+        return 1.0;
     }
-    return vec2<i32>(-1, -1);
+    
+    // Edges are good
+    if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
+        return 1.0;
+    }
+    
+    // Inner squares
+    return 1.0;
 }
 
 fn othello_random_rollout(board_idx: u32, current_player: i32) -> f32 {
@@ -111,7 +113,24 @@ fn othello_random_rollout(board_idx: u32, current_player: i32) -> f32 {
     let max_moves = 64;
     
     while (consecutive_passes < 2 && moves_made < max_moves) {
-        let valid_count = othello_count_valid_moves(&sim_board, sim_player);
+        // First pass: Calculate total weight of valid moves
+        var total_weight = 0.0;
+        var valid_count = 0;
+        
+        for (var y = 0; y < h; y++) {
+            for (var x = 0; x < w; x++) {
+                if (othello_is_valid_move(&sim_board, x, y, sim_player)) {
+                    valid_count++;
+                    // If using heuristic, use weighted probability
+                    // Otherwise use uniform weight (1.0)
+                    if (params.use_heuristic > 0u) {
+                        total_weight += othello_get_move_weight(x, y);
+                    } else {
+                        total_weight += 1.0;
+                    }
+                }
+            }
+        }
         
         if (valid_count == 0) {
             consecutive_passes++;
@@ -120,10 +139,44 @@ fn othello_random_rollout(board_idx: u32, current_player: i32) -> f32 {
         }
         
         consecutive_passes = 0;
-        let pick = i32(rand() * f32(valid_count));
-        let move_pos = othello_get_nth_valid_move(&sim_board, sim_player, pick);
         
-        othello_make_move(&sim_board, move_pos.x, move_pos.y, sim_player);
+        // Pick a move based on weights
+        var threshold = rand() * total_weight;
+        var picked_x = -1;
+        var picked_y = -1;
+        
+        for (var y = 0; y < h; y++) {
+            for (var x = 0; x < w; x++) {
+                if (othello_is_valid_move(&sim_board, x, y, sim_player)) {
+                    let weight = select(1.0, othello_get_move_weight(x, y), params.use_heuristic > 0u);
+                    if (threshold < weight) {
+                        picked_x = x;
+                        picked_y = y;
+                        // Break out of both loops
+                        y = h; 
+                        break;
+                    }
+                    threshold -= weight;
+                }
+            }
+        }
+        
+        // Fallback if floating point errors caused us to miss (should be rare)
+        if (picked_x == -1) {
+             // Just pick the first valid move we find
+             for (var y = 0; y < h; y++) {
+                for (var x = 0; x < w; x++) {
+                    if (othello_is_valid_move(&sim_board, x, y, sim_player)) {
+                        picked_x = x;
+                        picked_y = y;
+                        y = h;
+                        break;
+                    }
+                }
+             }
+        }
+        
+        othello_make_move(&sim_board, picked_x, picked_y, sim_player);
         
         sim_player = -sim_player;
         moves_made++;
