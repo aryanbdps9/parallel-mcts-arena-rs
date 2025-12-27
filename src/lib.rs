@@ -947,37 +947,41 @@ impl<S: GameState> MCTS<S> {
             }
 
             // CSV Output
-            // Format: Info, RootVisits, RootQ, Move, MoveVisits, MoveQ, MoveU, AltMove, AltVisits, AltQ, AltU
-            let csv_line = format!("{}\t{}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\n",
-                info, root_visits, root_q, clean_move(mv), new_root_visits, new_root_q, new_root_u,
-                second_best_move_str, second_best_stats.0, second_best_stats.1, second_best_stats.2
-            );
+            // Only write to CSV if this is NOT an opponent move update
+            // We detect this by checking if the info string contains "(Opponent Move)"
+            if !info.contains("(Opponent Move)") {
+                // Format: Info, RootVisits, RootQ, Move, MoveVisits, MoveQ, MoveU, AltMove, AltVisits, AltQ, AltU
+                let csv_line = format!("{}\t{}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\n",
+                    info, root_visits, root_q, clean_move(mv), new_root_visits, new_root_q, new_root_u,
+                    second_best_move_str, second_best_stats.0, second_best_stats.1, second_best_stats.2
+                );
 
-            // Print to terminal
-            println!("CSV_DATA: {}", csv_line.trim());
+                // Print to terminal
+                println!("CSV_DATA: {}", csv_line.trim());
 
-            // Append to file
-            use std::io::Write;
-            let file_path = std::path::Path::new("mcts_stats.tsv");
-            
-            // Use a static flag to track if we've initialized the file in this run
-            // This ensures we overwrite on the first write, then append for subsequent writes
-            static FILE_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            
-            let is_first_write = !FILE_INITIALIZED.swap(true, Ordering::Relaxed);
-            
-            let mut options = std::fs::OpenOptions::new();
-            if is_first_write {
-                options.create(true).write(true).truncate(true);
-            } else {
-                options.create(true).append(true);
-            }
-
-            if let Ok(mut file) = options.open(file_path) {
+                // Append to file
+                use std::io::Write;
+                let file_path = std::path::Path::new("mcts_stats.tsv");
+                
+                // Use a static flag to track if we've initialized the file in this run
+                // This ensures we overwrite on the first write, then append for subsequent writes
+                static FILE_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                
+                let is_first_write = !FILE_INITIALIZED.swap(true, Ordering::Relaxed);
+                
+                let mut options = std::fs::OpenOptions::new();
                 if is_first_write {
-                    let _ = file.write_all(b"Info\tRootVisits\tRootQ\tMove\tMoveVisits\tMoveQ\tMoveU\tAltMove\tAltVisits\tAltQ\tAltU\n");
+                    options.create(true).write(true).truncate(true);
+                } else {
+                    options.create(true).append(true);
                 }
-                let _ = file.write_all(csv_line.as_bytes());
+
+                if let Ok(mut file) = options.open(file_path) {
+                    if is_first_write {
+                        let _ = file.write_all(b"Info\tRootVisits\tRootQ\tMove\tMoveVisits\tMoveQ\tMoveU\tAltMove\tAltVisits\tAltQ\tAltU\n");
+                    }
+                    let _ = file.write_all(csv_line.as_bytes());
+                }
             }
             // -----------------------------
 

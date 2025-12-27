@@ -220,11 +220,34 @@ impl AIWorker {
                         }
                     }
                     AIRequest::AdvanceRoot(move_made, debug_info) => {
-                        for mcts in mcts_cpu_map.values_mut() {
-                            mcts.advance_root(&move_made, Some(&debug_info));
-                        }
-                        for mcts in mcts_gpu_map.values_mut() {
-                            mcts.advance_root(&move_made, Some(&debug_info));
+                        // Only advance the root for the AI that actually made the move
+                        // The debug_info string contains "AiCpu" or "AiGpu" which we can use to filter
+                        
+                        if debug_info.contains("AiCpu") {
+                            for mcts in mcts_cpu_map.values_mut() {
+                                mcts.advance_root(&move_made, Some(&debug_info));
+                            }
+                            // For the OTHER AI (GPU), we also need to advance the root so it stays in sync
+                            // with the game state, but we might want to log it differently or not log stats
+                            for mcts in mcts_gpu_map.values_mut() {
+                                mcts.advance_root(&move_made, Some(&format!("{} (Opponent Move)", debug_info)));
+                            }
+                        } else if debug_info.contains("AiGpu") {
+                            for mcts in mcts_gpu_map.values_mut() {
+                                mcts.advance_root(&move_made, Some(&debug_info));
+                            }
+                            // Sync CPU AI
+                            for mcts in mcts_cpu_map.values_mut() {
+                                mcts.advance_root(&move_made, Some(&format!("{} (Opponent Move)", debug_info)));
+                            }
+                        } else {
+                            // Fallback for human moves or unknown sources
+                            for mcts in mcts_cpu_map.values_mut() {
+                                mcts.advance_root(&move_made, Some(&debug_info));
+                            }
+                            for mcts in mcts_gpu_map.values_mut() {
+                                mcts.advance_root(&move_made, Some(&debug_info));
+                            }
                         }
                     }
                     AIRequest::Stop => break,
