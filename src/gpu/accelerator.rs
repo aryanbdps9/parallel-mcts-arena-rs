@@ -394,6 +394,11 @@ impl GpuMctsAccelerator {
         (self.total_gpu_time_us, self.dispatch_count, avg)
     }
 
+    /// Get the GPU context for creating other GPU-based structures
+    pub fn get_context(&self) -> Arc<GpuContext> {
+        self.context.clone()
+    }
+
     pub fn debug_info(&self) -> String {
         let (total_us, dispatches, avg_us) = self.stats();
         format!("{}\nStats: {} dispatches, {:.2}ms total, {:.2}µs avg",

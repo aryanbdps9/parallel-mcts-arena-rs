@@ -4,7 +4,7 @@
 
 use wgpu::{
     Device, Queue, Instance, InstanceDescriptor, RequestAdapterOptions,
-    PowerPreference, DeviceDescriptor, Features, Limits, ShaderModule,
+    PowerPreference, DeviceDescriptor, Features, ShaderModule,
     ComputePipeline, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, ShaderStages, BindingType, BufferBindingType,
     PipelineLayoutDescriptor, ComputePipelineDescriptor, Maintain,
@@ -49,6 +49,7 @@ pub struct GpuContext {
     pub eval_bind_group_layout: BindGroupLayout,
     config: GpuConfig,
     max_buffer_size: u64,
+    max_storage_buffer_binding_size: u32,
 }
 
 impl GpuContext {
@@ -96,7 +97,7 @@ impl GpuContext {
             &DeviceDescriptor {
                 label: Some("MCTS GPU Device"),
                 required_features: Features::empty(),
-                required_limits: Limits::default(),
+                required_limits: adapter.limits(),
                 memory_hints: Default::default(),
             },
             None,
@@ -109,6 +110,7 @@ impl GpuContext {
         // Get maximum buffer size
         let limits = device.limits();
         let max_buffer_size = limits.max_buffer_size;
+        let max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size;
 
         // Compile shaders
         let puct_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -188,6 +190,7 @@ impl GpuContext {
             eval_bind_group_layout,
             config: config.clone(),
             max_buffer_size,
+            max_storage_buffer_binding_size,
         })
     }
 
@@ -311,6 +314,10 @@ impl GpuContext {
 
     pub fn puct_bind_group_layout(&self) -> &BindGroupLayout {
         &self.puct_bind_group_layout
+    }
+
+    pub fn max_storage_buffer_binding_size(&self) -> u32 {
+        self.max_storage_buffer_binding_size
     }
 
     /// Submits a command buffer and waits for completion

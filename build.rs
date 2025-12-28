@@ -30,6 +30,8 @@ fn main() {
         "othello.wgsl",
         "blokus.wgsl",
         "hive.wgsl",
+        "mcts_tree.wgsl",
+        "mcts_othello.wgsl",
     ];
 
     for shader in shaders {

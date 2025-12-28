@@ -78,20 +78,7 @@ fn othello_count_valid_moves(board: ptr<function, array<i32, 64>>, player: i32) 
 }
 
 fn othello_get_move_weight(x: i32, y: i32) -> f32 {
-    let w = i32(params.board_width);
-    let h = i32(params.board_height);
-    
-    // Corners are extremely valuable
-    if ((x == 0 || x == w - 1) && (y == 0 || y == h - 1)) {
-        return 1.0;
-    }
-    
-    // Edges are good
-    if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
-        return 1.0;
-    }
-    
-    // Inner squares
+    // Uniform random - all moves equally weighted
     return 1.0;
 }
 

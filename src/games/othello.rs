@@ -99,21 +99,8 @@ impl GameState for OthelloState {
         }
     }
 
-    fn get_move_weight(&self, mv: &Self::Move) -> f64 {
-        let (r, c) = (mv.0, mv.1);
-        let size = self.board_size;
-        
-        // Corners
-        if (r == 0 || r == size - 1) && (c == 0 || c == size - 1) {
-            return 1.0;
-        }
-        
-        // Edges
-        if r == 0 || r == size - 1 || c == 0 || c == size - 1 {
-            return 1.0;
-        }
-        
-        // Inner
+    fn get_move_weight(&self, _mv: &Self::Move) -> f64 {
+        // Uniform random - all moves equally weighted
         1.0
     }
 

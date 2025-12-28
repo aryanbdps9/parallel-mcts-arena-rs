@@ -5,20 +5,26 @@
 //!
 //! ## Key Features
 //! - **Batch PUCT Calculation**: Compute PUCT scores for many nodes in parallel on the GPU
+//! - **GPU-Native MCTS**: Run all four MCTS phases (selection, expansion, simulation, backprop) on GPU
 //! - **Automatic Fallback**: Falls back to CPU if GPU is unavailable
 //!
 //! ## Architecture
 //! The GPU module consists of:
 //! - `GpuContext`: Manages GPU device, queues, and resources
-//! - `GpuMctsAccelerator`: Orchestrates GPU-accelerated MCTS operations
+//! - `GpuMctsAccelerator`: Orchestrates GPU-accelerated MCTS operations (hybrid mode)
+//! - `GpuMctsEngine`: Fully GPU-native MCTS engine (all phases on GPU)
 //! - Compute shaders for PUCT calculation and state evaluation
 
 mod context;
 mod accelerator;
 mod shaders;
+mod mcts_gpu;
+mod mcts_othello;
 
 pub use context::GpuContext;
 pub use accelerator::{GpuMctsAccelerator, GpuNodeData, GpuPuctResult, GpuSimulationParams};
+pub use mcts_gpu::{GpuMctsEngine, MctsParams, NodeInfo, WorkItem, TreeStats, ChildStats};
+pub use mcts_othello::{GpuOthelloMcts, MctsOthelloParams, OthelloNodeInfo, OthelloChildStats};
 
 /// Configuration for GPU acceleration
 #[derive(Debug, Clone)]

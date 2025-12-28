@@ -32,6 +32,8 @@ pub enum PlayerType {
     Human,
     AiCpu,
     AiGpu,
+    /// GPU-Native MCTS (currently only for Othello) - all 4 MCTS phases run on GPU
+    AiGpuNative,
 }
 
 /// Current screen/mode of the GUI
@@ -123,7 +125,8 @@ pub struct MoveEntry {
 #[derive(Debug)]
 pub enum AIRequest {
     Search(GameWrapper, u64, PlayerType, i32),
-    AdvanceRoot(MoveWrapper, String),
+    /// Advance root with: (move_made, debug_info, new_game_state)
+    AdvanceRoot(MoveWrapper, String, GameWrapper),
     Stop,
 }
 
@@ -152,6 +155,7 @@ impl AIWorker {
         gpu_use_heuristic: bool,
         cpu_select_by_q: bool,
         gpu_select_by_q: bool,
+        gpu_native_batch_size: u32,
     ) -> Self {
         use std::sync::mpsc::channel;
         use std::collections::HashMap;
@@ -177,6 +181,9 @@ impl AIWorker {
         let handle = std::thread::spawn(move || {
             let mut mcts_cpu_map: HashMap<i32, MCTS<GameWrapper>> = HashMap::new();
             let mut mcts_gpu_map: HashMap<i32, MCTS<GameWrapper>> = HashMap::new();
+            // Persistent MCTS for GPU-native Othello with tree reuse
+            #[cfg(feature = "gpu")]
+            let mut mcts_gpu_native: Option<MCTS<GameWrapper>> = None;
 
             for request in rx_req {
                 match request {
@@ -187,6 +194,131 @@ impl AIWorker {
 
                         let key = if shared_tree { 0 } else { player_id };
 
+                        // Handle GPU-native search for Othello separately
+                        #[cfg(feature = "gpu")]
+                        if let PlayerType::AiGpuNative = player_type {
+                            if let GameWrapper::Othello(ref othello_state) = state {
+                                use crate::games::othello::OthelloMove;
+                                
+                                // Extract board state for GPU
+                                let board_2d = othello_state.get_board();
+                                let mut board = [0i32; 64];
+                                for (r, row) in board_2d.iter().enumerate() {
+                                    for (c, &cell) in row.iter().enumerate() {
+                                        board[r * 8 + c] = cell;
+                                    }
+                                }
+                                
+                                // Get legal moves
+                                let legal_moves = othello_state.get_possible_moves();
+                                let legal_moves_xy: Vec<(usize, usize)> = legal_moves
+                                    .iter()
+                                    .map(|m| (m.1, m.0)) // OthelloMove is (row, col), GPU expects (x, y)
+                                    .collect();
+                                
+                                let current_player = othello_state.get_current_player();
+                                
+                                // Calculate number of batches based on timeout
+                                let num_batches = (search_iterations / gpu_native_batch_size).max(1);
+                                
+                                // Get or create persistent GPU-native MCTS
+                                // Use minimal CPU MCTS - GPU-native handles everything on GPU
+                                // Don't use with_gpu_config as that creates heavy CPU thread pool and GPU simulation thread
+                                let mcts = mcts_gpu_native.get_or_insert_with(|| {
+                                    // Create lightweight MCTS - only need it for GPU-native engine hosting
+                                    // Use small max_nodes since CPU tree won't be used
+                                    let mut new_mcts = MCTS::new(
+                                        gpu_exploration_constant, 
+                                        1,      // Minimal threads - won't be used
+                                        1000,   // Minimal nodes - won't be used for GPU-native
+                                    );
+                                    new_mcts.set_move_selection_strategy(gpu_move_selection_strategy);
+                                    eprintln!("[AI GPU-Native] Using pure GPU-native MCTS (no CPU tree)");
+                                    // Initialize the GPU-native Othello engine
+                                    new_mcts.init_gpu_native_othello(&board, current_player, &legal_moves_xy, gpu_native_batch_size);
+                                    new_mcts
+                                });
+                                
+                                if let Some(((x, y), visits, q, children_stats, total_nodes)) = mcts.search_gpu_native_othello(
+                                    &board,
+                                    current_player,
+                                    &legal_moves_xy,
+                                    gpu_native_batch_size,
+                                    num_batches,
+                                    gpu_exploration_constant as f32,
+                                    timeout,  // Add timeout parameter
+                                ) {
+                                    // Convert back to OthelloMove (row, col)
+                                    let best_move = MoveWrapper::Othello(OthelloMove(y, x));
+                                    
+                                    // Build children_stats HashMap for UI display
+                                    let mut stats_map = std::collections::HashMap::new();
+                                    for (cx, cy, cv, _cw, cq) in &children_stats {
+                                        // Format as (row, col) to match OthelloMove and CPU debug output
+                                        let move_str = format!("({},{})", cy, cx);
+                                        stats_map.insert(move_str, (*cq, *cv));
+                                    }
+                                    
+                                    // === TSV Logging for GPU-Native ===
+                                    // Sort children by visits to find best and second-best
+                                    let mut sorted_children = children_stats.clone();
+                                    sorted_children.sort_by_key(|(_, _, v, _, _)| -(*v));
+                                    
+                                    if sorted_children.len() >= 2 {
+                                        let best = &sorted_children[0];
+                                        let second = &sorted_children[1];
+                                        
+                                        let visit_diff = best.2 - second.2;
+                                        let best_move_str = format!("{},{}", best.0, best.1);
+                                        let second_move_str = format!("{},{}", second.0, second.1);
+                                        
+                                        // Calculate U values (PUCT exploration term)
+                                        let prior = 1.0 / sorted_children.len() as f64;
+                                        let best_u = gpu_exploration_constant * prior * (visits as f64).sqrt() / (1.0 + best.2 as f64);
+                                        let second_u = gpu_exploration_constant * prior * (visits as f64).sqrt() / (1.0 + second.2 as f64);
+                                        
+                                        let csv_line = format!("GPU-Native (Player {})\t{}\t{:.4}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\n",
+                                            current_player, visits, q, visit_diff,
+                                            best_move_str, best.2, best.4, best_u,
+                                            second_move_str, second.2, second.4, second_u
+                                        );
+                                        
+                                        // Print to terminal
+                                        println!("CSV_DATA: {}", csv_line.trim());
+                                        
+                                        // Append to file
+                                        use std::io::Write;
+                                        let file_path = std::path::Path::new("mcts_stats.tsv");
+                                        
+                                        if let Ok(mut file) = std::fs::OpenOptions::new()
+                                            .create(true)
+                                            .append(true)
+                                            .open(file_path) 
+                                        {
+                                            let _ = file.write_all(csv_line.as_bytes());
+                                        }
+                                    }
+                                    // === End TSV Logging ===
+                                    
+                                    // Create SearchStatistics for UI display
+                                    let stats = SearchStatistics {
+                                        total_nodes: total_nodes as i32,
+                                        root_visits: visits,
+                                        root_wins: q * visits as f64,
+                                        root_value: q,
+                                        children_stats: stats_map,
+                                    };
+                                    
+                                    if !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                                        let _ = tx_resp.send(AIResponse::BestMove(best_move, stats));
+                                    }
+                                }
+                                continue;
+                            } else {
+                                eprintln!("[AI] GPU-Native only supported for Othello, falling back to hybrid GPU");
+                            }
+                        }
+
                         let mcts_opt = match player_type {
                             PlayerType::AiCpu => {
                                 Some(mcts_cpu_map.entry(key).or_insert_with(|| {
@@ -195,7 +327,7 @@ impl AIWorker {
                                     mcts
                                 }))
                             },
-                            PlayerType::AiGpu => {
+                            PlayerType::AiGpu | PlayerType::AiGpuNative => {
                                 #[cfg(feature = "gpu")]
                                 {
                                     if !mcts_gpu_map.contains_key(&key) {
@@ -239,9 +371,47 @@ impl AIWorker {
                             }
                         }
                     }
-                    AIRequest::AdvanceRoot(move_made, debug_info) => {
+                    AIRequest::AdvanceRoot(move_made, debug_info, new_state) => {
                         // Only advance the root for the AI that actually made the move
                         // The debug_info string contains "AiCpu" or "AiGpu" which we can use to filter
+                        
+                        // Handle GPU-native Othello tree advancement
+                        #[cfg(feature = "gpu")]
+                        if let Some(ref mut mcts) = mcts_gpu_native {
+                            if let GameWrapper::Othello(ref othello_state) = new_state {
+                                if let MoveWrapper::Othello(ref mv) = move_made {
+                                    // Extract new board state
+                                    let board_2d = othello_state.get_board();
+                                    let mut new_board = [0i32; 64];
+                                    for (r, row) in board_2d.iter().enumerate() {
+                                        for (c, &cell) in row.iter().enumerate() {
+                                            new_board[r * 8 + c] = cell;
+                                        }
+                                    }
+                                    
+                                    // Get legal moves for new position
+                                    let legal_moves = othello_state.get_possible_moves();
+                                    let legal_moves_xy: Vec<(usize, usize)> = legal_moves
+                                        .iter()
+                                        .map(|m| (m.1, m.0))
+                                        .collect();
+                                    
+                                    let new_player = othello_state.get_current_player();
+                                    
+                                    // Advance GPU-native tree
+                                    // mv.0 is row, mv.1 is col, but advance_root expects (x, y) = (col, row)
+                                    let reused = mcts.advance_root_gpu_native(
+                                        (mv.1, mv.0), // Convert (row, col) to (x, y)
+                                        &new_board,
+                                        new_player,
+                                        &legal_moves_xy,
+                                    );
+                                    if reused {
+                                        println!("[GPU-Native] Tree reuse successful");
+                                    }
+                                }
+                            }
+                        }
                         
                         if debug_info.contains("AiCpu") {
                             for mcts in mcts_cpu_map.values_mut() {
@@ -249,6 +419,15 @@ impl AIWorker {
                             }
                             // For the OTHER AI (GPU), we also need to advance the root so it stays in sync
                             // with the game state, but we might want to log it differently or not log stats
+                            for mcts in mcts_gpu_map.values_mut() {
+                                mcts.advance_root(&move_made, Some(&format!("{} (Opponent Move)", debug_info)));
+                            }
+                        } else if debug_info.contains("AiGpuNative") {
+                            // GPU-native tree already advanced above
+                            // Sync CPU and hybrid GPU AIs as opponent moves
+                            for mcts in mcts_cpu_map.values_mut() {
+                                mcts.advance_root(&move_made, Some(&format!("{} (Opponent Move)", debug_info)));
+                            }
                             for mcts in mcts_gpu_map.values_mut() {
                                 mcts.advance_root(&move_made, Some(&format!("{} (Opponent Move)", debug_info)));
                             }
@@ -300,8 +479,8 @@ impl AIWorker {
     /// 
     /// This allows the AI to reuse previous search results by promoting
     /// the child node corresponding to the move as the new root.
-    pub fn advance_root(&self, move_made: &MoveWrapper, debug_info: String) {
-        let _ = self.tx.send(AIRequest::AdvanceRoot(move_made.clone(), debug_info));
+    pub fn advance_root(&self, move_made: &MoveWrapper, debug_info: String, new_state: GameWrapper) {
+        let _ = self.tx.send(AIRequest::AdvanceRoot(move_made.clone(), debug_info, new_state));
     }
 }
 
@@ -360,6 +539,8 @@ pub struct GuiApp {
     pub gpu_use_heuristic: bool,
     pub cpu_select_by_q: bool,
     pub gpu_select_by_q: bool,
+    /// Batch size for GPU-native MCTS (iterations per GPU dispatch)
+    pub gpu_native_batch_size: u32,
     pub selected_settings_index: usize,
 
     // UI state
@@ -422,7 +603,7 @@ impl GuiApp {
             game_status: GameStatus::InProgress,
             move_history: Vec::new(),
             game_renderer: renderer,
-            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q),
+            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q, 4096),
             ai_thinking: false,
             ai_thinking_start: None,
             last_search_stats: None,
@@ -441,6 +622,7 @@ impl GuiApp {
             gpu_use_heuristic,
             cpu_select_by_q,
             gpu_select_by_q,
+            gpu_native_batch_size: 4096,
             selected_settings_index: 0,
             needs_redraw: true,
             hover_button: None,
@@ -505,6 +687,7 @@ impl GuiApp {
             self.gpu_use_heuristic,
             self.cpu_select_by_q,
             self.gpu_select_by_q,
+            self.gpu_native_batch_size,
         );
 
         // Check if AI should move first
@@ -524,7 +707,7 @@ impl GuiApp {
             .map(|(_, pt)| *pt)
             .unwrap_or(PlayerType::Human);
 
-        let is_ai = matches!(player_type, PlayerType::AiCpu | PlayerType::AiGpu);
+        let is_ai = matches!(player_type, PlayerType::AiCpu | PlayerType::AiGpu | PlayerType::AiGpuNative);
 
         if is_ai && !self.ai_thinking {
             self.ai_thinking = true;
@@ -554,7 +737,7 @@ impl GuiApp {
                     .unwrap_or(PlayerType::Human);
                 
                 let debug_info = format!("Player {} ({:?})", player, player_type);
-                self.ai_worker.advance_root(&mv, debug_info);
+                self.ai_worker.advance_root(&mv, debug_info, self.game.clone());
                 
                 // Add to move history for UI display
                 self.move_history.push(MoveEntry {
@@ -709,11 +892,22 @@ impl GuiApp {
     pub fn toggle_player(&mut self, index: usize) {
         if index < self.player_types.len() {
             let (id, pt) = &self.player_types[index];
-            self.player_types[index] = (*id, match pt {
+            // Cycle through: Human -> CPU -> GPU (Hybrid) -> GPU-Native -> Human
+            // GPU-Native is only available for Othello
+            let next_type = match pt {
                 PlayerType::Human => PlayerType::AiCpu,
                 PlayerType::AiCpu => PlayerType::AiGpu,
-                PlayerType::AiGpu => PlayerType::Human,
-            });
+                PlayerType::AiGpu => {
+                    // GPU-Native only available for Othello
+                    if self.selected_game_type == GameType::Othello {
+                        PlayerType::AiGpuNative
+                    } else {
+                        PlayerType::Human
+                    }
+                },
+                PlayerType::AiGpuNative => PlayerType::Human,
+            };
+            self.player_types[index] = (*id, next_type);
             self.needs_redraw = true;
         }
     }
@@ -818,6 +1012,10 @@ impl GuiApp {
                 let step = if delta > 0 { 256 } else { -256 };
                 self.gpu_threads = ((self.gpu_threads as i32 + step).max(256).min(16384)) as usize;
             }
+            12 => { // GPU-Native Batch Size
+                let step = if delta > 0 { 1024 } else { -1024 };
+                self.gpu_native_batch_size = ((self.gpu_native_batch_size as i32 + step).max(1024).min(32768)) as u32;
+            }
             _ => {}
         }
         self.needs_redraw = true;
@@ -838,6 +1036,7 @@ impl GuiApp {
             ("AI Only Mode".to_string(), if self.ai_only { "Yes" } else { "No" }.to_string()),
             ("Shared Tree".to_string(), if self.shared_tree { "Yes" } else { "No" }.to_string()),
             ("GPU Threads".to_string(), self.gpu_threads.to_string()),
+            ("GPU-Native Batch".to_string(), self.gpu_native_batch_size.to_string()),
         ]
     }
 
@@ -847,7 +1046,7 @@ impl GuiApp {
         self.player_types
             .iter()
             .find(|(id, _)| *id == current_player)
-            .map(|(_, pt)| matches!(pt, PlayerType::AiCpu | PlayerType::AiGpu))
+            .map(|(_, pt)| matches!(pt, PlayerType::AiCpu | PlayerType::AiGpu | PlayerType::AiGpuNative))
             .unwrap_or(false)
     }
 
@@ -882,12 +1081,12 @@ impl GuiApp {
             sorted_children.sort_by_key(|(_, (_, visits))| *visits);
             sorted_children.reverse();
             
-            lines.push("Top AI Moves:".to_string());
+            lines.push("Top AI Moves (Row, Col):".to_string());
             for (i, (move_str, (value, visits))) in sorted_children.iter().take(10).enumerate() {
                 // Shorten the move string for display - extract just the move part
                 let short_move = shorten_move_string(move_str);
                 lines.push(format!("{}. {}", i + 1, short_move));
-                lines.push(format!("   {:.1} ({} visits)", value, visits));
+                lines.push(format!("   Q={:.3} ({} visits)", value, visits));
             }
         } else {
             lines.push("AI Status: Idle".to_string());

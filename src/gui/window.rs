@@ -1217,6 +1217,7 @@ fn render_player_config(renderer: &Renderer, app: &GuiApp) {
         let bg_color = match player_type {
             PlayerType::Human => if is_selected { Colors::BUTTON_SELECTED } else { Colors::STATUS_WIN },
             PlayerType::AiCpu | PlayerType::AiGpu => if is_selected { Colors::BUTTON_SELECTED } else { Colors::BUTTON_BG },
+            PlayerType::AiGpuNative => if is_selected { Colors::BUTTON_SELECTED } else { Colors::AI_THINKING },
         };
         renderer.fill_rounded_rect(button_rect, 8.0, bg_color);
         
@@ -1233,6 +1234,7 @@ fn render_player_config(renderer: &Renderer, app: &GuiApp) {
                     PlayerType::Human => "Human",
                     PlayerType::AiCpu => "AI (CPU)",
                     PlayerType::AiGpu => "AI (GPU)",
+                    PlayerType::AiGpuNative => "AI (GPU-Native)",
                 })
             }
             _ => {
@@ -1241,6 +1243,7 @@ fn render_player_config(renderer: &Renderer, app: &GuiApp) {
                     PlayerType::Human => "Human",
                     PlayerType::AiCpu => "AI (CPU)",
                     PlayerType::AiGpu => "AI (GPU)",
+                    PlayerType::AiGpuNative => "AI (GPU-Native)",
                 })
             }
         };
@@ -1284,6 +1287,7 @@ fn render_in_game(renderer: &Renderer, app: &GuiApp) {
         PlayerType::Human => "",
         PlayerType::AiCpu => " (CPU)",
         PlayerType::AiGpu => " (GPU)",
+        PlayerType::AiGpuNative => " (GPU-Native)",
     };
 
     let status_text = if app.ai_thinking {
@@ -1479,6 +1483,7 @@ fn render_game_over(renderer: &Renderer, app: &GuiApp) {
                 PlayerType::Human => "",
                 PlayerType::AiCpu => " (CPU)",
                 PlayerType::AiGpu => " (GPU)",
+                PlayerType::AiGpuNative => " (GPU-Native)",
             };
             
             format!("{}{} wins!", winner_name, type_suffix)

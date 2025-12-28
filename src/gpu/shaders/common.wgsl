@@ -35,12 +35,18 @@ fn get_line_size() -> i32 {
 }
 
 fn pcg_hash(input: u32) -> u32 {
-    let state = input * 747796405u + 2891336453u;
+    var state = input * 747796405u + 2891336453u;
     let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
     return (word >> 22u) ^ word;
 }
 
+// Improved random function using xorshift-based LCG
 fn rand() -> f32 {
+    // Use a hybrid approach: PCG for mixing, then xorshift for the sequence
+    rng_state ^= rng_state << 13u;
+    rng_state ^= rng_state >> 17u;
+    rng_state ^= rng_state << 5u;
+    // Mix in PCG for better quality
     rng_state = pcg_hash(rng_state);
     return f32(rng_state) / 4294967296.0;
 }

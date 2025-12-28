@@ -459,6 +459,10 @@ pub struct MCTS<S: GameState> {
     /// Counter for pending GPU evaluations
     #[cfg(feature = "gpu")]
     gpu_pending_evaluations: Arc<AtomicI32>,
+    /// Persistent GPU-native Othello MCTS engine for tree reuse
+    /// Wrapped in Mutex to allow interior mutability (lazy initialization)
+    #[cfg(feature = "gpu")]
+    gpu_native_othello: Mutex<Option<Arc<Mutex<gpu::GpuOthelloMcts>>>>,
 }
 
 impl<S: GameState> MCTS<S> {
@@ -502,6 +506,8 @@ impl<S: GameState> MCTS<S> {
             gpu_simulation_sender: None,
             #[cfg(feature = "gpu")]
             gpu_pending_evaluations: Arc::new(AtomicI32::new(0)),
+            #[cfg(feature = "gpu")]
+            gpu_native_othello: Mutex::new(None),
         }
     }
 
@@ -820,6 +826,7 @@ impl<S: GameState> MCTS<S> {
             gpu_last_batch_size: Arc::new(AtomicI32::new(0)),
             gpu_simulation_sender,
             gpu_pending_evaluations: pending_evaluations,
+            gpu_native_othello: Mutex::new(None),
         };
 
         (mcts, message)
@@ -897,6 +904,213 @@ impl<S: GameState> MCTS<S> {
     /// The currently configured move selection strategy
     pub fn get_move_selection_strategy(&self) -> MoveSelectionStrategy {
         self.move_selection_strategy
+    }
+
+    /// Performs GPU-native MCTS search for Othello
+    ///
+    /// This method runs all four MCTS phases entirely on the GPU, eliminating
+    /// CPU-GPU synchronization overhead and the stale path problem that affects
+    /// the hybrid approach.
+    ///
+    /// # Arguments
+    /// * `board` - 64-element Othello board (1 = black, -1 = white, 0 = empty)
+    /// * `current_player` - Player to move (1 or -1)
+    /// * `legal_moves` - List of legal moves as (x, y) coordinates
+    /// * `iterations_per_batch` - Number of parallel iterations per GPU dispatch
+    /// * `num_batches` - Number of batches to run
+    /// * `exploration` - C_puct exploration parameter
+    ///
+    /// # Returns
+    /// The best move as (x, y), total visits, Q value, children stats, and total nodes allocated
+    #[cfg(feature = "gpu")]
+    pub fn search_gpu_native_othello(
+        &self,
+        board: &[i32; 64],
+        current_player: i32,
+        legal_moves: &[(usize, usize)],
+        iterations_per_batch: u32,
+        num_batches: u32,
+        exploration: f32,
+        timeout_secs: u64,
+    ) -> Option<((usize, usize), i32, f64, Vec<(usize, usize, i32, i32, f64)>, u32)> {
+        use std::sync::Arc;
+        
+        if legal_moves.is_empty() {
+            return None;
+        }
+        
+        if legal_moves.len() == 1 {
+            return Some((legal_moves[0], 1, 0.5, vec![(legal_moves[0].0, legal_moves[0].1, 1, 0, 0.5)], 1));
+        }
+
+        // Use existing GPU-native engine if available (no new allocations needed)
+        let gpu_mcts_arc = {
+            let mut guard = self.gpu_native_othello.lock();
+            if let Some(ref existing) = *guard {
+                existing.clone()
+            } else {
+                // Need to create a new engine - get or create GPU context
+                let gpu_context = if let Some(ref acc) = self.gpu_accelerator {
+                    acc.lock().get_context()
+                } else {
+                    // Try to create a new context
+                    let config = gpu::GpuConfig::default();
+                    match gpu::GpuContext::new(&config) {
+                        Ok(ctx) => Arc::new(ctx),
+                        Err(_) => return None,
+                    }
+                };
+                
+                // Create new engine
+                // Calculate max_nodes based on GPU limits
+                // Each node requires ~256 bytes for children_indices buffer (64 children * 4 bytes)
+                // This is the largest single buffer, so it dictates the limit
+                let max_storage_size = gpu_context.max_storage_buffer_binding_size();
+                // Use 90% of the limit to be safe, and ensure we don't overflow
+                let max_nodes = (max_storage_size as f64 * 0.9 / 256.0) as u32;
+                eprintln!("[GPU-Native] Max nodes set to {} based on storage limit of {} bytes", max_nodes, max_storage_size);
+
+                let new_engine = gpu::GpuOthelloMcts::new(
+                    gpu_context,
+                    max_nodes,
+                    iterations_per_batch,
+                );
+                let engine_arc = Arc::new(Mutex::new(new_engine));
+                
+                // Store it in the MCTS struct for reuse across searches
+                *guard = Some(engine_arc.clone());
+                
+                engine_arc
+            }
+        };
+
+        let mut gpu_mcts = gpu_mcts_arc.lock();
+
+        // Check if we need to initialize or can continue from existing tree
+        let root_visits = gpu_mcts.get_root_visits();
+        
+        // Count pieces on board to detect new game (Othello starts with 4 pieces)
+        // If we are at the start of a game, we MUST reset the tree to ensure we don't use stale data
+        // from a previous game that ended.
+        let piece_count = board.iter().filter(|&&x| x != 0).count();
+        let is_new_game = piece_count <= 4;
+
+        if root_visits == 0 || is_new_game {
+            // Fresh tree needed
+            gpu_mcts.init_tree(board, current_player, legal_moves);
+        }
+        // Note: Tree reuse via advance_root is handled separately through advance_root_gpu_native()
+
+        // Run iterations with timeout enforcement
+        let start_time = std::time::Instant::now();
+        let timeout = if timeout_secs > 0 {
+            Some(std::time::Duration::from_secs(timeout_secs))
+        } else {
+            None
+        };
+        
+        let mut seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u32;
+
+        let mut batch = 0u32;
+        loop {
+            // Check timeout before each batch
+            if let Some(t) = timeout {
+                if start_time.elapsed() >= t {
+                    break;
+                }
+            } else if batch >= num_batches {
+                // No timeout - use batch count limit
+                break;
+            }
+            
+            gpu_mcts.run_iterations(iterations_per_batch, exploration, seed.wrapping_add(batch * 1000));
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            batch += 1;
+            
+            // Force GPU sync every 100 batches to prevent command buffer buildup
+            if batch % 100 == 0 {
+                gpu_mcts.flush_and_wait();
+            }
+        }
+        
+        // Final flush to ensure all work completes
+        gpu_mcts.flush_and_wait();
+        
+        eprintln!("[GPU-Native] Completed {} batches ({} iterations) in {:.2}s", 
+            batch, batch as u64 * iterations_per_batch as u64, start_time.elapsed().as_secs_f64());
+
+        // Get children stats for TSV logging
+        let children_stats = gpu_mcts.get_children_stats();
+        let total_nodes = gpu_mcts.get_total_nodes();
+        
+        // DEBUG: Print ALL children to see visit distribution
+        let mut sorted = children_stats.clone();
+        sorted.sort_by_key(|(_, _, v, _, _)| -(*v));
+        eprintln!("[GPU-Native DEBUG] All {} children by visits:", sorted.len());
+        for (i, (x, y, visits, wins, q)) in sorted.iter().enumerate() {
+            let win_rate = if *visits > 0 { *wins as f64 / (*visits as f64 * 2.0) } else { 0.0 };
+            eprintln!("  {}. ({},{}) visits={:7} wins={:7} Q={:.4} raw_wr={:.4}", 
+                     i+1, x, y, visits, wins, q, win_rate);
+        }
+
+        // Get best move
+        gpu_mcts.get_best_move().map(|(x, y, visits, q)| ((x, y), visits, q, children_stats, total_nodes))
+    }
+
+    /// Advance the GPU-native MCTS tree root after a move is made
+    /// This enables tree reuse for consecutive GPU-native searches
+    ///
+    /// # Arguments
+    /// * `move_xy` - The move that was made as (x, y) coordinates
+    /// * `new_board` - The new board state after the move
+    /// * `new_player` - The player to move in the new position
+    /// * `new_legal_moves` - Legal moves from the new position
+    ///
+    /// # Returns
+    /// true if advanced to existing child (tree reused), false if reinitialized
+    #[cfg(feature = "gpu")]
+    pub fn advance_root_gpu_native(
+        &self,
+        move_xy: (usize, usize),
+        new_board: &[i32; 64],
+        new_player: i32,
+        new_legal_moves: &[(usize, usize)],
+    ) -> bool {
+        let guard = self.gpu_native_othello.lock();
+        if let Some(ref gpu_mcts_arc) = *guard {
+            let mut gpu_mcts = gpu_mcts_arc.lock();
+            gpu_mcts.advance_root(move_xy.0, move_xy.1, new_board, new_player, new_legal_moves)
+        } else {
+            false
+        }
+    }
+
+    /// Initialize the GPU-native Othello engine for a new game
+    /// Call this before the first search in a game to enable tree reuse
+    #[cfg(feature = "gpu")]
+    pub fn init_gpu_native_othello(&mut self, board: &[i32; 64], current_player: i32, legal_moves: &[(usize, usize)], iterations_per_batch: u32) {
+        // Get GPU context
+        let gpu_context = if let Some(ref acc) = self.gpu_accelerator {
+            acc.lock().get_context()
+        } else {
+            let config = gpu::GpuConfig::default();
+            match gpu::GpuContext::new(&config) {
+                Ok(ctx) => std::sync::Arc::new(ctx),
+                Err(_) => return,
+            }
+        };
+
+        // Calculate max_nodes based on GPU limits
+        let max_storage_size = gpu_context.max_storage_buffer_binding_size();
+        let max_nodes = (max_storage_size as f64 * 0.9 / 256.0) as u32;
+        eprintln!("[GPU-Native] Max nodes set to {} based on storage limit of {} bytes", max_nodes, max_storage_size);
+
+        let mut engine = gpu::GpuOthelloMcts::new(gpu_context, max_nodes, iterations_per_batch);
+        engine.init_tree(board, current_player, legal_moves);
+        *self.gpu_native_othello.lock() = Some(Arc::new(Mutex::new(engine)));
     }
 
     /// Selects the best move from children based on the configured strategy
@@ -2092,10 +2306,25 @@ impl<S: GameState> MCTS<S> {
         #[cfg(feature = "gpu")]
         if let Some(ref sender) = self.gpu_simulation_sender {
             if !sim_state.is_terminal() {
-                // Check pending evaluations to prevent huge backlog
-                // If GPU is saturated, fall back to CPU simulation
+                // Adaptive pending limit based on game phase
+                // Key insight: In endgame with few moves, we need fresher statistics
+                // because positions are more tactical and rollouts are shorter.
+                // 
+                // - Many moves (opening/midgame): Higher limit OK, rollouts take longer
+                // - Few moves (endgame): Need lower limit for fresher backprop
+                let num_moves = moves_cache.len().max(1);
+                let pending_limit = if num_moves >= 15 {
+                    2000  // Opening: many moves, longer rollouts
+                } else if num_moves >= 8 {
+                    1000  // Midgame: moderate
+                } else if num_moves >= 4 {
+                    500   // Late midgame: getting tactical
+                } else {
+                    200   // Endgame: very few moves, need fresh data
+                };
+                
                 let pending = self.gpu_pending_evaluations.load(Ordering::Relaxed);
-                if pending < 10000 {
+                if pending < pending_limit {
                     // Send to GPU. Multiple threads can evaluate the same position - this is fine.
                     self.gpu_pending_evaluations.fetch_add(1, Ordering::Relaxed);
                     let request = EvaluationRequest {
@@ -2249,6 +2478,7 @@ impl<S: GameState> MCTS<S> {
     /// # Arguments
     /// * `force` - If true, update the cache regardless of the simulation count
     #[cfg(feature = "gpu")]
+    #[allow(dead_code)]
     fn update_gpu_puct_cache(&self, force: bool) {
         if !self.gpu_enabled || self.gpu_accelerator.is_none() {
             return;

@@ -103,7 +103,10 @@ Launch the application and use the menu system:
 **Command Line Mode**
 ```bash
 # The OG command:
-.\target\release\play.exe -n 16 -b 8 -l 4 --stats-interval-secs 1 --gpu-use-heuristic false --timeout-secs 5 --gpu-exploration-factor 2 -m 10000000
+cargo build --release --bin play ; $env:RUST_BACKTRACE="full"; .\target\release\play.exe -n 24 -b 8 -l 4 --stats-interval-secs 1 --gpu-use-heuristic false --timeout-secs 3 --gpu-exploration-factor 1 -m 100000000 -s 1000000000
+
+# The OG command for benchmark:
+cargo build --release --bin play ; $env:RUST_BACKTRACE="full"; .\target\release\benchmark.exe --board-size 8 --duration 10 --threads 24 --cpu-bench-threads 16 --gpu-threads 4096
 
 # Start specific game with AI vs AI
 cargo run --release --features gui -- --game Gomoku --ai-only
