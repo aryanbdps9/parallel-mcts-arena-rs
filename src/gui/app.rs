@@ -150,14 +150,29 @@ impl AIWorker {
         shared_tree: bool,
         gpu_threads: usize,
         gpu_use_heuristic: bool,
+        cpu_select_by_q: bool,
+        gpu_select_by_q: bool,
     ) -> Self {
         use std::sync::mpsc::channel;
         use std::collections::HashMap;
+        use mcts::MoveSelectionStrategy;
 
         let (tx_req, rx_req) = channel();
         let (tx_resp, rx_resp) = channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
+
+        let cpu_move_selection_strategy = if cpu_select_by_q {
+            MoveSelectionStrategy::MaxQ
+        } else {
+            MoveSelectionStrategy::MaxVisits
+        };
+
+        let gpu_move_selection_strategy = if gpu_select_by_q {
+            MoveSelectionStrategy::MaxQ
+        } else {
+            MoveSelectionStrategy::MaxVisits
+        };
 
         let handle = std::thread::spawn(move || {
             let mut mcts_cpu_map: HashMap<i32, MCTS<GameWrapper>> = HashMap::new();
@@ -175,7 +190,9 @@ impl AIWorker {
                         let mcts_opt = match player_type {
                             PlayerType::AiCpu => {
                                 Some(mcts_cpu_map.entry(key).or_insert_with(|| {
-                                    MCTS::new(cpu_exploration_constant, num_threads, max_nodes)
+                                    let mut mcts = MCTS::new(cpu_exploration_constant, num_threads, max_nodes);
+                                    mcts.set_move_selection_strategy(cpu_move_selection_strategy);
+                                    mcts
                                 }))
                             },
                             PlayerType::AiGpu => {
@@ -186,7 +203,8 @@ impl AIWorker {
                                             max_batch_size: gpu_threads,
                                             ..Default::default()
                                         };
-                                        let (new_mcts, gpu_msg) = MCTS::with_gpu_config(gpu_exploration_constant, num_threads, max_nodes, gpu_config, gpu_use_heuristic);
+                                        let (mut new_mcts, gpu_msg) = MCTS::with_gpu_config(gpu_exploration_constant, num_threads, max_nodes, gpu_config, gpu_use_heuristic);
+                                        new_mcts.set_move_selection_strategy(gpu_move_selection_strategy);
                                         if let Some(msg) = gpu_msg {
                                             eprintln!("[AI] {}", msg);
                                         }
@@ -198,7 +216,9 @@ impl AIWorker {
                                 {
                                     eprintln!("[AI] GPU not available, falling back to CPU");
                                     Some(mcts_cpu_map.entry(key).or_insert_with(|| {
-                                        MCTS::new(cpu_exploration_constant, num_threads, max_nodes)
+                                        let mut mcts = MCTS::new(cpu_exploration_constant, num_threads, max_nodes);
+                                        mcts.set_move_selection_strategy(cpu_move_selection_strategy);
+                                        mcts
                                     }))
                                 }
                             },
@@ -338,6 +358,8 @@ pub struct GuiApp {
     pub ai_only: bool,
     pub shared_tree: bool,
     pub gpu_use_heuristic: bool,
+    pub cpu_select_by_q: bool,
+    pub gpu_select_by_q: bool,
     pub selected_settings_index: usize,
 
     // UI state
@@ -381,6 +403,8 @@ impl GuiApp {
         timeout_secs: u64,
         stats_interval_secs: u64,
         ai_only: bool,
+        cpu_select_by_q: bool,
+        gpu_select_by_q: bool,
     ) -> Self {
         let default_game = GameWrapper::Gomoku(GomokuState::new(board_size, line_size));
         let game_controller = GameController::new(default_game.clone());
@@ -398,7 +422,7 @@ impl GuiApp {
             game_status: GameStatus::InProgress,
             move_history: Vec::new(),
             game_renderer: renderer,
-            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic),
+            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q),
             ai_thinking: false,
             ai_thinking_start: None,
             last_search_stats: None,
@@ -415,6 +439,8 @@ impl GuiApp {
             ai_only,
             shared_tree,
             gpu_use_heuristic,
+            cpu_select_by_q,
+            gpu_select_by_q,
             selected_settings_index: 0,
             needs_redraw: true,
             hover_button: None,
@@ -477,6 +503,8 @@ impl GuiApp {
             self.shared_tree,
             self.gpu_threads,
             self.gpu_use_heuristic,
+            self.cpu_select_by_q,
+            self.gpu_select_by_q,
         );
 
         // Check if AI should move first

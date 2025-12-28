@@ -79,6 +79,16 @@ pub struct SearchStatistics {
     pub children_stats: HashMap<String, (f64, i32)>,
 }
 
+/// Strategy for selecting the best move after MCTS search
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MoveSelectionStrategy {
+    /// Select the move with the highest visit count (default, most robust)
+    #[default]
+    MaxVisits,
+    /// Select the move with the highest Q value (win rate)
+    MaxQ,
+}
+
 // Thread-local storage for move generation to avoid allocations
 // Each thread maintains its own buffer for generating possible moves,
 // which reduces memory allocations during hot path execution.
@@ -422,6 +432,8 @@ pub struct MCTS<S: GameState> {
     timeout_measurements: Arc<AtomicI32>,
     /// Counter for searches since last overhead measurement
     searches_since_measurement: Arc<AtomicI32>,
+    /// Strategy for selecting the best move (visits vs Q value)
+    move_selection_strategy: MoveSelectionStrategy,
     /// GPU accelerator for batch PUCT computation (optional, requires 'gpu' feature)
     #[cfg(feature = "gpu")]
     gpu_accelerator: Option<Arc<Mutex<gpu::GpuMctsAccelerator>>>,
@@ -473,6 +485,7 @@ impl<S: GameState> MCTS<S> {
             timeout_overhead_ms: Arc::new(Mutex::new(50.0)), // Start with conservative 50ms estimate
             timeout_measurements: Arc::new(AtomicI32::new(0)),
             searches_since_measurement: Arc::new(AtomicI32::new(0)),
+            move_selection_strategy: MoveSelectionStrategy::default(),
             #[cfg(feature = "gpu")]
             gpu_accelerator: None,
             #[cfg(feature = "gpu")]
@@ -798,6 +811,7 @@ impl<S: GameState> MCTS<S> {
             timeout_overhead_ms: Arc::new(Mutex::new(50.0)),
             timeout_measurements: Arc::new(AtomicI32::new(0)),
             searches_since_measurement: Arc::new(AtomicI32::new(0)),
+            move_selection_strategy: MoveSelectionStrategy::default(),
             gpu_accelerator,
             gpu_enabled,
             gpu_puct_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -862,6 +876,70 @@ impl<S: GameState> MCTS<S> {
             self.gpu_enabled = true;
         } else if !enabled {
             self.gpu_enabled = false;
+        }
+    }
+
+    /// Sets the move selection strategy
+    ///
+    /// Controls how the AI selects the best move after search completes:
+    /// - `MaxVisits`: Select the most visited move (default, most robust)
+    /// - `MaxQ`: Select the move with highest win rate (Q value)
+    ///
+    /// # Arguments
+    /// * `strategy` - The move selection strategy to use
+    pub fn set_move_selection_strategy(&mut self, strategy: MoveSelectionStrategy) {
+        self.move_selection_strategy = strategy;
+    }
+
+    /// Gets the current move selection strategy
+    ///
+    /// # Returns
+    /// The currently configured move selection strategy
+    pub fn get_move_selection_strategy(&self) -> MoveSelectionStrategy {
+        self.move_selection_strategy
+    }
+
+    /// Selects the best move from children based on the configured strategy
+    ///
+    /// This helper method implements the move selection logic for both strategies:
+    /// - `MaxVisits`: Returns the move with the highest visit count
+    /// - `MaxQ`: Returns the move with the highest Q value (wins/visits)
+    ///
+    /// # Arguments
+    /// * `children` - Reference to the children map from the root node
+    ///
+    /// # Returns
+    /// The best move according to the configured strategy
+    fn select_best_move(&self, children: &HashMap<S::Move, Arc<Node<S::Move>>>) -> S::Move {
+        match self.move_selection_strategy {
+            MoveSelectionStrategy::MaxVisits => {
+                children
+                    .iter()
+                    .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
+                    .map(|(mv, _)| mv.clone())
+                    .expect("Root node has children but max_by_key failed")
+            }
+            MoveSelectionStrategy::MaxQ => {
+                children
+                    .iter()
+                    .max_by(|(_, a), (_, b)| {
+                        let a_visits = a.visits.load(Ordering::Relaxed);
+                        let b_visits = b.visits.load(Ordering::Relaxed);
+                        let a_q = if a_visits > 0 {
+                            a.wins.load(Ordering::Relaxed) as f64 / a_visits as f64
+                        } else {
+                            f64::NEG_INFINITY
+                        };
+                        let b_q = if b_visits > 0 {
+                            b.wins.load(Ordering::Relaxed) as f64 / b_visits as f64
+                        } else {
+                            f64::NEG_INFINITY
+                        };
+                        a_q.partial_cmp(&b_q).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(mv, _)| mv.clone())
+                    .expect("Root node has children but max_by failed")
+            }
         }
     }
 
@@ -956,9 +1034,10 @@ impl<S: GameState> MCTS<S> {
             // Only write to CSV if this is NOT an opponent move update
             // We detect this by checking if the info string contains "(Opponent Move)"
             if !info.contains("(Opponent Move)") {
-                // Format: Info, RootVisits, RootQ, Move, MoveVisits, MoveQ, MoveU, AltMove, AltVisits, AltQ, AltU
-                let csv_line = format!("{}\t{}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\n",
-                    info, root_visits, root_q, clean_move(mv), new_root_visits, new_root_q, new_root_u,
+                let visit_diff = (new_root_visits as i64) - (second_best_stats.0 as i64);
+                // Format: Info, RootVisits, RootQ, MoveVisits-AltVisits, Move, MoveVisits, MoveQ, MoveU, AltMove, AltVisits, AltQ, AltU
+                let csv_line = format!("{}\t{}\t{:.4}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\n",
+                    info, root_visits, root_q, visit_diff, clean_move(mv), new_root_visits, new_root_q, new_root_u,
                     second_best_move_str, second_best_stats.0, second_best_stats.1, second_best_stats.2
                 );
 
@@ -984,7 +1063,7 @@ impl<S: GameState> MCTS<S> {
 
                 if let Ok(mut file) = options.open(file_path) {
                     if is_first_write {
-                        let _ = file.write_all(b"Info\tRootVisits\tRootQ\tMove\tMoveVisits\tMoveQ\tMoveU\tAltMove\tAltVisits\tAltQ\tAltU\n");
+                        let _ = file.write_all(b"Info\tRootVisits\tRootQ\tMoveVisits-AltVisits\tMove\tMoveVisits\tMoveQ\tMoveU\tAltMove\tAltVisits\tAltQ\tAltU\n");
                     }
                     let _ = file.write_all(csv_line.as_bytes());
                 }
@@ -1504,7 +1583,7 @@ impl<S: GameState> MCTS<S> {
             }
         }
 
-        // After all simulations, the best move is the one most visited.
+        // After all simulations, the best move is selected based on the configured strategy.
         let children = self.root.children.read();
         let best_move = if children.is_empty() {
             // Fallback: if no children exist, return a random valid move
@@ -1515,11 +1594,7 @@ impl<S: GameState> MCTS<S> {
             }
             possible_moves[random_range(0, possible_moves.len())].clone()
         } else {
-            children
-                .iter()
-                .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
-                .map(|(mv, _)| mv.clone())
-                .expect("Root node has children but max_by_key failed")
+            self.select_best_move(&children)
         };
 
         let root_visits = self.root.visits.load(Ordering::Relaxed);
@@ -1639,7 +1714,7 @@ impl<S: GameState> MCTS<S> {
                 });
         });
 
-        // After all simulations, the best move is the one most visited.
+        // After all simulations, the best move is selected based on the configured strategy.
         let children = self.root.children.read();
         let best_move = if children.is_empty() {
             // Fallback: if no children exist, return a random valid move
@@ -1650,11 +1725,7 @@ impl<S: GameState> MCTS<S> {
             }
             possible_moves[random_range(0, possible_moves.len())].clone()
         } else {
-            children
-                .iter()
-                .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
-                .map(|(mv, _)| mv.clone())
-                .expect("Root node has children but max_by_key failed")
+            self.select_best_move(&children)
         };
 
         let root_visits = self.root.visits.load(Ordering::Relaxed);
@@ -1727,7 +1798,7 @@ impl<S: GameState> MCTS<S> {
 
         // Don't do final pruning here - let it be done explicitly after statistics are displayed
 
-        // Return the best move
+        // Return the best move based on the configured strategy
         let children = self.root.children.read();
         let best_move = if children.is_empty() {
             // Fallback: if no children exist, return a random valid move
@@ -1738,11 +1809,7 @@ impl<S: GameState> MCTS<S> {
             }
             possible_moves[random_range(0, possible_moves.len())].clone()
         } else {
-            children
-                .iter()
-                .max_by_key(|(_, node)| node.visits.load(Ordering::Relaxed))
-                .map(|(mv, _)| mv.clone())
-                .expect("Root node has children but max_by_key failed")
+            self.select_best_move(&children)
         };
 
         let root_visits = self.root.visits.load(Ordering::Relaxed);

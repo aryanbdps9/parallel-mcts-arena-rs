@@ -207,6 +207,28 @@ struct Args {
     /// Random rollouts are slower but work for any game.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     gpu_use_heuristic: bool,
+
+    /// Select moves by highest Q value instead of highest visit count (CPU AI).
+    ///
+    /// By default, MCTS selects the most visited move after search.
+    /// When this flag is set, CPU AI instead selects the move with the
+    /// highest win rate (Q value = wins/visits).
+    ///
+    /// MaxQ selection can be more aggressive but potentially less robust.
+    /// MaxVisits (default) is more conservative and commonly used in practice.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    cpu_select_by_q: bool,
+
+    /// Select moves by highest Q value instead of highest visit count (GPU AI).
+    ///
+    /// By default, MCTS selects the most visited move after search.
+    /// When this flag is set, GPU AI instead selects the move with the
+    /// highest win rate (Q value = wins/visits).
+    ///
+    /// MaxQ selection can be more aggressive but potentially less robust.
+    /// MaxVisits (default) is more conservative and commonly used in practice.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    gpu_select_by_q: bool,
 }
 
 /// Main entry point for the Parallel Multi-Game MCTS Engine
@@ -327,6 +349,8 @@ fn main() -> io::Result<()> {
             args.timeout_secs,
             args.stats_interval_secs,
             args.ai_only,
+            args.cpu_select_by_q,
+            args.gpu_select_by_q,
         );
         
         return gui::run_gui(gui_app)
