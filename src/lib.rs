@@ -576,7 +576,6 @@ impl<S: GameState> MCTS<S> {
         };
 
         let node_count = Arc::new(AtomicI32::new(1));
-        let node_count_clone = node_count.clone();
         let pending_evaluations = Arc::new(AtomicI32::new(0));
         let pending_evals_clone = pending_evaluations.clone();
 
@@ -744,7 +743,6 @@ impl<S: GameState> MCTS<S> {
                         // Offload to Rayon global pool to avoid blocking the GPU worker
                         let requests: Vec<_> = batch_requests.drain(..).collect();
                         let scores_for_processing = scores.clone();
-                        let node_count_clone = node_count_clone.clone();
                         let pending_evals_clone = pending_evals_clone.clone();
                         
                         rayon::spawn(move || {
@@ -906,6 +904,49 @@ impl<S: GameState> MCTS<S> {
         self.move_selection_strategy
     }
 
+    #[cfg(feature = "gpu")]
+    fn compute_othello_legal_moves(board: &[i32; 64], player: i32) -> Vec<(usize, usize)> {
+        const DIRS: [(i32, i32); 8] = [
+            (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1),
+        ];
+        let w = 8i32;
+        let mut moves = Vec::new();
+        for y in 0..w {
+            for x in 0..w {
+                if board[(y * w + x) as usize] != 0 {
+                    continue;
+                }
+                let mut valid = false;
+                for (dx, dy) in DIRS.iter().copied() {
+                    let mut cx = x + dx;
+                    let mut cy = y + dy;
+                    let mut seen_opponent = false;
+                    while cx >= 0 && cx < w && cy >= 0 && cy < w {
+                        let cell = board[(cy * w + cx) as usize];
+                        if cell == -player {
+                            seen_opponent = true;
+                            cx += dx;
+                            cy += dy;
+                            continue;
+                        }
+                        if cell == player && seen_opponent {
+                            valid = true;
+                        }
+                        break;
+                    }
+                    if valid {
+                        break;
+                    }
+                }
+                if valid {
+                    // GPU-native expects (x, y) where x=col, y=row; keep (x, y) as computed.
+                    moves.push((x as usize, y as usize));
+                }
+            }
+        }
+        moves
+    }
+
     /// Performs GPU-native MCTS search for Othello
     ///
     /// This method runs all four MCTS phases entirely on the GPU, eliminating
@@ -919,9 +960,10 @@ impl<S: GameState> MCTS<S> {
     /// * `iterations_per_batch` - Number of parallel iterations per GPU dispatch
     /// * `num_batches` - Number of batches to run
     /// * `exploration` - C_puct exploration parameter
+    /// * `virtual_loss_weight` - Weight applied to virtual loss during selection
     ///
     /// # Returns
-    /// The best move as (x, y), total visits, Q value, children stats, and total nodes allocated
+    /// The best move as (x, y), total visits, Q value, children stats, total nodes allocated, and GPU telemetry
     #[cfg(feature = "gpu")]
     pub fn search_gpu_native_othello(
         &self,
@@ -931,16 +973,39 @@ impl<S: GameState> MCTS<S> {
         iterations_per_batch: u32,
         num_batches: u32,
         exploration: f32,
+        virtual_loss_weight: f32,
         timeout_secs: u64,
-    ) -> Option<((usize, usize), i32, f64, Vec<(usize, usize, i32, i32, f64)>, u32)> {
+    ) -> Option<((usize, usize), i32, f64, Vec<(usize, usize, i32, i32, f64)>, u32, gpu::OthelloRunTelemetry)> {
         use std::sync::Arc;
+
+        // Recompute legal moves from the board/current_player to catch caller inconsistencies
+        let mut provided_moves = legal_moves.to_vec();
+        let mut computed_moves = Self::compute_othello_legal_moves(board, current_player);
+        provided_moves.sort_unstable();
+        computed_moves.sort_unstable();
+        let legal_moves = if provided_moves == computed_moves {
+            provided_moves
+        } else {
+            eprintln!(
+                "[GPU-Native HOST WARN] legal_moves mismatch for search; using computed. provided={:?} computed={:?}",
+                provided_moves, computed_moves
+            );
+            computed_moves
+        };
         
         if legal_moves.is_empty() {
             return None;
         }
         
         if legal_moves.len() == 1 {
-            return Some((legal_moves[0], 1, 0.5, vec![(legal_moves[0].0, legal_moves[0].1, 1, 0, 0.5)], 1));
+            return Some((
+                legal_moves[0],
+                1,
+                0.5,
+                vec![(legal_moves[0].0, legal_moves[0].1, 1, 0, 0.5)],
+                1,
+                gpu::OthelloRunTelemetry::default(),
+            ));
         }
 
         // Use existing GPU-native engine if available (no new allocations needed)
@@ -988,6 +1053,23 @@ impl<S: GameState> MCTS<S> {
 
         // Check if we need to initialize or can continue from existing tree
         let root_visits = gpu_mcts.get_root_visits();
+
+        // Validate GPU root board against host board to avoid subtle drift when reusing trees
+        if root_visits > 0 {
+            let gpu_hash = gpu_mcts.get_root_board_hash();
+            let mut host_hash: u64 = 0xcbf29ce484222325;
+            for v in board.iter() {
+                host_hash ^= *v as u64;
+                host_hash = host_hash.wrapping_mul(0x100000001b3);
+            }
+
+            if gpu_hash != host_hash {
+                panic!(
+                    "GPU-Native root board hash mismatch (gpu={} host={}); aborting GPU search",
+                    gpu_hash, host_hash
+                );
+            }
+        }
         
         // Count pieces on board to detect new game (Othello starts with 4 pieces)
         // If we are at the start of a game, we MUST reset the tree to ensure we don't use stale data
@@ -997,9 +1079,26 @@ impl<S: GameState> MCTS<S> {
 
         if root_visits == 0 || is_new_game {
             // Fresh tree needed
-            gpu_mcts.init_tree(board, current_player, legal_moves);
+            gpu_mcts.init_tree(board, current_player, &legal_moves);
         }
         // Note: Tree reuse via advance_root is handled separately through advance_root_gpu_native()
+
+        // Sanity check: root children should match legal_moves; otherwise reset tree
+        let mut actual_moves: Vec<(usize, usize)> = gpu_mcts
+            .get_children_stats()
+            .into_iter()
+            .map(|(x, y, _, _, _)| (x, y))
+            .collect();
+        let mut expected_moves: Vec<(usize, usize)> = legal_moves.clone();
+        actual_moves.sort_unstable();
+        expected_moves.sort_unstable();
+
+        if actual_moves != expected_moves {
+            panic!(
+                "GPU-Native root children mismatch vs legal_moves. actual={:?} expected={:?}",
+                actual_moves, expected_moves
+            );
+        }
 
         // Run iterations with timeout enforcement
         let start_time = std::time::Instant::now();
@@ -1014,6 +1113,8 @@ impl<S: GameState> MCTS<S> {
             .unwrap()
             .as_nanos() as u32;
 
+        let mut last_telemetry: Option<gpu::OthelloRunTelemetry> = None;
+
         let mut batch = 0u32;
         loop {
             // Check timeout before each batch
@@ -1026,13 +1127,37 @@ impl<S: GameState> MCTS<S> {
                 break;
             }
             
-            gpu_mcts.run_iterations(iterations_per_batch, exploration, seed.wrapping_add(batch * 1000));
+            let telemetry = gpu_mcts.run_iterations(
+                iterations_per_batch,
+                exploration,
+                virtual_loss_weight,
+                seed.wrapping_add(batch * 1000),
+            );
+            last_telemetry = Some(telemetry);
             seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
             batch += 1;
             
             // Force GPU sync every 100 batches to prevent command buffer buildup
             if batch % 100 == 0 {
                 gpu_mcts.flush_and_wait();
+            }
+
+            if telemetry.saturated {
+                eprintln!(
+                    "[GPU-Native WARNING] Node pool saturated: {} / {} nodes after batch {}",
+                    telemetry.alloc_count_after, telemetry.node_capacity, batch
+                );
+                break;
+            }
+
+            // If we are within 10% of capacity, stop dispatching more batches to avoid illegal proposals
+            let cap_guard = (telemetry.node_capacity as f32 * 0.9) as u32;
+            if telemetry.alloc_count_after >= cap_guard {
+                eprintln!(
+                    "[GPU-Native WARNING] Node pool near capacity: {} / {} after batch {}; stopping early",
+                    telemetry.alloc_count_after, telemetry.node_capacity, batch
+                );
+                break;
             }
         }
         
@@ -1044,8 +1169,60 @@ impl<S: GameState> MCTS<S> {
 
         // Get children stats for TSV logging
         let children_stats = gpu_mcts.get_children_stats();
-        let total_nodes = gpu_mcts.get_total_nodes();
-        
+        let telemetry = last_telemetry.unwrap_or_default();
+        let mut total_nodes = if telemetry.alloc_count_after > 0 {
+            telemetry.alloc_count_after
+        } else {
+            gpu_mcts.get_total_nodes()
+        };
+
+        // Diagnostics: show how many nodes were used vs capacity and whether we saturated
+        let diag_prefix = "\x1b[33m[GPU-Native DIAG]\x1b[0m";
+        let sat_flag = if telemetry.saturated { "\x1b[31mSATURATED\x1b[0m" } else { "OK" };
+        eprintln!(
+            "{} nodes_used={} capacity={} batches={} iter_per_batch={} virtual_loss_weight={:.2} status={}",
+            diag_prefix,
+            total_nodes,
+            telemetry.node_capacity,
+            batch,
+            iterations_per_batch,
+            virtual_loss_weight,
+            sat_flag,
+        );
+
+        // Per-depth visit histogram to see search spread; last bin is overflow if max depth exceeded
+        let depth_hist = gpu_mcts.get_depth_visit_histogram(32);
+        if !depth_hist.is_empty() {
+            let overflow = depth_hist.len() == 32;
+            let parts: Vec<String> = depth_hist
+                .iter()
+                .enumerate()
+                .filter(|(_, count)| **count > 0)
+                .map(|(d, count)| format!("{}:{}", d, count))
+                .collect();
+            let suffix = if overflow { " (bin 31 = overflow)" } else { "" };
+            eprintln!("{} depth_visits:{}{}", diag_prefix, parts.join(" "), suffix);
+        }
+
+        // Selection/expansion counters to spot algorithmic early exits
+        let d = telemetry.diagnostics;
+        eprintln!(
+            "{} diag_counts sel_term={} sel_noch={} sel_inv={} sel_pathcap={} exp_attempts={} exp_success={} exp_locked={} exp_term={} alloc_fail={} rollouts={}",
+            diag_prefix,
+            d.selection_terminal,
+            d.selection_no_children,
+            d.selection_invalid_child,
+            d.selection_path_cap,
+            d.expansion_attempts,
+            d.expansion_success,
+            d.expansion_locked,
+            d.expansion_terminal,
+            d.alloc_failures,
+            d.rollouts,
+        );
+
+        let diag_red_flag = d.selection_invalid_child > 0 || d.alloc_failures > 0;
+
         // DEBUG: Print ALL children to see visit distribution
         let mut sorted = children_stats.clone();
         sorted.sort_by_key(|(_, _, v, _, _)| -(*v));
@@ -1056,8 +1233,28 @@ impl<S: GameState> MCTS<S> {
                      i+1, x, y, visits, wins, q, win_rate);
         }
 
-        // Get best move
-        gpu_mcts.get_best_move().map(|(x, y, visits, q)| ((x, y), visits, q, children_stats, total_nodes))
+        // Guardrail: if GPU proposes an illegal move, abort instead of silently patching
+        let final_children_stats = children_stats;
+        let best = gpu_mcts.get_best_move();
+        if let Some((x, y, _, _)) = best {
+            let mv = (x, y);
+            let legal_ok = legal_moves.binary_search(&mv).is_ok();
+            if !legal_ok {
+                panic!("GPU-Native proposed illegal move ({},{}); aborting GPU search", x, y);
+            }
+        }
+
+        if diag_red_flag {
+            panic!("GPU-Native diagnostics flagged invalid-child/alloc issues; aborting GPU search");
+        }
+
+        total_nodes = if telemetry.alloc_count_after > 0 {
+            telemetry.alloc_count_after
+        } else {
+            gpu_mcts.get_total_nodes()
+        };
+
+        best.map(|(x, y, visits, q)| ((x, y), visits, q, final_children_stats, total_nodes, telemetry))
     }
 
     /// Advance the GPU-native MCTS tree root after a move is made
@@ -1079,10 +1276,25 @@ impl<S: GameState> MCTS<S> {
         new_player: i32,
         new_legal_moves: &[(usize, usize)],
     ) -> bool {
+        // Validate legal moves against the supplied board/new_player to avoid desync
+        let mut provided_moves = new_legal_moves.to_vec();
+        let mut computed_moves = Self::compute_othello_legal_moves(new_board, new_player);
+        provided_moves.sort_unstable();
+        computed_moves.sort_unstable();
+        let legal_moves = if provided_moves == computed_moves {
+            provided_moves
+        } else {
+            eprintln!(
+                "[GPU-Native HOST WARN] legal_moves mismatch for advance_root; using computed. provided={:?} computed={:?}",
+                provided_moves, computed_moves
+            );
+            computed_moves
+        };
+
         let guard = self.gpu_native_othello.lock();
         if let Some(ref gpu_mcts_arc) = *guard {
             let mut gpu_mcts = gpu_mcts_arc.lock();
-            gpu_mcts.advance_root(move_xy.0, move_xy.1, new_board, new_player, new_legal_moves)
+            gpu_mcts.advance_root(move_xy.0, move_xy.1, new_board, new_player, &legal_moves)
         } else {
             false
         }

@@ -17,7 +17,7 @@
 const MAX_CHILDREN: u32 = 64u;
 const MAX_PATH_LENGTH: u32 = 128u;
 const INVALID_INDEX: u32 = 0xFFFFFFFFu;
-const VIRTUAL_LOSS_WEIGHT: f32 = 1.0;
+const MAX_SELECTION_RETRIES: u32 = 16u;
 
 const NODE_STATE_EMPTY: u32 = 0u;
 const NODE_STATE_EXPANDING: u32 = 1u;
@@ -38,11 +38,15 @@ struct MctsParams {
     num_iterations: u32,
     max_nodes: u32,
     exploration: f32,
+    virtual_loss_weight: f32,
     root_idx: u32,
     seed: u32,
     board_width: u32,
     board_height: u32,
     game_type: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct NodeInfo {
@@ -61,6 +65,21 @@ struct WorkItem {
     leaf_player: i32,
     _pad0: u32,
     _pad1: u32,
+}
+
+struct Diagnostics {
+    selection_terminal: atomic<u32>,
+    selection_no_children: atomic<u32>,
+    selection_invalid_child: atomic<u32>,
+    selection_path_cap: atomic<u32>,
+    expansion_attempts: atomic<u32>,
+    expansion_success: atomic<u32>,
+    expansion_locked: atomic<u32>,
+    expansion_terminal: atomic<u32>,
+    alloc_failures: atomic<u32>,
+    rollouts: atomic<u32>,
+    _pad0: atomic<u32>,
+    _pad1: atomic<u32>,
 }
 
 // =============================================================================
@@ -83,6 +102,7 @@ struct WorkItem {
 @group(1) @binding(1) var<storage, read_write> work_items: array<WorkItem>;
 @group(1) @binding(2) var<storage, read_write> paths: array<u32>;
 @group(1) @binding(3) var<storage, read_write> alloc_counter: atomic<u32>;
+@group(1) @binding(4) var<storage, read_write> diagnostics: Diagnostics;
 
 // =============================================================================
 // Buffer Bindings - Group 2: Root Board State
@@ -245,7 +265,8 @@ fn calculate_puct(node_idx: u32, child_slot: u32, parent_visits: i32) -> f32 {
     let vl = atomicLoad(&node_vl[child_idx]);
     let prior = get_child_prior(node_idx, child_slot);
     
-    let effective_visits = f32(visits) + f32(vl) * VIRTUAL_LOSS_WEIGHT;
+    let vl_weight = max(params.virtual_loss_weight, 0.001);
+    let effective_visits = f32(visits) + f32(vl) * vl_weight;
     let parent_sqrt = sqrt(f32(max(parent_visits, 1)));
     
     if (effective_visits < 0.5) {
@@ -354,6 +375,9 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>) {
                 // Update parent
                 node_info[node_idx].num_children = 1u;
             }
+            if (child_idx == INVALID_INDEX) {
+                atomicAdd(&diagnostics.alloc_failures, 1u);
+            }
             return;
         }
     }
@@ -368,7 +392,10 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>) {
                 if (allocated_count >= MAX_CHILDREN) { break; }
                 
                 let child_idx = allocate_node();
-                if (child_idx == INVALID_INDEX) { break; }
+                if (child_idx == INVALID_INDEX) {
+                    atomicAdd(&diagnostics.alloc_failures, 1u);
+                    break;
+                }
                 
                 // Initialize child
                 var child_info: NodeInfo;
@@ -472,7 +499,7 @@ fn othello_simulate(board: ptr<function, array<i32, 64>>, starting_player: i32) 
         
         consecutive_passes = 0;
         
-        // Pick random move
+        // Pick random move (TODO: allow host-provided move weights to bias rollouts like CPU get_move_weight)
         var pick_index = i32(rand() * f32(valid_count));
         var picked_x = -1;
         var picked_y = -1;
@@ -526,74 +553,190 @@ fn mcts_othello_iteration(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     init_rng(tid, params.seed);
     
-    // === PHASE 1: SELECTION ===
+    var leaf_idx = params.root_idx;
+    var leaf_player: i32 = 0;
     var path: array<u32, 128>;
     var path_length = 0u;
-    var current = params.root_idx;
-    
-    for (var iter = 0u; iter < MAX_PATH_LENGTH; iter++) {
-        path[path_length] = current;
-        path_length++;
-        
-        // Apply virtual loss
-        atomicAdd(&node_vl[current], 1);
-        
-        let state = atomicLoad(&node_state[current]);
-        let info = node_info[current];
-        
-        if (state == NODE_STATE_TERMINAL || info.num_children == 0u) {
-            break;
-        }
-        
-        let child = select_best_child(current);
-        if (child == INVALID_INDEX) {
-            break;
-        }
-        
-        current = child;
-    }
-    
-    let leaf_idx = current;
-    let leaf_player = node_info[leaf_idx].player_at_node;
-    
-    // === PHASE 2: RECONSTRUCTION + SIMULATION ===
+    var selection_reason = 0u; // 0=normal,1=terminal,2=no_children,3=invalid_child,4=path_cap
     var board: array<i32, 64>;
-    let sim_player = reconstruct_board_at_node(&board, &path, path_length);
-    
-    // === EXPANSION ===
-    // Try to expand if leaf is not terminal and has no children
-    // We use atomic exchange to ensure only one thread expands
-    let current_state = atomicLoad(&node_state[leaf_idx]);
-    if (current_state == NODE_STATE_READY && node_info[leaf_idx].num_children == 0u) {
-        // Try to lock
-        let old_state = atomicExchange(&node_state[leaf_idx], NODE_STATE_EXPANDING);
-        if (old_state == NODE_STATE_READY) {
-            // We are the expander
-            expand_node(leaf_idx, &board);
-            
-            // Unlock (set back to READY, or TERMINAL if marked by expand_node)
-            let final_state = atomicLoad(&node_state[leaf_idx]);
-            if (final_state != NODE_STATE_TERMINAL) {
-                atomicStore(&node_state[leaf_idx], NODE_STATE_READY);
+    var sim_player: i32 = 0;
+
+    // Allow a small number of retries if we hit an expanding leaf, so work can move to other ready leaves.
+    for (var attempt = 0u; attempt < MAX_SELECTION_RETRIES; attempt++) {
+        path_length = 0u;
+        selection_reason = 0u;
+        var current = params.root_idx;
+        var expanded_stop = false;
+        var lock_hits = 0u;
+
+        // === PHASE 1: SELECTION (with inline expansion/backoff) ===
+        var retry_selection = false;
+        for (var iter = 0u; iter < MAX_PATH_LENGTH; iter++) {
+            path[path_length] = current;
+            path_length++;
+
+            // Apply virtual loss
+            atomicAdd(&node_vl[current], 1);
+
+            let state = atomicLoad(&node_state[current]);
+            let info = node_info[current];
+
+            if (state == NODE_STATE_TERMINAL) {
+                selection_reason = 1u;
+                break;
             }
-        } else if (old_state == NODE_STATE_EXPANDING) {
-            // Someone else is expanding, put it back
-            // Note: This is a bit racy if the other thread finished and set to READY
-            // But since we saw EXPANDING, we can just leave it as EXPANDING?
-            // No, if we swapped EXPANDING with EXPANDING, no harm done.
-            // But if we swapped READY with EXPANDING (race), we might have stolen the lock?
-            // No, atomicExchange returns the OLD value.
-            // If old value was EXPANDING, we just wrote EXPANDING. No change.
-        } else {
-            // Terminal or other state, put it back
-             if (old_state == NODE_STATE_TERMINAL) {
-                 atomicStore(&node_state[leaf_idx], NODE_STATE_TERMINAL);
-             } else {
-                 atomicStore(&node_state[leaf_idx], old_state);
-             }
+
+            if (info.num_children == 0u) {
+                // Try to expand if ready; otherwise back off or stop
+                var expanded = false;
+
+                // Ensure board is reconstructed for expansion/simulation from this path
+                sim_player = reconstruct_board_at_node(&board, &path, path_length);
+
+                if (state == NODE_STATE_READY) {
+                    let old_state = atomicExchange(&node_state[current], NODE_STATE_EXPANDING);
+                    if (old_state == NODE_STATE_READY) {
+                        atomicAdd(&diagnostics.expansion_attempts, 1u);
+                        expand_node(current, &board);
+
+                        let final_state = atomicLoad(&node_state[current]);
+                        if (final_state != NODE_STATE_TERMINAL) {
+                            atomicStore(&node_state[current], NODE_STATE_READY);
+                        } else {
+                            atomicAdd(&diagnostics.expansion_terminal, 1u);
+                        }
+                        if (node_info[current].num_children > 0u || final_state == NODE_STATE_TERMINAL) {
+                            atomicAdd(&diagnostics.expansion_success, 1u);
+                        }
+
+                        if (final_state == NODE_STATE_TERMINAL) {
+                            selection_reason = 1u;
+                            break;
+                        }
+
+                        if (node_info[current].num_children > 0u) {
+                            expanded = true;
+                            expanded_stop = true;
+                            // Stop selection after first expansion; rollout from this node
+                            break;
+                        }
+                    } else if (old_state == NODE_STATE_EXPANDING) {
+                        atomicAdd(&diagnostics.expansion_locked, 1u);
+                        lock_hits += 1u;
+                        // Mixed strategy to reduce hyperparams:
+                        // 50/50 coin: heads -> rollout now from this node; tails -> try sibling/random path.
+                        if (rand() < 0.5) {
+                            // Rollout from current node despite lock; keep VLs as is.
+                            sim_player = reconstruct_board_at_node(&board, &path, path_length);
+                            expanded_stop = true;
+                            break;
+                        } else {
+                            // Try a random READY sibling first; fallback to full retry.
+                            let span = info.num_children;
+                            var found = false;
+                            for (var r = 0u; r < 4u; r++) {
+                                let j = u32(rand() * f32(span));
+                                let alt = get_child_idx(current, j);
+                                if (alt != INVALID_INDEX && atomicLoad(&node_state[alt]) == NODE_STATE_READY) {
+                                    current = alt;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found) {
+                                continue;
+                            }
+                            // No ready sibling: retry selection from root; remove VLs along this path
+                            retry_selection = true;
+                        }
+                    } else {
+                        // Terminal or other state
+                        if (old_state == NODE_STATE_TERMINAL) {
+                            atomicAdd(&diagnostics.expansion_terminal, 1u);
+                            atomicStore(&node_state[current], NODE_STATE_TERMINAL);
+                            selection_reason = 1u;
+                            break;
+                        } else {
+                            atomicStore(&node_state[current], old_state);
+                        }
+                    }
+                }
+
+                if (retry_selection) {
+                    break;
+                }
+
+                if (expanded) {
+                    // Already broke if expanded_stop; safety
+                    break;
+                }
+
+                // Still no children: genuine no-children leaf
+                selection_reason = 2u;
+                break;
+            }
+
+            let child = select_best_child(current);
+            if (child == INVALID_INDEX) {
+                selection_reason = 3u;
+                break;
+            }
+
+            // Jitter: if child is expanding, try a random ready child to reduce lock contention
+            let child_state = atomicLoad(&node_state[child]);
+            if (child_state == NODE_STATE_EXPANDING && info.num_children > 1u) {
+                let span = info.num_children;
+                var picked = child;
+                // bounded retries
+                for (var r = 0u; r < 4u; r++) {
+                    let j = u32(rand() * f32(span));
+                    let alt = get_child_idx(current, j);
+                    if (alt != INVALID_INDEX && atomicLoad(&node_state[alt]) == NODE_STATE_READY) {
+                        picked = alt;
+                        break;
+                    }
+                }
+                current = picked;
+            } else {
+                current = child;
+            }
         }
+
+        if (selection_reason == 0u && path_length >= MAX_PATH_LENGTH) {
+            selection_reason = 4u;
+        }
+
+        leaf_idx = current;
+        leaf_player = node_info[leaf_idx].player_at_node;
+
+        if (retry_selection) {
+            // Remove virtual losses we added along this path before retrying
+            for (var i = 0u; i < path_length; i++) {
+                atomicAdd(&node_vl[path[i]], -1);
+            }
+            continue;
+        }
+
+        if (expanded_stop) {
+            // We expanded once; proceed directly to simulation from this node
+            sim_player = reconstruct_board_at_node(&board, &path, path_length);
+            break;
+        }
+
+        if (selection_reason == 1u) { atomicAdd(&diagnostics.selection_terminal, 1u); }
+        if (selection_reason == 2u) { atomicAdd(&diagnostics.selection_no_children, 1u); }
+        if (selection_reason == 3u) { atomicAdd(&diagnostics.selection_invalid_child, 1u); }
+        if (selection_reason == 4u) { atomicAdd(&diagnostics.selection_path_cap, 1u); }
+
+        // === PHASE 2: RECONSTRUCTION ===
+        sim_player = reconstruct_board_at_node(&board, &path, path_length);
+
+        break;
     }
-    
+
+    // If selection never succeeded (all retries hit expanding), we still have leaf_idx/path as last attempt.
+    // No extra handling needed; we fall through to simulation.
+
     // Check if terminal
     let my_moves = othello_count_valid_moves(&board, sim_player);
     let opp_moves = othello_count_valid_moves(&board, -sim_player);
@@ -613,6 +756,7 @@ fn mcts_othello_iteration(@builtin(global_invocation_id) global_id: vec3<u32>) {
     } else {
         // Run simulation
         result = othello_simulate(&board, sim_player);
+        atomicAdd(&diagnostics.rollouts, 1u);
         // Adjust result if sim_player != leaf_player
         if (sim_player != leaf_player) {
             result = 2 - result;

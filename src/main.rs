@@ -229,6 +229,18 @@ struct Args {
     /// MaxVisits (default) is more conservative and commonly used in practice.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     gpu_select_by_q: bool,
+
+    /// Batch size for GPU-Native MCTS (Othello only).
+    ///
+    /// Number of iterations to run per GPU dispatch.
+    /// Higher values reduce CPU overhead but may increase latency.
+    #[arg(long, default_value_t = 4096)]
+    gpu_native_batch_size: u32,
+
+    /// Virtual loss weight used by GPU-native MCTS (Othello).
+    /// Higher values force wider exploration and reduce stampede collisions.
+    #[arg(long, default_value_t = 5.0)]
+    gpu_virtual_loss_weight: f32,
 }
 
 /// Main entry point for the Parallel Multi-Game MCTS Engine
@@ -351,6 +363,8 @@ fn main() -> io::Result<()> {
             args.ai_only,
             args.cpu_select_by_q,
             args.gpu_select_by_q,
+            args.gpu_native_batch_size,
+            args.gpu_virtual_loss_weight,
         );
         
         return gui::run_gui(gui_app)

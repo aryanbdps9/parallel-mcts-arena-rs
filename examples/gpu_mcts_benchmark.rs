@@ -91,11 +91,12 @@ fn main() {
                 iterations_per_batch,
                 num_batches,
                 1.4,
+                1.0, // virtual loss weight
                 0, // No timeout, use batch limit
             );
             let elapsed = start.elapsed();
             
-            if let Some(((x, y), visits, q, _children, total_nodes)) = result {
+            if let Some(((x, y), visits, q, _children, total_nodes, _telemetry)) = result {
                 let total_iterations = iterations_per_batch * num_batches;
                 println!("Best move: ({}, {})", x, y);
                 println!("Total iterations: {}", total_iterations);

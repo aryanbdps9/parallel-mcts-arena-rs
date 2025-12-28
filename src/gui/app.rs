@@ -156,6 +156,7 @@ impl AIWorker {
         cpu_select_by_q: bool,
         gpu_select_by_q: bool,
         gpu_native_batch_size: u32,
+        gpu_virtual_loss_weight: f32,
     ) -> Self {
         use std::sync::mpsc::channel;
         use std::collections::HashMap;
@@ -239,15 +240,22 @@ impl AIWorker {
                                     new_mcts
                                 });
                                 
-                                if let Some(((x, y), visits, q, children_stats, total_nodes)) = mcts.search_gpu_native_othello(
+                                if let Some(((x, y), visits, q, children_stats, total_nodes, telemetry)) = mcts.search_gpu_native_othello(
                                     &board,
                                     current_player,
                                     &legal_moves_xy,
                                     gpu_native_batch_size,
                                     num_batches,
                                     gpu_exploration_constant as f32,
+                                    gpu_virtual_loss_weight,
                                     timeout,  // Add timeout parameter
                                 ) {
+                                    if telemetry.saturated {
+                                        eprintln!(
+                                            "[GPU-Native WARNING] Node pool saturated: {} / {} nodes",
+                                            telemetry.alloc_count_after, telemetry.node_capacity
+                                        );
+                                    }
                                     // Convert back to OthelloMove (row, col)
                                     let best_move = MoveWrapper::Othello(OthelloMove(y, x));
                                     
@@ -380,6 +388,9 @@ impl AIWorker {
                         if let Some(ref mut mcts) = mcts_gpu_native {
                             if let GameWrapper::Othello(ref othello_state) = new_state {
                                 if let MoveWrapper::Othello(ref mv) = move_made {
+                                    use std::sync::atomic::{AtomicU32, Ordering};
+                                    static ADVANCE_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+
                                     // Extract new board state
                                     let board_2d = othello_state.get_board();
                                     let mut new_board = [0i32; 64];
@@ -397,6 +408,31 @@ impl AIWorker {
                                         .collect();
                                     
                                     let new_player = othello_state.get_current_player();
+
+                                    // Log a few samples to debug GPU-native advance_root mismatches
+                                    if ADVANCE_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 8 {
+                                        // Build ASCII board for readability
+                                        let mut ascii_rows: Vec<String> = Vec::with_capacity(8);
+                                        for r in 0..8 {
+                                            let mut line = String::with_capacity(8);
+                                            for c in 0..8 {
+                                                let cell = new_board[r * 8 + c];
+                                                let ch = match cell {
+                                                    1 => 'X',
+                                                    -1 => 'O',
+                                                    _ => '.',
+                                                };
+                                                line.push(ch);
+                                            }
+                                            ascii_rows.push(line);
+                                        }
+                                        println!(
+                                            "[GPU-Native HOST] advance_root input current_player={} legal_moves={:?} board={:?}",
+                                            new_player,
+                                            legal_moves_xy,
+                                            ascii_rows
+                                        );
+                                    }
                                     
                                     // Advance GPU-native tree
                                     // mv.0 is row, mv.1 is col, but advance_root expects (x, y) = (col, row)
@@ -541,6 +577,8 @@ pub struct GuiApp {
     pub gpu_select_by_q: bool,
     /// Batch size for GPU-native MCTS (iterations per GPU dispatch)
     pub gpu_native_batch_size: u32,
+    /// Virtual loss weight for GPU-native PUCT
+    pub gpu_virtual_loss_weight: f32,
     pub selected_settings_index: usize,
 
     // UI state
@@ -586,6 +624,8 @@ impl GuiApp {
         ai_only: bool,
         cpu_select_by_q: bool,
         gpu_select_by_q: bool,
+        gpu_native_batch_size: u32,
+        gpu_virtual_loss_weight: f32,
     ) -> Self {
         let default_game = GameWrapper::Gomoku(GomokuState::new(board_size, line_size));
         let game_controller = GameController::new(default_game.clone());
@@ -603,7 +643,7 @@ impl GuiApp {
             game_status: GameStatus::InProgress,
             move_history: Vec::new(),
             game_renderer: renderer,
-            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q, 4096),
+            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q, gpu_native_batch_size, gpu_virtual_loss_weight),
             ai_thinking: false,
             ai_thinking_start: None,
             last_search_stats: None,
@@ -622,7 +662,8 @@ impl GuiApp {
             gpu_use_heuristic,
             cpu_select_by_q,
             gpu_select_by_q,
-            gpu_native_batch_size: 4096,
+            gpu_native_batch_size,
+            gpu_virtual_loss_weight,
             selected_settings_index: 0,
             needs_redraw: true,
             hover_button: None,
@@ -688,6 +729,7 @@ impl GuiApp {
             self.cpu_select_by_q,
             self.gpu_select_by_q,
             self.gpu_native_batch_size,
+            self.gpu_virtual_loss_weight,
         );
 
         // Check if AI should move first
@@ -996,23 +1038,27 @@ impl GuiApp {
                 let step = if delta > 0 { 0.1 } else { -0.1 };
                 self.gpu_exploration_constant = (self.gpu_exploration_constant + step).max(0.1).min(10.0);
             }
-            7 => { // Timeout
+            7 => { // GPU Virtual Loss Weight
+                let step = if delta > 0 { 0.5 } else { -0.5 };
+                self.gpu_virtual_loss_weight = (self.gpu_virtual_loss_weight + step).max(0.1).min(20.0);
+            }
+            8 => { // Timeout
                 self.timeout_secs = ((self.timeout_secs as i64 + delta as i64).max(1).min(600)) as u64;
             }
-            8 => { // Stats Interval
+            9 => { // Stats Interval
                 self.stats_interval_secs = ((self.stats_interval_secs as i64 + delta as i64).max(1).min(120)) as u64;
             }
-            9 => { // AI Only
+            10 => { // AI Only
                 self.ai_only = !self.ai_only;
             }
-            10 => { // Shared Tree
+            11 => { // Shared Tree
                 self.shared_tree = !self.shared_tree;
             }
-            11 => { // GPU Threads
+            12 => { // GPU Threads
                 let step = if delta > 0 { 256 } else { -256 };
                 self.gpu_threads = ((self.gpu_threads as i32 + step).max(256).min(16384)) as usize;
             }
-            12 => { // GPU-Native Batch Size
+            13 => { // GPU-Native Batch Size
                 let step = if delta > 0 { 1024 } else { -1024 };
                 self.gpu_native_batch_size = ((self.gpu_native_batch_size as i32 + step).max(1024).min(32768)) as u32;
             }
@@ -1031,6 +1077,7 @@ impl GuiApp {
             ("Search Iterations".to_string(), format!("{}K", self.search_iterations / 1000)),
             ("CPU Exploration".to_string(), format!("{:.2}", self.cpu_exploration_constant)),
             ("GPU Exploration".to_string(), format!("{:.2}", self.gpu_exploration_constant)),
+            ("GPU Virtual Loss".to_string(), format!("{:.2}", self.gpu_virtual_loss_weight)),
             ("Timeout (secs)".to_string(), self.timeout_secs.to_string()),
             ("Stats Interval (secs)".to_string(), self.stats_interval_secs.to_string()),
             ("AI Only Mode".to_string(), if self.ai_only { "Yes" } else { "No" }.to_string()),

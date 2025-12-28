@@ -427,7 +427,7 @@ unsafe extern "system" fn window_proc(
 
 /// Handle keyboard input
 fn handle_key(app: &mut GuiApp, vk: u16, hwnd: HWND) -> bool {
-    let num_settings = 14; // 12 settings + separator + Back
+    let num_settings = 15; // 13 settings + separator + Back
     let num_games = super::app::GameType::all().len() + 2; // games + Settings + Quit
     
     // Get window dimensions for layout calculations
@@ -512,11 +512,11 @@ fn handle_key(app: &mut GuiApp, vk: u16, hwnd: HWND) -> bool {
                     }
                 }
             } else if vk == VK_LEFT.0 {
-                if app.selected_settings_index < 12 {
+                if app.selected_settings_index < 13 {
                     app.adjust_setting(app.selected_settings_index, -1);
                 }
             } else if vk == VK_RIGHT.0 || vk == VK_SPACE.0 {
-                if app.selected_settings_index < 12 {
+                if app.selected_settings_index < 13 {
                     app.adjust_setting(app.selected_settings_index, 1);
                 }
             } else if vk == VK_RETURN.0 {

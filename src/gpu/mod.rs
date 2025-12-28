@@ -24,7 +24,14 @@ mod mcts_othello;
 pub use context::GpuContext;
 pub use accelerator::{GpuMctsAccelerator, GpuNodeData, GpuPuctResult, GpuSimulationParams};
 pub use mcts_gpu::{GpuMctsEngine, MctsParams, NodeInfo, WorkItem, TreeStats, ChildStats};
-pub use mcts_othello::{GpuOthelloMcts, MctsOthelloParams, OthelloNodeInfo, OthelloChildStats};
+pub use mcts_othello::{
+    GpuOthelloMcts,
+    MctsOthelloParams,
+    OthelloChildStats,
+    OthelloDiagnostics,
+    OthelloNodeInfo,
+    OthelloRunTelemetry,
+};
 
 /// Configuration for GPU acceleration
 #[derive(Debug, Clone)]

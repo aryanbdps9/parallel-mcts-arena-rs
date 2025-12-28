@@ -18,10 +18,10 @@
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
 use wgpu::{
-    util::DeviceExt, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType,
-    BufferUsages, CommandEncoderDescriptor, ComputePipeline, ComputePipelineDescriptor,
-    PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderStages,
+    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferUsages,
+    CommandEncoderDescriptor, ComputePipeline, ComputePipelineDescriptor, PipelineLayoutDescriptor,
+    ShaderModuleDescriptor, ShaderStages,
 };
 
 use super::context::GpuContext;
@@ -37,10 +37,7 @@ const INVALID_INDEX: u32 = 0xFFFFFFFF;
 const WORKGROUP_SIZE: u32 = 64;
 
 // Node states
-const NODE_STATE_EMPTY: u32 = 0;
-const NODE_STATE_EXPANDING: u32 = 1;
 const NODE_STATE_READY: u32 = 2;
-const NODE_STATE_TERMINAL: u32 = 3;
 
 // =============================================================================
 // Data Structures (must match shader layout exactly)
@@ -154,8 +151,8 @@ pub struct GpuMctsEngine {
 
     // Configuration
     max_nodes: u32,
-    max_iterations: u32,
-    board_size: u32,
+    _max_iterations: u32,
+    _board_size: u32,
 }
 
 impl GpuMctsEngine {
@@ -360,8 +357,8 @@ impl GpuMctsEngine {
             game_state_bind_group: None,
             stats_bind_group: None,
             max_nodes,
-            max_iterations,
-            board_size,
+            _max_iterations: max_iterations,
+            _board_size: board_size,
         }
     }
 
@@ -546,7 +543,6 @@ impl GpuMctsEngine {
     /// * `root_player` - Player whose turn it is at root (1 or -1)
     /// * `children_moves` - List of (move_id, prior) for each legal move
     pub fn init_tree(&mut self, root_player: i32, children_moves: &[(u32, f32)]) {
-        let device = self.context.device();
         let queue = self.context.queue();
 
         // Initialize root node
