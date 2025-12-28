@@ -886,8 +886,14 @@ impl<S: GameState> MCTS<S> {
 
             // --- Debug Stats Collection ---
             let root_visits = self.root.visits.load(Ordering::Relaxed);
-            let root_wins = self.root.wins.load(Ordering::Relaxed);
-            let root_q = if root_visits > 0 { (root_wins as f64 / root_visits as f64) / 2.0 } else { 0.0 };
+            // Derive RootQ from the best child's Q-value instead of the root's mixed stats
+            let root_q = children.values()
+                .map(|n| {
+                    let v = n.visits.load(Ordering::Relaxed);
+                    let w = n.wins.load(Ordering::Relaxed);
+                    if v > 0 { (w as f64 / v as f64) / 2.0 } else { 0.0 }
+                })
+                .fold(0.0, f64::max);
             
             // Stats for the chosen move (New Root)
             let (new_root_visits, new_root_q, new_root_u) = if let Some(node) = children.get(mv) {
@@ -1144,10 +1150,15 @@ impl<S: GameState> MCTS<S> {
                 "Root: {} visits, {} wins, {:.3} rate",
                 root_visits,
                 root_wins,
-                if root_visits > 0 {
-                    root_wins as f64 / root_visits as f64 / 2.0
-                } else {
-                    0.0
+                {
+                    let children = self.root.children.read();
+                    children.values()
+                        .map(|n| {
+                            let v = n.visits.load(Ordering::Relaxed);
+                            let w = n.wins.load(Ordering::Relaxed);
+                            if v > 0 { (w as f64 / v as f64) / 2.0 } else { 0.0 }
+                        })
+                        .fold(0.0, f64::max)
                 }
             ),
             format!(
@@ -1517,11 +1528,13 @@ impl<S: GameState> MCTS<S> {
             total_nodes: self.node_count.load(Ordering::Relaxed),
             root_visits,
             root_wins,
-            root_value: if root_visits > 0 {
-                root_wins / root_visits as f64 / 2.0
-            } else {
-                0.0
-            },
+            root_value: children.values()
+                .map(|n| {
+                    let v = n.visits.load(Ordering::Relaxed);
+                    let w = n.wins.load(Ordering::Relaxed);
+                    if v > 0 { (w as f64 / v as f64) / 2.0 } else { 0.0 }
+                })
+                .fold(0.0, f64::max),
             children_stats: self
                 .get_root_children_stats()
                 .into_iter()
@@ -1738,11 +1751,13 @@ impl<S: GameState> MCTS<S> {
             total_nodes: self.node_count.load(Ordering::Relaxed),
             root_visits,
             root_wins,
-            root_value: if root_visits > 0 {
-                root_wins / root_visits as f64 / 2.0
-            } else {
-                0.0
-            },
+            root_value: children.values()
+                .map(|n| {
+                    let v = n.visits.load(Ordering::Relaxed);
+                    let w = n.wins.load(Ordering::Relaxed);
+                    if v > 0 { (w as f64 / v as f64) / 2.0 } else { 0.0 }
+                })
+                .fold(0.0, f64::max),
             children_stats: self
                 .get_root_children_stats()
                 .into_iter()
@@ -1836,8 +1851,8 @@ impl<S: GameState> MCTS<S> {
             let parent_visits = current_node.visits.load(Ordering::Relaxed);
             // Use uniform prior probability for all moves since we don't have a neural network
             let prior_probability = 1.0 / moves_cache.len() as f64;
-
             // Determine virtual loss weight based on configuration
+
             // We use 1.0 for both CPU and GPU to ensure proper diversity.
             // For GPU with large batches, this is critical to prevent stampeding.
             #[cfg(feature = "gpu")]
