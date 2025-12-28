@@ -1094,10 +1094,17 @@ impl<S: GameState> MCTS<S> {
         expected_moves.sort_unstable();
 
         if actual_moves != expected_moves {
-            panic!(
-                "GPU-Native root children mismatch vs legal_moves. actual={:?} expected={:?}",
-                actual_moves, expected_moves
-            );
+            // Recompute legal moves from the supplied board/player to avoid stale caller data
+            let mut computed_moves = Self::compute_othello_legal_moves(board, current_player);
+            computed_moves.sort_unstable();
+
+            if actual_moves != computed_moves {
+                eprintln!(
+                    "[GPU-Native HOST WARN] root children mismatch; rebuilding tree. actual={:?} expected={:?} computed={:?}",
+                    actual_moves, expected_moves, computed_moves
+                );
+                gpu_mcts.init_tree(board, current_player, &computed_moves);
+            }
         }
 
         // Run iterations with timeout enforcement

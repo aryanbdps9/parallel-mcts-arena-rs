@@ -24,6 +24,8 @@ const MAX_CHILDREN: u32 = 64;
 const MAX_PATH_LENGTH: u32 = 128;
 const INVALID_INDEX: u32 = 0xFFFFFFFF;
 const WORKGROUP_SIZE: u32 = 64;
+#[allow(dead_code)]
+const NODE_STATE_EMPTY: u32 = 0;
 const NODE_STATE_READY: u32 = 2;
 
 // =============================================================================
@@ -114,6 +116,8 @@ pub struct GpuOthelloMcts {
     node_state_buffer: Buffer,
     children_indices_buffer: Buffer,
     children_priors_buffer: Buffer,
+    free_list_buffer: Buffer,
+    free_top_buffer: Buffer,
 
     // Execution state buffers
     params_buffer: Buffer,
@@ -131,7 +135,9 @@ pub struct GpuOthelloMcts {
     wins_staging: Buffer,
     node_info_staging: Buffer,
     children_staging: Buffer,
+    priors_staging: Buffer,
     alloc_staging: Buffer,
+    free_top_staging: Buffer,
     diagnostics_staging: Buffer,
 
     // Bind groups
@@ -145,6 +151,27 @@ pub struct GpuOthelloMcts {
 }
 
 impl GpuOthelloMcts {
+    /// Read a u32 counter from a buffer into a staging buffer (helper for diagnostics)
+    fn read_u32_counter(&self, src: &Buffer, staging: &Buffer) -> u32 {
+        let device = self.context.device();
+        let queue = self.context.queue();
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Read U32 Counter"),
+        });
+        encoder.copy_buffer_to_buffer(src, 0, staging, 0, 4);
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = staging.slice(..4);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+        let data = slice.get_mapped_range();
+        let val: u32 = *bytemuck::from_bytes(&data);
+        drop(data);
+        staging.unmap();
+        val
+    }
+
     /// Create a new GPU Othello MCTS engine
     pub fn new(context: Arc<GpuContext>, max_nodes: u32, max_iterations: u32) -> Self {
         let device = context.device();
@@ -224,7 +251,21 @@ impl GpuOthelloMcts {
         let children_priors_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Othello Children Priors"),
             size: (children_size * std::mem::size_of::<f32>()) as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let free_list_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Othello Free List"),
+            size: (max_nodes as usize * std::mem::size_of::<u32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let free_top_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Othello Free Top"),
+            size: 4,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -309,6 +350,13 @@ impl GpuOthelloMcts {
             mapped_at_creation: false,
         });
 
+        let priors_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Priors Staging"),
+            size: (MAX_CHILDREN as usize * std::mem::size_of::<f32>()) as u64,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let alloc_staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Alloc Counter Staging"),
             size: 4,
@@ -319,6 +367,13 @@ impl GpuOthelloMcts {
         let diagnostics_staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Diagnostics Staging"),
             size: std::mem::size_of::<OthelloDiagnostics>() as u64,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let free_top_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Free Top Staging"),
+            size: 4,
             usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -336,6 +391,8 @@ impl GpuOthelloMcts {
             node_state_buffer,
             children_indices_buffer,
             children_priors_buffer,
+            free_list_buffer,
+            free_top_buffer,
             params_buffer,
             work_items_buffer,
             paths_buffer,
@@ -347,7 +404,9 @@ impl GpuOthelloMcts {
             wins_staging,
             node_info_staging,
             children_staging,
+            priors_staging,
             alloc_staging,
+            free_top_staging,
             diagnostics_staging,
             node_pool_bind_group: None,
             execution_bind_group: None,
@@ -423,6 +482,26 @@ impl GpuOthelloMcts {
                 },
                 BindGroupLayoutEntry {
                     binding: 6,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 8,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
@@ -544,6 +623,14 @@ impl GpuOthelloMcts {
                     binding: 6,
                     resource: self.children_priors_buffer.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: 7,
+                    resource: self.free_list_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 8,
+                    resource: self.free_top_buffer.as_entire_binding(),
+                },
             ],
         }));
 
@@ -646,6 +733,10 @@ impl GpuOthelloMcts {
 
         queue.write_buffer(&self.children_indices_buffer, 0, bytemuck::cast_slice(&child_indices));
         queue.write_buffer(&self.children_priors_buffer, 0, bytemuck::cast_slice(&child_priors));
+
+        // Reset free list top
+        let zero_u32: u32 = 0;
+        queue.write_buffer(&self.free_top_buffer, 0, bytemuck::bytes_of(&zero_u32));
 
         // Set allocation counter
         let alloc_count = (legal_moves.len() + 1) as u32;
@@ -809,6 +900,116 @@ impl GpuOthelloMcts {
         self.visits_staging.unmap();
 
         visits
+    }
+
+    /// Rebuild root children from a provided legal move list on the current root board/player.
+    /// This resets root stats/state and allocates child nodes using the free list when possible.
+    fn rebuild_root_children_from_moves(
+        &mut self,
+        new_board: &[i32; 64],
+        new_player: i32,
+        legal_moves: &[(usize, usize)],
+    ) {
+        let device = self.context.device();
+        let queue = self.context.queue();
+        // Reset root info/stats/state
+        let child_count = legal_moves.len().min(MAX_CHILDREN as usize);
+        let rebuilt_root = OthelloNodeInfo {
+            parent_idx: INVALID_INDEX,
+            move_id: INVALID_INDEX,
+            num_children: child_count as u32,
+            player_at_node: new_player,
+        };
+        queue.write_buffer(&self.node_info_buffer, 0, bytemuck::bytes_of(&rebuilt_root));
+        queue.write_buffer(&self.node_visits_buffer, 0, bytemuck::bytes_of(&0i32));
+        queue.write_buffer(&self.node_wins_buffer, 0, bytemuck::bytes_of(&0i32));
+        queue.write_buffer(&self.node_vl_buffer, 0, bytemuck::bytes_of(&0i32));
+        queue.write_buffer(&self.node_state_buffer, 0, bytemuck::bytes_of(&NODE_STATE_READY));
+
+        // Update root board in case caller expects it fresh (idempotent if already set)
+        queue.write_buffer(&self.root_board_buffer, 0, bytemuck::cast_slice(new_board));
+
+        let mut root_child_indices = vec![INVALID_INDEX; MAX_CHILDREN as usize];
+        let mut root_child_priors = vec![0.0f32; MAX_CHILDREN as usize];
+        let uniform_prior = if child_count > 0 {
+            1.0f32 / child_count as f32
+        } else {
+            0.0f32
+        };
+
+        for (slot, &(cx, cy)) in legal_moves.iter().take(child_count).enumerate() {
+            // Prefer popping from free list; fallback to bump alloc_counter
+            let mut child_idx: Option<u32> = None;
+
+            // Pop from free list if available
+            let free_top_now = self.read_u32_counter(&self.free_top_buffer, &self.free_top_staging);
+            if free_top_now > 0 {
+                let pop_offset = (free_top_now - 1) as u64 * 4;
+
+                let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("Pop Free List (rebuild root)"),
+                });
+                encoder.copy_buffer_to_buffer(
+                    &self.free_list_buffer,
+                    pop_offset,
+                    &self.free_top_staging,
+                    0,
+                    4,
+                );
+                queue.submit(std::iter::once(encoder.finish()));
+
+                let slice = self.free_top_staging.slice(..4);
+                slice.map_async(wgpu::MapMode::Read, |_| {});
+                device.poll(wgpu::Maintain::Wait);
+                let data = slice.get_mapped_range();
+                child_idx = Some(*bytemuck::from_bytes(&data));
+                drop(data);
+                self.free_top_staging.unmap();
+
+                let new_top = free_top_now - 1;
+                queue.write_buffer(&self.free_top_buffer, 0, bytemuck::bytes_of(&new_top));
+            }
+
+            if child_idx.is_none() {
+                let alloc_now = self.read_u32_counter(&self.alloc_counter_buffer, &self.alloc_staging);
+                if alloc_now >= self.max_nodes {
+                    panic!("GPU-Native rebuild exhausted capacity (alloc_now={})", alloc_now);
+                }
+                let new_alloc = alloc_now + 1;
+                queue.write_buffer(&self.alloc_counter_buffer, 0, bytemuck::bytes_of(&new_alloc));
+                child_idx = Some(alloc_now);
+            }
+
+            let idx = child_idx.unwrap();
+            root_child_indices[slot] = idx;
+            root_child_priors[slot] = uniform_prior;
+
+            let move_id = (cy * 8 + cx) as u32;
+            let child_info = OthelloNodeInfo {
+                parent_idx: 0,
+                move_id,
+                num_children: 0,
+                player_at_node: -new_player,
+            };
+            let info_offset = idx as u64 * std::mem::size_of::<OthelloNodeInfo>() as u64;
+            queue.write_buffer(&self.node_info_buffer, info_offset, bytemuck::bytes_of(&child_info));
+
+            let stat_offset = idx as u64 * std::mem::size_of::<i32>() as u64;
+            queue.write_buffer(&self.node_visits_buffer, stat_offset, bytemuck::bytes_of(&0i32));
+            queue.write_buffer(&self.node_wins_buffer, stat_offset, bytemuck::bytes_of(&0i32));
+            queue.write_buffer(&self.node_vl_buffer, stat_offset, bytemuck::bytes_of(&0i32));
+            queue.write_buffer(&self.node_state_buffer, stat_offset, bytemuck::bytes_of(&NODE_STATE_READY));
+
+            // Clear child slots/prior array for the new node
+            let child_off = idx as u64 * MAX_CHILDREN as u64 * 4;
+            let cleared = vec![INVALID_INDEX; MAX_CHILDREN as usize];
+            queue.write_buffer(&self.children_indices_buffer, child_off, bytemuck::cast_slice(&cleared));
+            let zero_priors = vec![0.0f32; MAX_CHILDREN as usize];
+            queue.write_buffer(&self.children_priors_buffer, child_off, bytemuck::cast_slice(&zero_priors));
+        }
+
+        queue.write_buffer(&self.children_indices_buffer, 0, bytemuck::cast_slice(&root_child_indices));
+        queue.write_buffer(&self.children_priors_buffer, 0, bytemuck::cast_slice(&root_child_priors));
     }
 
     /// Read a lightweight hash of the GPU root board for drift detection
@@ -1426,8 +1627,9 @@ impl GpuOthelloMcts {
         new_player: i32,
         new_legal_moves: &[(usize, usize)],
     ) -> bool {
-        let device = self.context.device();
-        let queue = self.context.queue();
+        let context = self.context.clone();
+        let device = context.device();
+        let queue = context.queue();
         let target_move_id = (move_y * 8 + move_x) as u32;
 
         // Early capacity guard: if allocator is near exhaustion, abort reuse
@@ -1479,6 +1681,14 @@ impl GpuOthelloMcts {
         if root_info.num_children == 0 {
             panic!("GPU-Native advance_root: root has no children; aborting reuse");
         }
+
+        // Diagnostics: log entry state (alloc counter + free list size)
+        let alloc_before = self.read_u32_counter(&self.alloc_counter_buffer, &self.alloc_staging);
+        let free_top_before = self.read_u32_counter(&self.free_top_buffer, &self.free_top_staging);
+        eprintln!(
+            "[GPU-Native DIAG] advance_root start alloc={} free_top={} root_children={} target=({}, {})",
+            alloc_before, free_top_before, root_info.num_children, move_x, move_y
+        );
 
         let num_children = root_info.num_children.min(MAX_CHILDREN) as usize;
 
@@ -1562,8 +1772,8 @@ impl GpuOthelloMcts {
                 let gpu_ascii = Self::board_to_ascii(&root_board_vals);
                 let simulated_ascii = Self::board_to_ascii(&simulated_next);
                 let host_ascii = Self::board_to_ascii(new_board);
-                eprintln!(
-                    "[GPU-Native] advance_root drift detected; rebuilding tree. gpu_hash={} simulated_hash={} host_hash={} move=({}, {}) gpu_board={:?} simulated_board={:?} host_board={:?}",
+                panic!(
+                    "GPU-Native advance_root drift detected; refusing reuse. gpu_hash={} simulated_hash={} host_hash={} move=({}, {}) gpu_board={:?} simulated_board={:?} host_board={:?}",
                     gpu_hash,
                     simulated_hash,
                     host_hash,
@@ -1573,10 +1783,6 @@ impl GpuOthelloMcts {
                     simulated_ascii,
                     host_ascii
                 );
-
-                // Reinitialize tree to eliminate drift
-                self.init_tree(new_board, new_player, new_legal_moves);
-                return false;
             }
         } else {
             // Illegal move w.r.t GPU root board; rebuild to stay safe
@@ -1584,8 +1790,8 @@ impl GpuOthelloMcts {
             let host_hash = Self::fnv_hash_board(new_board);
             let gpu_ascii = Self::board_to_ascii(&root_board_vals);
             let host_ascii = Self::board_to_ascii(new_board);
-            eprintln!(
-                "[GPU-Native] advance_root move illegal on GPU root board; rebuilding tree. gpu_hash={} host_hash={} move=({}, {}) gpu_board={:?} host_board={:?}",
+            panic!(
+                "GPU-Native advance_root move illegal on GPU root board; refusing reuse. gpu_hash={} host_hash={} move=({}, {}) gpu_board={:?} host_board={:?}",
                 gpu_hash,
                 host_hash,
                 move_x,
@@ -1593,8 +1799,6 @@ impl GpuOthelloMcts {
                 gpu_ascii,
                 host_ascii
             );
-            self.init_tree(new_board, new_player, new_legal_moves);
-            return false;
         }
 
         // Build actual move set from GPU children for invariant checking (current root position)
@@ -1644,7 +1848,6 @@ impl GpuOthelloMcts {
         // Find the child with the matching move
         let mut found_child_idx: Option<u32> = None;
         let mut found_child_slot: Option<usize> = None;
-        let mut found_child_num_children: u32 = 0;
 
         for (i, &child_idx) in children.iter().enumerate() {
             if child_idx == INVALID_INDEX {
@@ -1653,7 +1856,6 @@ impl GpuOthelloMcts {
             if children_info[i].move_id == target_move_id {
                 found_child_idx = Some(child_idx);
                 found_child_slot = Some(i);
-                found_child_num_children = children_info[i].num_children;
                 break;
             }
         }
@@ -1662,8 +1864,9 @@ impl GpuOthelloMcts {
 
         match found_child_idx {
             Some(child_idx) => {
-                // Found the child! Copy its subtree to become the new root
-                // Read child's stats using pre-allocated staging buffers
+                // Found the child. Re-root in place: keep its subtree/stats, invalidate siblings.
+
+                // Optional logging of child stats
                 let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
                     label: Some("Read Child Stats"),
                 });
@@ -1688,19 +1891,26 @@ impl GpuOthelloMcts {
                 drop(data);
                 self.wins_staging.unmap();
 
-                println!("[GPU-Native] Advancing root to child {} (move {},{}) with {} visits, {} wins",
-                    child_idx, move_x, move_y, child_visits, child_wins);
+                println!(
+                    "[GPU-Native] Advancing root to child {} (move {},{}) with {} visits, {} wins",
+                    child_idx, move_x, move_y, child_visits, child_wins
+                );
 
-                // Update root board
+                // Update root board for the new position
                 queue.write_buffer(&self.root_board_buffer, 0, bytemuck::cast_slice(new_board));
 
-                // Read child's children info using pre-allocated children_staging
+                // Read the chosen child's children indices for re-parenting
                 let child_children_offset = child_idx as u64 * MAX_CHILDREN as u64 * 4;
-
                 let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
                     label: Some("Read Child Children"),
                 });
-                encoder.copy_buffer_to_buffer(&self.children_indices_buffer, child_children_offset, &self.children_staging, 0, (MAX_CHILDREN as usize * 4) as u64);
+                encoder.copy_buffer_to_buffer(
+                    &self.children_indices_buffer,
+                    child_children_offset,
+                    &self.children_staging,
+                    0,
+                    (MAX_CHILDREN as usize * 4) as u64,
+                );
                 queue.submit(std::iter::once(encoder.finish()));
 
                 let slice = self.children_staging.slice(..(MAX_CHILDREN as usize * 4) as u64);
@@ -1712,114 +1922,310 @@ impl GpuOthelloMcts {
                 drop(data);
                 self.children_staging.unmap();
 
-                // Filter out invalid children based on num_children
-                // The buffer might contain garbage/zeros beyond num_children
-                let valid_count = found_child_num_children.min(MAX_CHILDREN) as usize;
-                
-                // Ensure the vector is clean: keep valid ones, set rest to INVALID_INDEX
-                for i in 0..MAX_CHILDREN as usize {
-                    if i >= valid_count {
-                        child_children[i] = INVALID_INDEX;
-                    }
+                let selected_child_info = children_info[found_child_slot.unwrap()];
+                let valid_child_count = selected_child_info.num_children.min(MAX_CHILDREN);
+
+                for slot in valid_child_count as usize..MAX_CHILDREN as usize {
+                    child_children[slot] = INVALID_INDEX;
                 }
 
-                // Count valid grandchildren
-                let grandchild_count = child_children.iter().filter(|&&idx| idx != INVALID_INDEX).count() as u32;
-
-                // Create new root info (the child becomes root)
+                // New root info copied from child, but root metadata adjusted
                 let new_root_info = OthelloNodeInfo {
-                    parent_idx: INVALID_INDEX, // Root has no parent
-                    move_id: INVALID_INDEX, // Root has no associated move
-                    num_children: if grandchild_count > 0 { grandchild_count } else { new_legal_moves.len() as u32 },
+                    parent_idx: INVALID_INDEX,
+                    move_id: INVALID_INDEX,
+                    num_children: valid_child_count,
                     player_at_node: new_player,
                 };
-
-                // Write new root info to index 0
                 queue.write_buffer(&self.node_info_buffer, 0, bytemuck::bytes_of(&new_root_info));
+
+                // Write root stats from the chosen child (avoid same-buffer copies)
                 queue.write_buffer(&self.node_visits_buffer, 0, bytemuck::bytes_of(&child_visits));
                 queue.write_buffer(&self.node_wins_buffer, 0, bytemuck::bytes_of(&child_wins));
                 queue.write_buffer(&self.node_vl_buffer, 0, bytemuck::bytes_of(&0i32));
                 queue.write_buffer(&self.node_state_buffer, 0, bytemuck::bytes_of(&NODE_STATE_READY));
 
-                // Rebuild children fresh for the new position to avoid stale/mismatched subtree
-                let opposite_player = -new_player;
-                let uniform_prior = 1.0 / new_legal_moves.len().max(1) as f32;
+                // Copy child children/prior arrays into root slot 0
+                queue.write_buffer(&self.children_indices_buffer, 0, bytemuck::cast_slice(&child_children));
 
-                // Reset root metadata/stats to match the new legal move set
-                let refreshed_root_info = OthelloNodeInfo {
-                    parent_idx: INVALID_INDEX,
-                    move_id: INVALID_INDEX,
-                    num_children: new_legal_moves.len().min(MAX_CHILDREN as usize) as u32,
-                    player_at_node: new_player,
-                };
-                queue.write_buffer(&self.node_info_buffer, 0, bytemuck::bytes_of(&refreshed_root_info));
-                queue.write_buffer(&self.node_visits_buffer, 0, bytemuck::bytes_of(&0i32));
-                queue.write_buffer(&self.node_wins_buffer, 0, bytemuck::bytes_of(&0i32));
-                queue.write_buffer(&self.node_vl_buffer, 0, bytemuck::bytes_of(&0i32));
-                queue.write_buffer(&self.node_state_buffer, 0, bytemuck::bytes_of(&NODE_STATE_READY));
-                
-                // Read current alloc counter
-                let alloc_staging = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Alloc Staging"),
-                    size: 4,
-                    usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
+                // Read priors for this child via staging then write to root region to avoid same-buffer copy
+                let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("Read Child Priors"),
                 });
-                let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
-                encoder.copy_buffer_to_buffer(&self.alloc_counter_buffer, 0, &alloc_staging, 0, 4);
+                encoder.copy_buffer_to_buffer(
+                    &self.children_priors_buffer,
+                    child_children_offset,
+                    &self.priors_staging,
+                    0,
+                    (MAX_CHILDREN as usize * std::mem::size_of::<f32>()) as u64,
+                );
                 queue.submit(std::iter::once(encoder.finish()));
 
-                let slice = alloc_staging.slice(..);
+                let slice = self.priors_staging.slice(..(MAX_CHILDREN as usize * std::mem::size_of::<f32>()) as u64);
                 slice.map_async(wgpu::MapMode::Read, |_| {});
                 device.poll(wgpu::Maintain::Wait);
                 let data = slice.get_mapped_range();
-                let mut alloc_count: u32 = *bytemuck::from_bytes(&data);
+                let priors: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
                 drop(data);
-                alloc_staging.unmap();
+                self.priors_staging.unmap();
 
-                let mut new_child_indices = vec![INVALID_INDEX; MAX_CHILDREN as usize];
-                let mut new_child_priors = vec![0.0f32; MAX_CHILDREN as usize];
+                queue.write_buffer(&self.children_priors_buffer, 0, bytemuck::cast_slice(&priors));
 
-                for (i, &(x, y)) in new_legal_moves.iter().enumerate() {
-                    if i >= MAX_CHILDREN as usize {
-                        break;
+                // Re-parent grandchildren to root (parent_idx = 0)
+                for &gc_idx in child_children.iter().take(valid_child_count as usize) {
+                    if gc_idx == INVALID_INDEX {
+                        continue;
                     }
-
-                    if alloc_count >= self.max_nodes {
-                        panic!("GPU-Native out of nodes during advance_root (alloc_count={} max_nodes={})", alloc_count, self.max_nodes);
-                    }
-
-                    let new_child_idx = alloc_count;
-                    alloc_count += 1;
-                    let move_id = (y * 8 + x) as u32;
-
-                    let child_info = OthelloNodeInfo {
-                        parent_idx: 0,
-                        move_id,
-                        num_children: 0,
-                        player_at_node: opposite_player,
-                    };
-
-                    let offset = new_child_idx as usize * std::mem::size_of::<OthelloNodeInfo>();
-                    if offset as u64 + std::mem::size_of::<OthelloNodeInfo>() as u64 <= self.node_info_buffer.size() {
-                        queue.write_buffer(&self.node_info_buffer, offset as u64, bytemuck::bytes_of(&child_info));
-                    }
-
-                    let stat_offset = new_child_idx as usize * std::mem::size_of::<i32>();
-                    if stat_offset as u64 + 4 <= self.node_visits_buffer.size() {
-                        queue.write_buffer(&self.node_visits_buffer, stat_offset as u64, bytemuck::bytes_of(&0i32));
-                        queue.write_buffer(&self.node_wins_buffer, stat_offset as u64, bytemuck::bytes_of(&0i32));
-                        queue.write_buffer(&self.node_vl_buffer, stat_offset as u64, bytemuck::bytes_of(&0i32));
-                        queue.write_buffer(&self.node_state_buffer, stat_offset as u64, bytemuck::bytes_of(&NODE_STATE_READY));
-                    }
-
-                    new_child_indices[i] = new_child_idx;
-                    new_child_priors[i] = uniform_prior;
+                    let info_offset = gc_idx as u64 * std::mem::size_of::<OthelloNodeInfo>() as u64;
+                    let parent_zero: u32 = 0;
+                    queue.write_buffer(&self.node_info_buffer, info_offset, bytemuck::bytes_of(&parent_zero));
                 }
 
-                queue.write_buffer(&self.children_indices_buffer, 0, bytemuck::cast_slice(&new_child_indices));
-                queue.write_buffer(&self.children_priors_buffer, 0, bytemuck::cast_slice(&new_child_priors));
-                queue.write_buffer(&self.alloc_counter_buffer, 0, bytemuck::bytes_of(&alloc_count));
+                let mut log_kept_children = valid_child_count;
+
+                // Invalidate siblings and their subtrees using a single bulk traversal to avoid thousands of GPU round-trips
+                let nodes_used = alloc_before.min(self.max_nodes);
+                let children_bytes = nodes_used as u64
+                    * MAX_CHILDREN as u64
+                    * std::mem::size_of::<u32>() as u64;
+                let staging_limit: u64 = 256 * 1024 * 1024; // 256 MB safety cap
+
+                // If the tree is too large to stage cheaply, fall back to rebuild
+                if children_bytes > staging_limit {
+                    eprintln!(
+                        "[GPU-Native WARN] advance_root skipping reuse: children_bytes={} exceeds staging_limit={}; rebuilding",
+                        children_bytes, staging_limit
+                    );
+                    return false;
+                }
+
+                // Stage the active portion of the children buffer once
+                let children_staging_full = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Children Staging Full (advance_root)"),
+                    size: children_bytes,
+                    usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+
+                {
+                    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                        label: Some("Copy Children Buffer (advance_root)"),
+                    });
+                    encoder.copy_buffer_to_buffer(
+                        &self.children_indices_buffer,
+                        0,
+                        &children_staging_full,
+                        0,
+                        children_bytes,
+                    );
+                    queue.submit(std::iter::once(encoder.finish()));
+                }
+
+                let slice = children_staging_full.slice(..children_bytes);
+                slice.map_async(wgpu::MapMode::Read, |_| {});
+                device.poll(wgpu::Maintain::Wait);
+                let data = slice.get_mapped_range();
+                let all_children: &[u32] = bytemuck::cast_slice(&data);
+
+                let mut reachable = vec![false; nodes_used as usize];
+                reachable[0] = true; // root stays at index 0
+
+                let mut stack: Vec<u32> = Vec::new();
+                for &gc_idx in child_children.iter().take(valid_child_count as usize) {
+                    if gc_idx != INVALID_INDEX && (gc_idx as usize) < reachable.len() {
+                        stack.push(gc_idx);
+                    }
+                }
+
+                while let Some(n_idx) = stack.pop() {
+                    let n_usize = n_idx as usize;
+                    if n_usize >= reachable.len() {
+                        continue;
+                    }
+                    if reachable[n_usize] {
+                        continue;
+                    }
+                    reachable[n_usize] = true;
+
+                    let base = n_usize * MAX_CHILDREN as usize;
+                    let end = base + MAX_CHILDREN as usize;
+                    for &c in &all_children[base..end] {
+                        if c != INVALID_INDEX {
+                            stack.push(c);
+                        }
+                    }
+                }
+
+                // Collect everything not reachable (skip root at 0)
+                let mut freed_indices: Vec<u32> = Vec::new();
+                for idx in 1..nodes_used {
+                    if !reachable[idx as usize] {
+                        freed_indices.push(idx);
+                    }
+                }
+
+                drop(data);
+                children_staging_full.unmap();
+
+                // Push freed indices onto free list (host-managed stack)
+                if !freed_indices.is_empty() {
+                    // Read current free_top
+                    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                        label: Some("Read Free Top"),
+                    });
+                    encoder.copy_buffer_to_buffer(&self.free_top_buffer, 0, &self.free_top_staging, 0, 4);
+                    queue.submit(std::iter::once(encoder.finish()));
+
+                    let slice = self.free_top_staging.slice(..4);
+                    slice.map_async(wgpu::MapMode::Read, |_| {});
+                    device.poll(wgpu::Maintain::Wait);
+                    let data = slice.get_mapped_range();
+                    let free_top_now: u32 = *bytemuck::from_bytes(&data);
+                    drop(data);
+                    self.free_top_staging.unmap();
+
+                    let capacity_left = self.max_nodes.saturating_sub(free_top_now);
+                    let to_write = capacity_left.min(freed_indices.len() as u32) as usize;
+
+                    if to_write > 0 {
+                        let write_offset = free_top_now as u64 * 4;
+                        queue.write_buffer(
+                            &self.free_list_buffer,
+                            write_offset,
+                            bytemuck::cast_slice(&freed_indices[..to_write]),
+                        );
+                        let new_top = free_top_now.saturating_add(to_write as u32);
+                        queue.write_buffer(&self.free_top_buffer, 0, bytemuck::bytes_of(&new_top));
+                    }
+                }
+
+                // If the selected child was not expanded (no grandchildren), rebuild children from computed legal moves of the new root
+                // This same rebuild helper is also used below when a mismatch is detected.
+                if valid_child_count == 0 {
+                    let legal_moves = Self::compute_othello_legal_moves_host(new_board, new_player);
+                    self.rebuild_root_children_from_moves(new_board, new_player, &legal_moves);
+                    log_kept_children = legal_moves.len().min(MAX_CHILDREN as usize) as u32;
+                }
+
+                // Consistency check: ensure current root children match legal moves of the new root board/player
+                {
+                    // Read root info and children indices
+                    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                        label: Some("Read Root Info (post-advance check)"),
+                    });
+                    encoder.copy_buffer_to_buffer(
+                        &self.node_info_buffer,
+                        0,
+                        &self.node_info_staging,
+                        0,
+                        std::mem::size_of::<OthelloNodeInfo>() as u64,
+                    );
+                    queue.submit(std::iter::once(encoder.finish()));
+
+                    let slice = self
+                        .node_info_staging
+                        .slice(..std::mem::size_of::<OthelloNodeInfo>() as u64);
+                    slice.map_async(wgpu::MapMode::Read, |_| {});
+                    device.poll(wgpu::Maintain::Wait);
+                    let data = slice.get_mapped_range();
+                    let root_info_now: OthelloNodeInfo = *bytemuck::from_bytes(&data);
+                    drop(data);
+                    self.node_info_staging.unmap();
+
+                    let child_slots = root_info_now.num_children.min(MAX_CHILDREN) as usize;
+                    if child_slots > 0 {
+                        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                            label: Some("Read Root Children (post-advance check)"),
+                        });
+                        encoder.copy_buffer_to_buffer(
+                            &self.children_indices_buffer,
+                            0,
+                            &self.children_staging,
+                            0,
+                            (child_slots * std::mem::size_of::<u32>()) as u64,
+                        );
+                        queue.submit(std::iter::once(encoder.finish()));
+
+                        let slice = self.children_staging.slice(..(child_slots * 4) as u64);
+                        slice.map_async(wgpu::MapMode::Read, |_| {});
+                        device.poll(wgpu::Maintain::Wait);
+                        let data = slice.get_mapped_range();
+                        let child_indices: Vec<u32> = bytemuck::cast_slice(&data[..child_slots * 4]).to_vec();
+                        drop(data);
+                        self.children_staging.unmap();
+
+                        // Read child infos for move_ids
+                        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                            label: Some("Read Root Children Info (post-advance check)"),
+                        });
+                        for (i, &cidx) in child_indices.iter().enumerate() {
+                            if cidx == INVALID_INDEX {
+                                continue;
+                            }
+                            let src_off = cidx as u64 * std::mem::size_of::<OthelloNodeInfo>() as u64;
+                            let dst_off = i as u64 * std::mem::size_of::<OthelloNodeInfo>() as u64;
+                            encoder.copy_buffer_to_buffer(
+                                &self.node_info_buffer,
+                                src_off,
+                                &self.node_info_staging,
+                                dst_off,
+                                std::mem::size_of::<OthelloNodeInfo>() as u64,
+                            );
+                        }
+                        queue.submit(std::iter::once(encoder.finish()));
+
+                        let slice = self
+                            .node_info_staging
+                            .slice(..(child_slots * std::mem::size_of::<OthelloNodeInfo>()) as u64);
+                        slice.map_async(wgpu::MapMode::Read, |_| {});
+                        device.poll(wgpu::Maintain::Wait);
+                        let data = slice.get_mapped_range();
+                        let infos: &[OthelloNodeInfo] = bytemuck::cast_slice(&data);
+
+                        let mut actual_moves: Vec<(usize, usize)> = Vec::with_capacity(child_slots);
+                        for i in 0..child_slots {
+                            if child_indices[i] == INVALID_INDEX {
+                                continue;
+                            }
+                            let mv = infos[i].move_id;
+                            if mv != INVALID_INDEX {
+                                actual_moves.push(((mv % 8) as usize, (mv / 8) as usize));
+                            }
+                        }
+
+                        drop(data);
+                        self.node_info_staging.unmap();
+
+                        let mut expected_moves = Self::compute_othello_legal_moves_host(new_board, new_player);
+                        actual_moves.sort_unstable();
+                        expected_moves.sort_unstable();
+
+                        if actual_moves != expected_moves {
+                            eprintln!(
+                                "[GPU-Native WARN] advance_root detected root/legals mismatch; rebuilding root children. actual={:?} expected={:?}",
+                                actual_moves, expected_moves
+                            );
+                            self.rebuild_root_children_from_moves(new_board, new_player, &expected_moves);
+                            log_kept_children = expected_moves.len().min(MAX_CHILDREN as usize) as u32;
+                        }
+                    } else {
+                        // No children present; rebuild from legal moves
+                        let expected_moves = Self::compute_othello_legal_moves_host(new_board, new_player);
+                        self.rebuild_root_children_from_moves(new_board, new_player, &expected_moves);
+                        log_kept_children = expected_moves.len().min(MAX_CHILDREN as usize) as u32;
+                    }
+                }
+
+                // Diagnostics: log exit state
+                let alloc_after = self.read_u32_counter(&self.alloc_counter_buffer, &self.alloc_staging);
+                let free_top_after = self.read_u32_counter(&self.free_top_buffer, &self.free_top_staging);
+                eprintln!(
+                    "[GPU-Native DIAG] advance_root end alloc={} free_top={} kept_children={} freed_nodes={}"
+                        ,
+                    alloc_after,
+                    free_top_after,
+                    log_kept_children,
+                    freed_indices.len()
+                );
 
                 self.create_bind_groups();
                 true

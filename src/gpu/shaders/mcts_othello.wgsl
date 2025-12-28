@@ -93,6 +93,8 @@ struct Diagnostics {
 @group(0) @binding(4) var<storage, read_write> node_state: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> children_indices: array<u32>;
 @group(0) @binding(6) var<storage, read_write> children_priors: array<f32>;
+@group(0) @binding(7) var<storage, read_write> free_list: array<u32>;
+@group(0) @binding(8) var<storage, read_write> free_top: atomic<u32>;
 
 // =============================================================================
 // Buffer Bindings - Group 1: Execution State
@@ -313,6 +315,20 @@ fn select_best_child(node_idx: u32) -> u32 {
 
 // Allocate a new node atomically
 fn allocate_node() -> u32 {
+    // Try pop from free list first
+    loop {
+        let top = atomicLoad(&free_top);
+        if (top == 0u) {
+            break;
+        }
+        let new_top = top - 1u;
+        let prev = atomicCompareExchangeWeak(&free_top, top, new_top);
+        if (prev.old_value == top && prev.exchanged) {
+            let idx = free_list[new_top];
+            return idx;
+        }
+    }
+
     let idx = atomicAdd(&alloc_counter, 1u);
     if (idx >= params.max_nodes) {
         atomicSub(&alloc_counter, 1u);
