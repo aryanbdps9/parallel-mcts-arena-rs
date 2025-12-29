@@ -157,6 +157,7 @@ impl AIWorker {
         gpu_select_by_q: bool,
         gpu_native_batch_size: u32,
         gpu_virtual_loss_weight: f32,
+        gpu_temperature: f32,
     ) -> Self {
         use std::sync::mpsc::channel;
         use std::collections::HashMap;
@@ -248,6 +249,7 @@ impl AIWorker {
                                     num_batches,
                                     gpu_exploration_constant as f32,
                                     gpu_virtual_loss_weight,
+                                    gpu_temperature,
                                     timeout,  // Add timeout parameter
                                 ) {
                                     if telemetry.saturated {
@@ -579,6 +581,8 @@ pub struct GuiApp {
     pub gpu_native_batch_size: u32,
     /// Virtual loss weight for GPU-native PUCT
     pub gpu_virtual_loss_weight: f32,
+    /// Temperature for GPU-native softmax selection
+    pub gpu_temperature: f32,
     pub selected_settings_index: usize,
 
     // UI state
@@ -626,6 +630,7 @@ impl GuiApp {
         gpu_select_by_q: bool,
         gpu_native_batch_size: u32,
         gpu_virtual_loss_weight: f32,
+        gpu_temperature: f32,
     ) -> Self {
         let default_game = GameWrapper::Gomoku(GomokuState::new(board_size, line_size));
         let game_controller = GameController::new(default_game.clone());
@@ -643,7 +648,7 @@ impl GuiApp {
             game_status: GameStatus::InProgress,
             move_history: Vec::new(),
             game_renderer: renderer,
-            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q, gpu_native_batch_size, gpu_virtual_loss_weight),
+            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q, gpu_native_batch_size, gpu_virtual_loss_weight, gpu_temperature),
             ai_thinking: false,
             ai_thinking_start: None,
             last_search_stats: None,
@@ -664,6 +669,7 @@ impl GuiApp {
             gpu_select_by_q,
             gpu_native_batch_size,
             gpu_virtual_loss_weight,
+            gpu_temperature,
             selected_settings_index: 0,
             needs_redraw: true,
             hover_button: None,
@@ -730,6 +736,7 @@ impl GuiApp {
             self.gpu_select_by_q,
             self.gpu_native_batch_size,
             self.gpu_virtual_loss_weight,
+            self.gpu_temperature,
         );
 
         // Check if AI should move first

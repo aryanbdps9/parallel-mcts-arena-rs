@@ -241,6 +241,12 @@ struct Args {
     /// Higher values force wider exploration and reduce stampede collisions.
     #[arg(long, default_value_t = 5.0)]
     gpu_virtual_loss_weight: f32,
+
+    /// Temperature for softmax selection in GPU-native MCTS (Othello).
+    /// Lower values make selection more greedy, higher values more random.
+    /// Typical range: 0.01 (very greedy) to 1.0 (more exploratory).
+    #[arg(long, default_value_t = 0.6)]
+    gpu_temperature: f32,
 }
 
 /// Main entry point for the Parallel Multi-Game MCTS Engine
@@ -365,6 +371,7 @@ fn main() -> io::Result<()> {
             args.gpu_select_by_q,
             args.gpu_native_batch_size,
             args.gpu_virtual_loss_weight,
+            args.gpu_temperature,
         );
         
         return gui::run_gui(gui_app)

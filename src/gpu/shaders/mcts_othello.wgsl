@@ -42,9 +42,9 @@ struct MctsParams {
     board_width: u32,
     board_height: u32,
     game_type: u32,
+    temperature: f32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 }
 
 struct NodeInfo {
@@ -360,8 +360,9 @@ fn calculate_puct(parent_idx: u32, child_slot: u32) -> f32 {
         return params.exploration * prior * parent_sqrt;
     }
     
-    // Q-value (parent perspective): child_wins / (2 * effective_visits)
-    // The wins are stored from parent's perspective (the player who made the move TO this child)
+    // Q-value: child_wins / (2 * effective_visits)
+    // The wins are stored from the perspective of the player who made the move TO this child
+    // This represents how good this move was for the parent (who made the move)
     let q = f32(child_wins) / (2.0 * effective_visits);
     
     // Exploration term
@@ -371,7 +372,7 @@ fn calculate_puct(parent_idx: u32, child_slot: u32) -> f32 {
     return q + u;
 }
 
-// Select best child using PUCT
+// Select child by sampling from probability distribution based on PUCT scores
 fn select_best_child(parent_idx: u32) -> u32 {
     let info = node_info[parent_idx];
     let num_children = info.num_children;
@@ -380,18 +381,43 @@ fn select_best_child(parent_idx: u32) -> u32 {
         return INVALID_INDEX;
     }
     
-    var best_score = -1e9;
-    var best_child = INVALID_INDEX;
+    // Calculate PUCT scores for all children
+    var scores: array<f32, 64>;
+    var max_score = -1e9;
     
     for (var i = 0u; i < num_children; i++) {
-        let score = calculate_puct(parent_idx, i);
-        if (score > best_score) {
-            best_score = score;
-            best_child = get_child_idx(parent_idx, i);
+        scores[i] = calculate_puct(parent_idx, i);
+        max_score = max(max_score, scores[i]);
+    }
+    
+    // Convert to probabilities using softmax with temperature (subtract max for numerical stability)
+    var probs: array<f32, 64>;
+    var sum_exp = 0.0;
+    let temp = max(params.temperature, 0.001);  // Prevent division by zero
+    
+    for (var i = 0u; i < num_children; i++) {
+        probs[i] = exp((scores[i] - max_score) / temp);
+        sum_exp += probs[i];
+    }
+    
+    // Normalize probabilities
+    for (var i = 0u; i < num_children; i++) {
+        probs[i] /= sum_exp;
+    }
+    
+    // Sample from cumulative distribution
+    let rand_val = rand_f32();
+    var cumulative = 0.0;
+    
+    for (var i = 0u; i < num_children; i++) {
+        cumulative += probs[i];
+        if (rand_val <= cumulative) {
+            return get_child_idx(parent_idx, i);
         }
     }
     
-    return best_child;
+    // Fallback (should rarely happen due to floating point precision)
+    return get_child_idx(parent_idx, num_children - 1u);
 }
 
 // Try to allocate a new node
@@ -764,18 +790,87 @@ fn mcts_othello_iteration(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Increment visits
         atomicAdd(&node_visits[node_idx], 1);
         
-        // Calculate reward from parent's perspective
+        // Calculate reward from perspective of player who moved TO this node
         // The player who moved TO this node is -node_player
         // (because player_at_node is the player who plays FROM this node)
         let node_player = node_info[node_idx].player_at_node;
-        let parent_player = -node_player;
+        let player_who_moved = -node_player;
         
         var reward = sim_result;
-        // If parent_player is not the simulation winner (leaf_player), flip the result
-        if (parent_player != leaf_player) {
+        // If player_who_moved is not the simulation winner (leaf_player), flip the result
+        if (player_who_moved != leaf_player) {
             reward = 2 - sim_result;
         }
         
         atomicAdd(&node_wins[node_idx], reward);
+    }
+}
+
+// =============================================================================
+// Pruning Kernel - Frees unreachable nodes after advance_root
+// =============================================================================
+
+@compute @workgroup_size(256)
+fn prune_unreachable(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let node_idx = global_id.x;
+    if (node_idx >= params.max_nodes) {
+        return;
+    }
+    
+    // Root is always reachable
+    if (node_idx == params.root_idx) {
+        return;
+    }
+    
+    // Check if this node is reachable from root via parent pointers
+    var current = node_idx;
+    var depth = 0u;
+    var found_root = false;
+    
+    // Traverse up to root (max 128 steps to prevent infinite loops)
+    while (depth < 128u) {
+        let info = node_info[current];
+        
+        if (current == params.root_idx) {
+            found_root = true;
+            break;
+        }
+        
+        if (info.parent_idx == INVALID_INDEX) {
+            // Reached a disconnected node
+            break;
+        }
+        
+        current = info.parent_idx;
+        depth++;
+    }
+    
+    // If not reachable from root, free this node
+    if (!found_root) {
+        // Reset node state
+        atomicStore(&node_visits[node_idx], 0);
+        atomicStore(&node_wins[node_idx], 0);
+        atomicStore(&node_vl[node_idx], 0);
+        atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
+        
+        // Clear node info
+        node_info[node_idx] = NodeInfo(
+            INVALID_INDEX,
+            INVALID_INDEX,
+            0u,
+            0
+        );
+        
+        // Clear children
+        for (var i = 0u; i < MAX_CHILDREN; i++) {
+            set_child_idx(node_idx, i, INVALID_INDEX);
+            set_child_prior(node_idx, i, 0.0);
+        }
+        
+        // Add to free list
+        let ft = atomicAdd(&free_top, 1u);
+        if (ft < params.max_nodes) {
+            free_list[ft] = node_idx;
+        }
     }
 }

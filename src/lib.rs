@@ -974,6 +974,7 @@ impl<S: GameState> MCTS<S> {
         num_batches: u32,
         exploration: f32,
         virtual_loss_weight: f32,
+        temperature: f32,
         timeout_secs: u64,
     ) -> Option<((usize, usize), i32, f64, Vec<(usize, usize, i32, i32, f64)>, u32, gpu::OthelloRunTelemetry)> {
         use std::sync::Arc;
@@ -1137,6 +1138,7 @@ impl<S: GameState> MCTS<S> {
                 iterations_per_batch,
                 exploration,
                 virtual_loss_weight,
+                temperature,
                 seed.wrapping_add(batch * 1000),
             );
             last_telemetry = Some(telemetry);

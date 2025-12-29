@@ -51,7 +51,8 @@ pub struct MctsOthelloParams {
     pub board_width: u32,
     pub board_height: u32,
     pub game_type: u32,
-    pub _pad: [u32; 3],
+    pub temperature: f32,
+    pub _pad: [u32; 2],
 }
 
 #[repr(C)]
@@ -108,8 +109,9 @@ pub struct OthelloRunTelemetry {
 pub struct GpuOthelloMcts {
     context: Arc<GpuContext>,
 
-    // Compute pipeline
+    // Compute pipelines
     iteration_pipeline: ComputePipeline,
+    prune_pipeline: ComputePipeline,
 
     // Bind group layouts
     node_pool_layout: BindGroupLayout,
@@ -186,12 +188,21 @@ impl GpuOthelloMcts {
             push_constant_ranges: &[],
         });
 
-        // Create compute pipeline
+        // Create compute pipelines
         let iteration_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("MCTS Othello Iteration Pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader_module,
             entry_point: Some("mcts_othello_iteration"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let prune_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("MCTS Othello Prune Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader_module,
+            entry_point: Some("prune_unreachable"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -364,6 +375,7 @@ impl GpuOthelloMcts {
         let mut engine = Self {
             context,
             iteration_pipeline,
+            prune_pipeline,
             node_pool_layout,
             execution_layout,
             board_layout,
@@ -735,6 +747,7 @@ impl GpuOthelloMcts {
         num_iterations: u32,
         exploration: f32,
         virtual_loss_weight: f32,
+        temperature: f32,
         seed: u32,
     ) -> OthelloRunTelemetry {
         let queue = self.context.queue();
@@ -751,7 +764,8 @@ impl GpuOthelloMcts {
             board_width: 8,
             board_height: 8,
             game_type: 0,
-            _pad: [0; 3],
+            temperature,
+            _pad: [0; 2],
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
 
@@ -1213,11 +1227,50 @@ impl GpuOthelloMcts {
         
         self.root_idx = target_child_idx;
         
+        // Prune unreachable nodes to free memory
+        // This runs a GPU compute pass that traverses from the new root and frees all nodes
+        // that are not reachable via parent pointers
+        self.prune_unreachable_nodes();
+        
         // Note: The new root's children should already exist from when this node was previously expanded.
         // The validation in lib.rs will check if they match new_legal_moves, and rebuild if needed.
         // This is expected behavior - we reuse the node but not necessarily all its children.
         
         true  // Successfully reused subtree
+    }
+
+    /// Prune unreachable nodes after advancing root
+    /// This frees all nodes that cannot be reached from the current root via parent pointers
+    fn prune_unreachable_nodes(&self) {
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        // Create command encoder
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Prune Unreachable Nodes"),
+        });
+        
+        // Run pruning compute pass
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Prune Pass"),
+                timestamp_writes: None,
+            });
+            
+            compute_pass.set_pipeline(&self.prune_pipeline);
+            compute_pass.set_bind_group(0, self.node_pool_bind_group.as_ref().unwrap(), &[]);
+            compute_pass.set_bind_group(1, self.execution_bind_group.as_ref().unwrap(), &[]);
+            compute_pass.set_bind_group(2, self.board_bind_group.as_ref().unwrap(), &[]);
+            
+            // Dispatch one thread per node
+            let workgroups = (self.max_nodes + 255) / 256;
+            compute_pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+        
+        queue.submit(Some(encoder.finish()));
+        
+        // Wait for pruning to complete
+        device.poll(wgpu::Maintain::Wait);
     }
 
     /// Get best move (for compatibility)
