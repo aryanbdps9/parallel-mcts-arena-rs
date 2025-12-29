@@ -418,6 +418,56 @@ fn try_allocate_node() -> u32 {
     return alloc;
 }
 
+// Free a node by adding it to the free list
+fn free_node(node_idx: u32) {
+    if (node_idx == INVALID_INDEX || node_idx >= params.max_nodes) {
+        return;
+    }
+    
+    let ft = atomicAdd(&free_top, 1u);
+    if (ft < params.max_nodes) {
+        free_list[ft] = node_idx;
+    }
+}
+
+// Mark a subtree as reachable (used during advance_root)
+// This uses a simple iterative BFS approach
+fn mark_subtree_reachable(root_idx: u32, reachable: ptr<function, array<u32, 256>>, reachable_count: ptr<function, u32>) {
+    if (root_idx == INVALID_INDEX) {
+        return;
+    }
+    
+    // Simple queue for BFS (limited size)
+    var queue: array<u32, 256>;
+    var queue_start = 0u;
+    var queue_end = 0u;
+    
+    // Add root to queue
+    queue[queue_end] = root_idx;
+    queue_end++;
+    
+    while (queue_start < queue_end && queue_start < 256u) {
+        let node_idx = queue[queue_start];
+        queue_start++;
+        
+        // Mark this node as reachable
+        if (*reachable_count < 256u) {
+            (*reachable)[*reachable_count] = node_idx;
+            (*reachable_count)++;
+        }
+        
+        // Add children to queue
+        let info = node_info[node_idx];
+        for (var i = 0u; i < info.num_children && i < MAX_CHILDREN; i++) {
+            let child_idx = get_child_idx(node_idx, i);
+            if (child_idx != INVALID_INDEX && queue_end < 256u) {
+                queue[queue_end] = child_idx;
+                queue_end++;
+            }
+        }
+    }
+}
+
 // Reconstruct board at a node by applying moves along path
 fn reconstruct_board(path: ptr<function, array<u32, 128>>, path_length: u32) -> array<i32, 64> {
     var board: array<i32, 64>;
@@ -640,7 +690,8 @@ fn mcts_othello_iteration(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     // Retry expansion and descend deeper when contention occurs
     var expansion_retries = 0u;
-    while (leaf_state != NODE_STATE_TERMINAL && expansion_retries < 5u) {
+    var backoff_delay = 0u;
+    while (leaf_state != NODE_STATE_TERMINAL && expansion_retries < 10u) {
         // Check if this node needs expansion
         if (leaf_info.num_children == 0u) {
             let expanded = expand_node(leaf_idx, &board);
@@ -652,6 +703,14 @@ fn mcts_othello_iteration(@builtin(global_invocation_id) global_id: vec3<u32>) {
             
             // Failed to expand (another thread is expanding)
             expansion_retries++;
+            
+            // Exponential backoff with jitter (max 256 iterations)
+            backoff_delay = min(1u << expansion_retries, 256u);
+            // Add jitter: 0 to backoff_delay-1
+            let jitter = rand_u32() % max(backoff_delay, 1u);
+            for (var spin = 0u; spin < jitter; spin++) {
+                // Just spin to add delay
+            }
             
             // Reload to see if another thread finished expanding
             leaf_info = node_info[leaf_idx];

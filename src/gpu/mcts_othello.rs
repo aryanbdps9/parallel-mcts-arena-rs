@@ -154,6 +154,9 @@ pub struct GpuOthelloMcts {
 
     // Configuration
     max_nodes: u32,
+    
+    // Current root index (for subtree reuse)
+    root_idx: u32,
 }
 
 impl GpuOthelloMcts {
@@ -391,6 +394,7 @@ impl GpuOthelloMcts {
             execution_bind_group: None,
             board_bind_group: None,
             max_nodes,
+            root_idx: 0,
         };
 
         engine.create_bind_groups();
@@ -720,6 +724,9 @@ impl GpuOthelloMcts {
         // Reset diagnostics
         let zero_diag = OthelloDiagnostics::default();
         queue.write_buffer(&self.diagnostics_buffer, 0, bytemuck::bytes_of(&zero_diag));
+        
+        // Reset root index
+        self.root_idx = 0;
     }
 
     /// Run MCTS iterations on GPU
@@ -739,7 +746,7 @@ impl GpuOthelloMcts {
             max_nodes: self.max_nodes,
             exploration,
             virtual_loss_weight,
-            root_idx: 0,
+            root_idx: self.root_idx,
             seed,
             board_width: 8,
             board_height: 8,
@@ -803,33 +810,35 @@ impl GpuOthelloMcts {
         let device = self.context.device();
         let queue = self.context.queue();
 
-        // Read root node info
+        // Read root node info (from current root_idx)
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("Read Root Info"),
         });
+        let root_offset = self.root_idx as u64 * std::mem::size_of::<OthelloNodeInfo>() as u64;
         encoder.copy_buffer_to_buffer(
             &self.node_info_buffer,
-            0,
+            root_offset,
             &self.node_info_staging,
             0,
             std::mem::size_of::<OthelloNodeInfo>() as u64,
         );
         queue.submit(std::iter::once(encoder.finish()));
 
-        let root_info = self.read_node_info(0);
+        let root_info = self.read_node_info(0);  // Read from staging offset 0
         let num_children = root_info.num_children.min(MAX_CHILDREN) as usize;
 
         if num_children == 0 {
             return Vec::new();
         }
 
-        // Read children indices, visits, and wins
+        // Read children indices (from current root's slot in children buffer)
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("Read Children Stats"),
         });
+        let children_offset = self.root_idx as u64 * MAX_CHILDREN as u64 * std::mem::size_of::<u32>() as u64;
         encoder.copy_buffer_to_buffer(
             &self.children_indices_buffer,
-            0,
+            children_offset,
             &self.children_staging,
             0,
             (num_children * 4) as u64,
@@ -1047,15 +1056,168 @@ impl GpuOthelloMcts {
     /// Advance root to a child node (stub - not implemented in clean version)
     pub fn advance_root(
         &mut self,
-        _move_x: usize,
-        _move_y: usize,
+        move_x: usize,
+        move_y: usize,
         new_board: &[i32; 64],
         new_player: i32,
         new_legal_moves: &[(usize, usize)],
     ) -> bool {
-        // For now, just rebuild the tree
-        self.init_tree(new_board, new_player, new_legal_moves);
-        false  // Indicates we rebuilt instead of reused
+        let move_id = (move_y * 8 + move_x) as u32;
+        
+        // Step 1: Read root's children indices and their node infos
+        let mut encoder = self.context.device().create_command_encoder(
+            &CommandEncoderDescriptor {
+                label: Some("advance_root_read"),
+            }
+        );
+        
+        // Copy root's children indices
+        let root_children_offset = self.root_idx as u64 * MAX_CHILDREN as u64 * std::mem::size_of::<u32>() as u64;
+        encoder.copy_buffer_to_buffer(
+            &self.children_indices_buffer,
+            root_children_offset,
+            &self.children_staging,
+            0,
+            MAX_CHILDREN as u64 * std::mem::size_of::<u32>() as u64,
+        );
+        
+        self.context.queue().submit(Some(encoder.finish()));
+        
+        // Read children indices
+        let children_slice = self.children_staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        children_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        self.context.device().poll(wgpu::Maintain::Wait);
+        
+        if rx.recv().unwrap().is_err() {
+            self.init_tree(new_board, new_player, new_legal_moves);
+            return false;
+        }
+        
+        let children_data = children_slice.get_mapped_range();
+        let children_indices: &[u32] = bytemuck::cast_slice(&children_data);
+        
+        // Find valid children and prepare to read their node infos
+        let mut valid_children = Vec::new();
+        for &child_idx in children_indices.iter().take(MAX_CHILDREN as usize) {
+            if child_idx != INVALID_INDEX && child_idx < self.max_nodes {
+                valid_children.push(child_idx);
+            }
+        }
+        
+        drop(children_data);
+        self.children_staging.unmap();
+        
+        if valid_children.is_empty() {
+            self.init_tree(new_board, new_player, new_legal_moves);
+            return false;
+        }
+        
+        // Step 2: Read node infos for all children in a batch
+        let mut encoder = self.context.device().create_command_encoder(
+            &CommandEncoderDescriptor {
+                label: Some("advance_root_read_children"),
+            }
+        );
+        
+        for (i, &child_idx) in valid_children.iter().enumerate() {
+            let src_offset = child_idx as u64 * std::mem::size_of::<OthelloNodeInfo>() as u64;
+            let dst_offset = i as u64 * std::mem::size_of::<OthelloNodeInfo>() as u64;
+            encoder.copy_buffer_to_buffer(
+                &self.node_info_buffer,
+                src_offset,
+                &self.node_info_staging,
+                dst_offset,
+                std::mem::size_of::<OthelloNodeInfo>() as u64,
+            );
+        }
+        
+        self.context.queue().submit(Some(encoder.finish()));
+        
+        // Read children node infos
+        let node_info_slice = self.node_info_staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        node_info_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        self.context.device().poll(wgpu::Maintain::Wait);
+        
+        if rx.recv().unwrap().is_err() {
+            self.init_tree(new_board, new_player, new_legal_moves);
+            return false;
+        }
+        
+        let node_info_data = node_info_slice.get_mapped_range();
+        let node_infos: &[OthelloNodeInfo] = bytemuck::cast_slice(&node_info_data);
+        
+        // Find child with matching move_id
+        let mut target_child_idx = None;
+        let mut target_num_children = 0;
+        
+        for (i, &child_idx) in valid_children.iter().enumerate() {
+            if i < node_infos.len() {
+                let child_info = &node_infos[i];
+                if child_info.move_id == move_id {
+                    target_child_idx = Some(child_idx);
+                    target_num_children = child_info.num_children;
+                    break;
+                }
+            }
+        }
+        
+        drop(node_info_data);
+        self.node_info_staging.unmap();
+        
+        let target_child_idx = match target_child_idx {
+            Some(idx) => idx,
+            None => {
+                // Move not in tree, rebuild
+                self.init_tree(new_board, new_player, new_legal_moves);
+                return false;
+            }
+        };
+        
+        // Check if this node was actually expanded with children
+        // If it has no children, it was never expanded and we can't reuse it
+        if target_num_children == 0 {
+            // Node exists but was never expanded - rebuild
+            self.init_tree(new_board, new_player, new_legal_moves);
+            return false;
+        }
+        
+        // Step 3: Update board, reparent the child, and ensure it has proper children
+        let queue = self.context.queue();
+        
+        queue.write_buffer(
+            &self.root_board_buffer,
+            0,
+            bytemuck::cast_slice(new_board),
+        );
+        
+        // The new root should have children matching new_legal_moves
+        // They should already exist from when this node was previously expanded
+        let new_root_info = OthelloNodeInfo {
+            parent_idx: INVALID_INDEX,
+            move_id: INVALID_INDEX,
+            num_children: target_num_children,  // Keep the actual number of children it has
+            player_at_node: new_player,
+        };
+        
+        queue.write_buffer(
+            &self.node_info_buffer,
+            target_child_idx as u64 * std::mem::size_of::<OthelloNodeInfo>() as u64,
+            bytemuck::bytes_of(&new_root_info),
+        );
+        
+        self.root_idx = target_child_idx;
+        
+        // Note: The new root's children should already exist from when this node was previously expanded.
+        // The validation in lib.rs will check if they match new_legal_moves, and rebuild if needed.
+        // This is expected behavior - we reuse the node but not necessarily all its children.
+        
+        true  // Successfully reused subtree
     }
 
     /// Get best move (for compatibility)
