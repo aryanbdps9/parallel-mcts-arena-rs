@@ -1099,11 +1099,10 @@ impl<S: GameState> MCTS<S> {
             computed_moves.sort_unstable();
 
             if actual_moves != computed_moves {
-                eprintln!(
-                    "[GPU-Native HOST WARN] root children mismatch; rebuilding tree. actual={:?} expected={:?} computed={:?}",
+                panic!(
+                    "[GPU-Native HOST FATAL] root children mismatch - GPU state corrupted! actual={:?} expected={:?} computed={:?}",
                     actual_moves, expected_moves, computed_moves
                 );
-                gpu_mcts.init_tree(board, current_player, &computed_moves);
             }
         }
 
