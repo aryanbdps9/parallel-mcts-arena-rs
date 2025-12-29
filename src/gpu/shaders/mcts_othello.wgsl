@@ -1,13 +1,12 @@
 // =============================================================================
-// GPU-Native MCTS for Othello - All Four Phases in One Kernel
+// GPU-Native MCTS for Othello - Clean Implementation
 // =============================================================================
-// This shader performs complete MCTS iterations for Othello on GPU:
-// 1. Selection: Descend tree using PUCT with virtual losses
-// 2. Expansion: Generate legal Othello moves, allocate child nodes
-// 3. Simulation: Random rollout from leaf position
-// 4. Backpropagation: Update statistics along path
-//
-// Key optimization: Board state is reconstructed by replaying moves from root
+// Architecture:
+// - Root board buffer: holds current game state
+// - Root node (index 0): standard node with parent=INVALID, move=INVALID
+// - All nodes represent game states via path from root
+// - State reconstruction: root_board + apply moves along path
+// - No transposition table: same move from different parents = different nodes
 // =============================================================================
 
 // =============================================================================
@@ -17,18 +16,17 @@
 const MAX_CHILDREN: u32 = 64u;
 const MAX_PATH_LENGTH: u32 = 128u;
 const INVALID_INDEX: u32 = 0xFFFFFFFFu;
-const MAX_SELECTION_RETRIES: u32 = 16u;
 
 const NODE_STATE_EMPTY: u32 = 0u;
 const NODE_STATE_EXPANDING: u32 = 1u;
 const NODE_STATE_READY: u32 = 2u;
 const NODE_STATE_TERMINAL: u32 = 3u;
 
-// Direction arrays for Othello
-const DIR_X: array<i32, 8> = array<i32, 8>(0, 1, 1, 1, 0, -1, -1, -1);
-const DIR_Y: array<i32, 8> = array<i32, 8>(-1, -1, 0, 1, 1, 1, 0, -1);
+// Othello directions (8 directions)
+const DIR_X: array<i32, 8> = array<i32, 8>(1, 1, 0, -1, -1, -1, 0, 1);
+const DIR_Y: array<i32, 8> = array<i32, 8>(0, 1, 1, 1, 0, -1, -1, -1);
 
-const MAX_SIM_MOVES: i32 = 64;
+const MAX_SIM_MOVES: i32 = 60;
 
 // =============================================================================
 // Data Structures
@@ -51,20 +49,9 @@ struct MctsParams {
 
 struct NodeInfo {
     parent_idx: u32,
-    move_id: u32,  // Encoded as y * width + x
+    move_id: u32,       // Encoded as y * width + x, or INVALID for root
     num_children: u32,
     player_at_node: i32,
-}
-
-struct WorkItem {
-    current_node: u32,
-    leaf_node: u32,
-    path_length: u32,
-    status: u32,
-    sim_result: i32,
-    leaf_player: i32,
-    _pad0: u32,
-    _pad1: u32,
 }
 
 struct Diagnostics {
@@ -75,6 +62,9 @@ struct Diagnostics {
     expansion_attempts: atomic<u32>,
     expansion_success: atomic<u32>,
     expansion_locked: atomic<u32>,
+    exp_lock_rollout: atomic<u32>,
+    exp_lock_sibling: atomic<u32>,
+    exp_lock_retry: atomic<u32>,
     expansion_terminal: atomic<u32>,
     alloc_failures: atomic<u32>,
     rollouts: atomic<u32>,
@@ -83,9 +73,10 @@ struct Diagnostics {
 }
 
 // =============================================================================
-// Buffer Bindings - Group 0: Node Pool
+// Buffer Bindings
 // =============================================================================
 
+// Group 0: Node Pool
 @group(0) @binding(0) var<storage, read_write> node_info: array<NodeInfo>;
 @group(0) @binding(1) var<storage, read_write> node_visits: array<atomic<i32>>;
 @group(0) @binding(2) var<storage, read_write> node_wins: array<atomic<i32>>;
@@ -96,20 +87,14 @@ struct Diagnostics {
 @group(0) @binding(7) var<storage, read_write> free_list: array<u32>;
 @group(0) @binding(8) var<storage, read_write> free_top: atomic<u32>;
 
-// =============================================================================
-// Buffer Bindings - Group 1: Execution State
-// =============================================================================
-
+// Group 1: Execution State
 @group(1) @binding(0) var<uniform> params: MctsParams;
-@group(1) @binding(1) var<storage, read_write> work_items: array<WorkItem>;
+@group(1) @binding(1) var<storage, read_write> work_items: array<u32>;  // Not used but kept for compatibility
 @group(1) @binding(2) var<storage, read_write> paths: array<u32>;
 @group(1) @binding(3) var<storage, read_write> alloc_counter: atomic<u32>;
 @group(1) @binding(4) var<storage, read_write> diagnostics: Diagnostics;
 
-// =============================================================================
-// Buffer Bindings - Group 2: Root Board State
-// =============================================================================
-
+// Group 2: Root Board State
 @group(2) @binding(0) var<storage, read> root_board: array<i32>;
 
 // =============================================================================
@@ -124,78 +109,116 @@ fn pcg_hash(input: u32) -> u32 {
     return (word >> 22u) ^ word;
 }
 
-fn rand() -> f32 {
-    rng_state ^= rng_state << 13u;
-    rng_state ^= rng_state >> 17u;
-    rng_state ^= rng_state << 5u;
+fn rand_u32() -> u32 {
     rng_state = pcg_hash(rng_state);
-    return f32(rng_state) / 4294967296.0;
+    return rng_state;
+}
+
+fn rand_f32() -> f32 {
+    return f32(rand_u32()) / 4294967296.0;
 }
 
 fn init_rng(thread_id: u32, base_seed: u32) {
     rng_state = pcg_hash(base_seed + thread_id * 1337u + 12345u);
+    // Warm up
     for (var i = 0u; i < 4u; i++) {
-        rng_state = pcg_hash(rng_state);
+        _ = rand_u32();
     }
 }
 
 // =============================================================================
-// Othello Logic
+// Othello Game Logic
 // =============================================================================
 
-fn othello_count_flips_dir(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32, d: i32) -> i32 {
+fn decode_move(move_id: u32) -> vec2<i32> {
+    let w = i32(params.board_width);
+    return vec2<i32>(i32(move_id) % w, i32(move_id) / w);
+}
+
+fn encode_move(x: i32, y: i32) -> u32 {
+    return u32(y * i32(params.board_width) + x);
+}
+
+fn get_cell(board: ptr<function, array<i32, 64>>, x: i32, y: i32) -> i32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
-    let dx = DIR_X[d];
-    let dy = DIR_Y[d];
+    if (x < 0 || x >= w || y < 0 || y >= h) {
+        return 0;
+    }
+    return (*board)[y * w + x];
+}
+
+fn set_cell(board: ptr<function, array<i32, 64>>, x: i32, y: i32, value: i32) {
+    let w = i32(params.board_width);
+    (*board)[y * w + x] = value;
+}
+
+// Count flips in one direction for a move
+fn count_flips_in_direction(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32, dir: i32) -> i32 {
+    let dx = DIR_X[dir];
+    let dy = DIR_Y[dir];
     let opponent = -player;
     
     var cx = x + dx;
     var cy = y + dy;
     var count = 0;
     
-    while (cx >= 0 && cx < w && cy >= 0 && cy < h) {
-        let cell = (*board)[cy * w + cx];
+    loop {
+        let cell = get_cell(board, cx, cy);
+        if (cell == 0) {
+            return 0;  // Empty cell, no flips
+        }
         if (cell == opponent) {
             count++;
             cx += dx;
             cy += dy;
-        } else if (cell == player && count > 0) {
-            return count;
+        } else if (cell == player) {
+            return count;  // Found our piece, return flip count
         } else {
-            return 0;
+            return 0;  // Should not happen
         }
     }
+    
     return 0;
 }
 
-fn othello_is_valid_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32) -> bool {
+// Check if a move is valid
+fn is_valid_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32) -> bool {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     
-    if (x < 0 || x >= w || y < 0 || y >= h) { return false; }
-    if ((*board)[y * w + x] != 0) { return false; }
-    
-    for (var d = 0; d < 8; d++) {
-        if (othello_count_flips_dir(board, x, y, player, d) > 0) { return true; }
+    if (x < 0 || x >= w || y < 0 || y >= h) {
+        return false;
     }
+    
+    if (get_cell(board, x, y) != 0) {
+        return false;  // Cell occupied
+    }
+    
+    // Check if it flips any pieces
+    for (var d = 0; d < 8; d++) {
+        if (count_flips_in_direction(board, x, y, player, d) > 0) {
+            return true;
+        }
+    }
+    
     return false;
 }
 
-fn othello_make_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32) {
-    let w = i32(params.board_width);
+// Apply a move to the board
+fn apply_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, player: i32) {
+    set_cell(board, x, y, player);
     
-    (*board)[y * w + x] = player;
-    
+    // Flip pieces in all directions
     for (var d = 0; d < 8; d++) {
-        let flip_count = othello_count_flips_dir(board, x, y, player, d);
+        let flip_count = count_flips_in_direction(board, x, y, player, d);
         if (flip_count > 0) {
             let dx = DIR_X[d];
             let dy = DIR_Y[d];
             var cx = x + dx;
             var cy = y + dy;
             for (var i = 0; i < flip_count; i++) {
-                (*board)[cy * w + cx] = player;
+                set_cell(board, cx, cy, player);
                 cx += dx;
                 cy += dy;
             }
@@ -203,28 +226,87 @@ fn othello_make_move(board: ptr<function, array<i32, 64>>, x: i32, y: i32, playe
     }
 }
 
-fn othello_count_valid_moves(board: ptr<function, array<i32, 64>>, player: i32) -> i32 {
+// Count valid moves for a player
+fn count_valid_moves(board: ptr<function, array<i32, 64>>, player: i32) -> i32 {
     let w = i32(params.board_width);
     let h = i32(params.board_height);
     var count = 0;
     
     for (var y = 0; y < h; y++) {
         for (var x = 0; x < w; x++) {
-            if (othello_is_valid_move(board, x, y, player)) { count++; }
+            if (is_valid_move(board, x, y, player)) {
+                count++;
+            }
         }
     }
+    
     return count;
 }
 
-// Decode move_id to (x, y)
-fn decode_move(move_id: u32) -> vec2<i32> {
-    let w = i32(params.board_width);
-    return vec2<i32>(i32(move_id) % w, i32(move_id) / w);
-}
-
-// Encode (x, y) to move_id
-fn encode_move(x: i32, y: i32) -> u32 {
-    return u32(y * i32(params.board_width) + x);
+// Run a random simulation from a board state
+// Returns: 2 for player win, 1 for draw, 0 for loss
+fn simulate_game(board: ptr<function, array<i32, 64>>, start_player: i32) -> i32 {
+    var current_player = start_player;
+    var consecutive_passes = 0;
+    
+    for (var move_count = 0; move_count < MAX_SIM_MOVES; move_count++) {
+        let num_moves = count_valid_moves(board, current_player);
+        
+        if (num_moves == 0) {
+            consecutive_passes++;
+            if (consecutive_passes >= 2) {
+                break;  // Game over
+            }
+            current_player = -current_player;
+            continue;
+        }
+        
+        consecutive_passes = 0;
+        
+        // Pick a random valid move
+        let pick = i32(rand_f32() * f32(num_moves));
+        var found = 0;
+        var made_move = false;
+        
+        let w = i32(params.board_width);
+        let h = i32(params.board_height);
+        for (var y = 0; y < h; y++) {
+            for (var x = 0; x < w; x++) {
+                if (is_valid_move(board, x, y, current_player)) {
+                    if (found == pick) {
+                        apply_move(board, x, y, current_player);
+                        made_move = true;
+                        break;
+                    }
+                    found++;
+                }
+            }
+            if (made_move) {
+                break;
+            }
+        }
+        
+        current_player = -current_player;
+    }
+    
+    // Count pieces
+    var player_count = 0;
+    var opponent_count = 0;
+    for (var i = 0; i < 64; i++) {
+        if ((*board)[i] == start_player) {
+            player_count++;
+        } else if ((*board)[i] == -start_player) {
+            opponent_count++;
+        }
+    }
+    
+    if (player_count > opponent_count) {
+        return 2;
+    } else if (player_count < opponent_count) {
+        return 0;
+    } else {
+        return 1;
+    }
 }
 
 // =============================================================================
@@ -255,218 +337,97 @@ fn set_path_node(iter_idx: u32, depth: u32, node_idx: u32) {
     paths[iter_idx * MAX_PATH_LENGTH + depth] = node_idx;
 }
 
-fn calculate_puct(node_idx: u32, child_slot: u32, parent_visits: i32) -> f32 {
-    let child_idx = get_child_idx(node_idx, child_slot);
-    
+// Calculate PUCT score for a child
+fn calculate_puct(parent_idx: u32, child_slot: u32) -> f32 {
+    let child_idx = get_child_idx(parent_idx, child_slot);
     if (child_idx == INVALID_INDEX) {
         return -1000000.0;
     }
     
-    let visits = atomicLoad(&node_visits[child_idx]);
-    let wins = atomicLoad(&node_wins[child_idx]);
-    let vl = atomicLoad(&node_vl[child_idx]);
-    let prior = get_child_prior(node_idx, child_slot);
+    let parent_visits = atomicLoad(&node_visits[parent_idx]);
+    let child_visits = atomicLoad(&node_visits[child_idx]);
+    let child_wins = atomicLoad(&node_wins[child_idx]);
+    let child_vl = atomicLoad(&node_vl[child_idx]);
+    let prior = get_child_prior(parent_idx, child_slot);
     
+    // Virtual loss adjustment
     let vl_weight = max(params.virtual_loss_weight, 0.001);
-    let effective_visits = f32(visits) + f32(vl) * vl_weight;
-    let parent_sqrt = sqrt(f32(max(parent_visits, 1)));
+    let effective_visits = f32(child_visits) + f32(child_vl) * vl_weight;
     
     if (effective_visits < 0.5) {
+        // Unvisited node - use prior only
+        let parent_sqrt = sqrt(f32(max(parent_visits, 1)));
         return params.exploration * prior * parent_sqrt;
     }
     
-    // Q-value: wins / (2 * visits)
-    // With "Parent Perspective" storage, 'wins' tracks the win count for the 
-    // player who made the move to this node (i.e., the parent).
-    // So we simply maximize this value.
-    // CRITICAL FIX: Include virtual loss in Q-value calculation to prevent "stampedes"
-    // We treat virtual visits as losses (0 wins) to temporarily lower the Q-value
-    // of nodes currently being explored by other threads.
-    let q = f32(wins) / (f32(max(effective_visits, 1.0)) * 2.0);
+    // Q-value (parent perspective): child_wins / (2 * effective_visits)
+    // The wins are stored from parent's perspective (the player who made the move TO this child)
+    let q = f32(child_wins) / (2.0 * effective_visits);
+    
+    // Exploration term
+    let parent_sqrt = sqrt(f32(max(parent_visits, 1)));
     let u = params.exploration * prior * parent_sqrt / (1.0 + effective_visits);
     
     return q + u;
 }
 
-fn select_best_child(node_idx: u32) -> u32 {
-    let info = node_info[node_idx];
+// Select best child using PUCT
+fn select_best_child(parent_idx: u32) -> u32 {
+    let info = node_info[parent_idx];
     let num_children = info.num_children;
     
     if (num_children == 0u) {
         return INVALID_INDEX;
     }
     
-    // CRITICAL FIX: Use max(parent_visits, 1) to ensure exploration even at root
-    // Without this, when parent_visits=0, sqrt(0)=0 and exploration term vanishes!
-    let parent_visits = max(atomicLoad(&node_visits[node_idx]), 1);
-    var best_score = -1000000.0;
-    var best_slot = 0u;
+    var best_score = -1e9;
+    var best_child = INVALID_INDEX;
     
     for (var i = 0u; i < num_children; i++) {
-        let score = calculate_puct(node_idx, i, parent_visits);
+        let score = calculate_puct(parent_idx, i);
         if (score > best_score) {
             best_score = score;
-            best_slot = i;
+            best_child = get_child_idx(parent_idx, i);
         }
     }
     
-    return get_child_idx(node_idx, best_slot);
+    return best_child;
 }
 
-// Allocate a new node atomically
-fn allocate_node() -> u32 {
-    // Try pop from free list first
-    loop {
-        let top = atomicLoad(&free_top);
-        if (top == 0u) {
-            break;
-        }
-        let new_top = top - 1u;
-        let prev = atomicCompareExchangeWeak(&free_top, top, new_top);
-        if (prev.old_value == top && prev.exchanged) {
-            let idx = free_list[new_top];
-            return idx;
+// Try to allocate a new node
+fn try_allocate_node() -> u32 {
+    // Try free list first
+    let ft = atomicLoad(&free_top);
+    if (ft > 0u) {
+        let new_ft = atomicSub(&free_top, 1u);
+        if (new_ft > 0u && new_ft <= ft) {
+            return free_list[new_ft - 1u];
+        } else {
+            // Failed to pop, restore
+            atomicAdd(&free_top, 1u);
         }
     }
-
-    let idx = atomicAdd(&alloc_counter, 1u);
-    if (idx >= params.max_nodes) {
-        atomicSub(&alloc_counter, 1u);
+    
+    // Allocate from pool
+    let alloc = atomicAdd(&alloc_counter, 1u);
+    if (alloc >= params.max_nodes) {
+        atomicAdd(&diagnostics.alloc_failures, 1u);
         return INVALID_INDEX;
     }
-    return idx;
+    
+    return alloc;
 }
 
-// =============================================================================
-// Expansion
-// =============================================================================
-
-fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>) {
-    let w = i32(params.board_width);
-    let h = i32(params.board_height);
-    let current_player = node_info[node_idx].player_at_node;
-    let next_player = -current_player;
-    
-    // Count valid moves
-    var valid_count = 0u;
-    for (var y = 0; y < h; y++) {
-        for (var x = 0; x < w; x++) {
-            if (othello_is_valid_move(board, x, y, current_player)) {
-                valid_count++;
-            }
-        }
-    }
-    
-    // Handle Pass or Terminal
-    if (valid_count == 0u) {
-        // Check if opponent has moves
-        let opp_moves = othello_count_valid_moves(board, next_player);
-        if (opp_moves == 0) {
-            // Terminal
-            atomicStore(&node_state[node_idx], NODE_STATE_TERMINAL);
-            return;
-        } else {
-            // Pass move
-            let child_idx = allocate_node();
-            if (child_idx != INVALID_INDEX) {
-                // Initialize child
-                var child_info: NodeInfo;
-                child_info.parent_idx = node_idx;
-                child_info.move_id = INVALID_INDEX; // Pass
-                child_info.num_children = 0u;
-                child_info.player_at_node = next_player;
-                node_info[child_idx] = child_info;
-                
-                // Initialize stats to 0
-                atomicStore(&node_visits[child_idx], 0);
-                atomicStore(&node_wins[child_idx], 0);
-                atomicStore(&node_vl[child_idx], 0);
-                
-                atomicStore(&node_state[child_idx], NODE_STATE_READY);
-                
-                // Link to parent
-                set_child_idx(node_idx, 0u, child_idx);
-                set_child_prior(node_idx, 0u, 1.0);
-                
-                // Update parent
-                node_info[node_idx].num_children = 1u;
-            }
-            if (child_idx == INVALID_INDEX) {
-                atomicAdd(&diagnostics.alloc_failures, 1u);
-            }
-            return;
-        }
-    }
-    
-    // Allocate children
-    var allocated_count = 0u;
-    let prior = 1.0 / f32(valid_count);
-    
-    for (var y = 0; y < h; y++) {
-        for (var x = 0; x < w; x++) {
-            if (othello_is_valid_move(board, x, y, current_player)) {
-                if (allocated_count >= MAX_CHILDREN) { break; }
-                
-                let child_idx = allocate_node();
-                if (child_idx == INVALID_INDEX) {
-                    atomicAdd(&diagnostics.alloc_failures, 1u);
-                    break;
-                }
-                
-                // Initialize child
-                var child_info: NodeInfo;
-                child_info.parent_idx = node_idx;
-                child_info.move_id = encode_move(x, y);
-                child_info.num_children = 0u;
-                child_info.player_at_node = next_player;
-                node_info[child_idx] = child_info;
-                
-                // Initialize stats to 0
-                atomicStore(&node_visits[child_idx], 0);
-                atomicStore(&node_wins[child_idx], 0);
-                atomicStore(&node_vl[child_idx], 0);
-                
-                atomicStore(&node_state[child_idx], NODE_STATE_READY);
-                
-                // Link to parent
-                set_child_idx(node_idx, allocated_count, child_idx);
-                set_child_prior(node_idx, allocated_count, prior);
-                
-                allocated_count++;
-            }
-        }
-    }
-    
-    // Update parent
-    if (allocated_count > 0u) {
-        node_info[node_idx].num_children = allocated_count;
-    } else {
-        // Should not happen if valid_count > 0, unless OOM
-        // If OOM, we treat as leaf?
-    }
-}
-
-// =============================================================================
-// Reconstruct Board State from Root by Replaying Moves
-// =============================================================================
-
-fn reconstruct_board_at_node(
-    board: ptr<function, array<i32, 64>>,
-    path: ptr<function, array<u32, 128>>,
-    path_length: u32
-) -> i32 {
-    let w = i32(params.board_width);
-    let h = i32(params.board_height);
+// Reconstruct board at a node by applying moves along path
+fn reconstruct_board(path: ptr<function, array<u32, 128>>, path_length: u32) -> array<i32, 64> {
+    var board: array<i32, 64>;
     
     // Copy root board
     for (var i = 0; i < 64; i++) {
-        (*board)[i] = root_board[i];
+        board[i] = root_board[i];
     }
     
-    // Get root player (stored in root node)
-    var current_player = node_info[params.root_idx].player_at_node;
-    
-    // Replay each move in the path (skip root, start from first actual move)
+    // Apply moves along path (skip root at index 0)
     for (var i = 1u; i < path_length; i++) {
         let node_idx = (*path)[i];
         let info = node_info[node_idx];
@@ -474,312 +435,267 @@ fn reconstruct_board_at_node(
         
         if (move_id != INVALID_INDEX) {
             let pos = decode_move(move_id);
-            let move_player = -info.player_at_node;  // Player who made the move TO this node
-            othello_make_move(board, pos.x, pos.y, move_player);
+            apply_move(&board, pos.x, pos.y, -info.player_at_node);
         }
-        
-        current_player = info.player_at_node;
     }
     
-    return current_player;
+    return board;
 }
 
-// =============================================================================
-// Random Rollout Simulation
-// =============================================================================
-
-fn othello_simulate(board: ptr<function, array<i32, 64>>, starting_player: i32) -> i32 {
+// Expand a node by generating legal moves and creating children
+fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>) -> bool {
+    // Try to acquire expanding lock
+    let old_state = atomicCompareExchangeWeak(&node_state[node_idx], NODE_STATE_READY, NODE_STATE_EXPANDING);
+    if (old_state.exchanged == false || old_state.old_value != NODE_STATE_READY) {
+        return false;  // Someone else is expanding or already expanded
+    }
+    
+    atomicAdd(&diagnostics.expansion_attempts, 1u);
+    
+    let info = node_info[node_idx];
+    let player = info.player_at_node;
+    
+    // Find all valid moves
+    var valid_moves: array<u32, 64>;
+    var num_valid = 0u;
+    
     let w = i32(params.board_width);
     let h = i32(params.board_height);
-    
-    var sim_player = starting_player;
-    var consecutive_passes = 0;
-    var moves_made = 0;
-    
-    while (consecutive_passes < 2 && moves_made < MAX_SIM_MOVES) {
-        // Count valid moves and pick one randomly
-        var valid_count = 0;
-        for (var y = 0; y < h; y++) {
-            for (var x = 0; x < w; x++) {
-                if (othello_is_valid_move(board, x, y, sim_player)) {
-                    valid_count++;
+    for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+            if (is_valid_move(board, x, y, player)) {
+                if (num_valid < 64u) {
+                    valid_moves[num_valid] = encode_move(x, y);
+                    num_valid++;
                 }
             }
         }
-        
-        if (valid_count == 0) {
-            consecutive_passes++;
-            sim_player = -sim_player;
-            continue;
-        }
-        
-        consecutive_passes = 0;
-        
-        // Pick random move (TODO: allow host-provided move weights to bias rollouts like CPU get_move_weight)
-        var pick_index = i32(rand() * f32(valid_count));
-        var picked_x = -1;
-        var picked_y = -1;
-        var count = 0;
-        
-        for (var y = 0; y < h; y++) {
-            for (var x = 0; x < w; x++) {
-                if (othello_is_valid_move(board, x, y, sim_player)) {
-                    if (count == pick_index) {
-                        picked_x = x;
-                        picked_y = y;
-                        y = h;
-                        break;
-                    }
-                    count++;
-                }
+    }
+    
+    // Check for terminal state
+    if (num_valid == 0u) {
+        let opponent_moves = count_valid_moves(board, -player);
+        if (opponent_moves == 0) {
+            // Game over - both players have no moves
+            atomicStore(&node_state[node_idx], NODE_STATE_TERMINAL);
+            atomicAdd(&diagnostics.expansion_terminal, 1u);
+            
+            // Update node info
+            var new_info = info;
+            new_info.num_children = 0u;
+            node_info[node_idx] = new_info;
+            
+            return true;
+        } else {
+            // Pass situation - current player has no moves but opponent does
+            // Create a single "pass" child with INVALID_INDEX as move_id
+            let child_idx = try_allocate_node();
+            if (child_idx == INVALID_INDEX) {
+                // Failed to allocate, mark as ready with 0 children (will retry later)
+                atomicStore(&node_state[node_idx], NODE_STATE_READY);
+                return false;
             }
+            
+            // Initialize pass child - player stays the same (opponent's turn)
+            let child_info = NodeInfo(
+                node_idx,           // parent
+                INVALID_INDEX,      // move_id (pass)
+                0u,                 // num_children
+                -player             // player_at_node (opponent)
+            );
+            
+            node_info[child_idx] = child_info;
+            atomicStore(&node_visits[child_idx], 0);
+            atomicStore(&node_wins[child_idx], 0);
+            atomicStore(&node_vl[child_idx], 0);
+            atomicStore(&node_state[child_idx], NODE_STATE_READY);
+            
+            // Set child in parent
+            set_child_idx(node_idx, 0u, child_idx);
+            set_child_prior(node_idx, 0u, 1.0);  // Only one move, prior = 1.0
+            
+            // Update parent with child count
+            var new_info = info;
+            new_info.num_children = 1u;
+            node_info[node_idx] = new_info;
+            
+            // Mark as ready
+            atomicStore(&node_state[node_idx], NODE_STATE_READY);
+            atomicAdd(&diagnostics.expansion_success, 1u);
+            
+            return true;
         }
-        
-        if (picked_x >= 0) {
-            othello_make_move(board, picked_x, picked_y, sim_player);
-            moves_made++;
-        }
-        
-        sim_player = -sim_player;
     }
     
-    // Count pieces
-    var player_count = 0;
-    var opp_count = 0;
-    for (var i = 0; i < 64; i++) {
-        if ((*board)[i] == starting_player) { player_count++; }
-        else if ((*board)[i] == -starting_player) { opp_count++; }
+    // Allocate child nodes for normal moves
+    let uniform_prior = 1.0 / f32(max(num_valid, 1u));
+    let opposite_player = -player;
+    
+    var actual_children = 0u;
+    for (var i = 0u; i < num_valid; i++) {
+        let child_idx = try_allocate_node();
+        if (child_idx == INVALID_INDEX) {
+            break;  // Out of nodes
+        }
+        
+        // Initialize child
+        let child_info = NodeInfo(
+            node_idx,           // parent
+            valid_moves[i],     // move_id
+            0u,                 // num_children
+            opposite_player     // player_at_node
+        );
+        
+        node_info[child_idx] = child_info;
+        atomicStore(&node_visits[child_idx], 0);
+        atomicStore(&node_wins[child_idx], 0);
+        atomicStore(&node_vl[child_idx], 0);
+        atomicStore(&node_state[child_idx], NODE_STATE_READY);
+        
+        // Set child in parent
+        set_child_idx(node_idx, actual_children, child_idx);
+        set_child_prior(node_idx, actual_children, uniform_prior);
+        actual_children++;
     }
     
-    if (player_count > opp_count) { return 2; }  // Win
-    else if (opp_count > player_count) { return 0; }  // Loss
-    else { return 1; }  // Draw
+    // Update parent with actual child count
+    var new_info = info;
+    new_info.num_children = actual_children;
+    node_info[node_idx] = new_info;
+    
+    // Mark as ready
+    atomicStore(&node_state[node_idx], NODE_STATE_READY);
+    atomicAdd(&diagnostics.expansion_success, 1u);
+    
+    return true;
 }
 
 // =============================================================================
-// Main MCTS Kernel - Full Iteration
+// Main MCTS Kernel
 // =============================================================================
 
 @compute @workgroup_size(64)
 fn mcts_othello_iteration(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let tid = global_id.x;
-    if (tid >= params.num_iterations) {
+    let iter_idx = global_id.x;
+    if (iter_idx >= params.num_iterations) {
         return;
     }
     
-    init_rng(tid, params.seed);
+    // Initialize RNG
+    init_rng(iter_idx, params.seed);
     
-    var leaf_idx = params.root_idx;
-    var leaf_player: i32 = 0;
+    // Path storage
     var path: array<u32, 128>;
     var path_length = 0u;
-    var selection_reason = 0u; // 0=normal,1=terminal,2=no_children,3=invalid_child,4=path_cap
-    var board: array<i32, 64>;
-    var sim_player: i32 = 0;
-
-    // Allow a small number of retries if we hit an expanding leaf, so work can move to other ready leaves.
-    for (var attempt = 0u; attempt < MAX_SELECTION_RETRIES; attempt++) {
-        path_length = 0u;
-        selection_reason = 0u;
-        var current = params.root_idx;
-        var expanded_stop = false;
-        var lock_hits = 0u;
-
-        // === PHASE 1: SELECTION (with inline expansion/backoff) ===
-        var retry_selection = false;
-        for (var iter = 0u; iter < MAX_PATH_LENGTH; iter++) {
-            path[path_length] = current;
-            path_length++;
-
-            // Apply virtual loss
-            atomicAdd(&node_vl[current], 1);
-
-            let state = atomicLoad(&node_state[current]);
-            let info = node_info[current];
-
-            if (state == NODE_STATE_TERMINAL) {
-                selection_reason = 1u;
-                break;
-            }
-
-            if (info.num_children == 0u) {
-                // Try to expand if ready; otherwise back off or stop
-                var expanded = false;
-
-                // Ensure board is reconstructed for expansion/simulation from this path
-                sim_player = reconstruct_board_at_node(&board, &path, path_length);
-
-                if (state == NODE_STATE_READY) {
-                    let old_state = atomicExchange(&node_state[current], NODE_STATE_EXPANDING);
-                    if (old_state == NODE_STATE_READY) {
-                        atomicAdd(&diagnostics.expansion_attempts, 1u);
-                        expand_node(current, &board);
-
-                        let final_state = atomicLoad(&node_state[current]);
-                        if (final_state != NODE_STATE_TERMINAL) {
-                            atomicStore(&node_state[current], NODE_STATE_READY);
-                        } else {
-                            atomicAdd(&diagnostics.expansion_terminal, 1u);
-                        }
-                        if (node_info[current].num_children > 0u || final_state == NODE_STATE_TERMINAL) {
-                            atomicAdd(&diagnostics.expansion_success, 1u);
-                        }
-
-                        if (final_state == NODE_STATE_TERMINAL) {
-                            selection_reason = 1u;
-                            break;
-                        }
-
-                        if (node_info[current].num_children > 0u) {
-                            expanded = true;
-                            expanded_stop = true;
-                            // Stop selection after first expansion; rollout from this node
-                            break;
-                        }
-                    } else if (old_state == NODE_STATE_EXPANDING) {
-                        atomicAdd(&diagnostics.expansion_locked, 1u);
-                        lock_hits += 1u;
-                        // Mixed strategy to reduce hyperparams:
-                        // 50/50 coin: heads -> rollout now from this node; tails -> try sibling/random path.
-                        if (rand() < 0.5) {
-                            // Rollout from current node despite lock; keep VLs as is.
-                            sim_player = reconstruct_board_at_node(&board, &path, path_length);
-                            expanded_stop = true;
-                            break;
-                        } else {
-                            // Try a random READY sibling first; fallback to full retry.
-                            let span = info.num_children;
-                            var found = false;
-                            for (var r = 0u; r < 4u; r++) {
-                                let j = u32(rand() * f32(span));
-                                let alt = get_child_idx(current, j);
-                                if (alt != INVALID_INDEX && atomicLoad(&node_state[alt]) == NODE_STATE_READY) {
-                                    current = alt;
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (found) {
-                                continue;
-                            }
-                            // No ready sibling: retry selection from root; remove VLs along this path
-                            retry_selection = true;
-                        }
-                    } else {
-                        // Terminal or other state
-                        if (old_state == NODE_STATE_TERMINAL) {
-                            atomicAdd(&diagnostics.expansion_terminal, 1u);
-                            atomicStore(&node_state[current], NODE_STATE_TERMINAL);
-                            selection_reason = 1u;
-                            break;
-                        } else {
-                            atomicStore(&node_state[current], old_state);
-                        }
-                    }
-                }
-
-                if (retry_selection) {
-                    break;
-                }
-
-                if (expanded) {
-                    // Already broke if expanded_stop; safety
-                    break;
-                }
-
-                // Still no children: genuine no-children leaf
-                selection_reason = 2u;
-                break;
-            }
-
-            let child = select_best_child(current);
-            if (child == INVALID_INDEX) {
-                selection_reason = 3u;
-                break;
-            }
-
-            // Jitter: if child is expanding, try a random ready child to reduce lock contention
-            let child_state = atomicLoad(&node_state[child]);
-            if (child_state == NODE_STATE_EXPANDING && info.num_children > 1u) {
-                let span = info.num_children;
-                var picked = child;
-                // bounded retries
-                for (var r = 0u; r < 4u; r++) {
-                    let j = u32(rand() * f32(span));
-                    let alt = get_child_idx(current, j);
-                    if (alt != INVALID_INDEX && atomicLoad(&node_state[alt]) == NODE_STATE_READY) {
-                        picked = alt;
-                        break;
-                    }
-                }
-                current = picked;
-            } else {
-                current = child;
-            }
-        }
-
-        if (selection_reason == 0u && path_length >= MAX_PATH_LENGTH) {
-            selection_reason = 4u;
-        }
-
-        leaf_idx = current;
-        leaf_player = node_info[leaf_idx].player_at_node;
-
-        if (retry_selection) {
-            // Remove virtual losses we added along this path before retrying
-            for (var i = 0u; i < path_length; i++) {
-                atomicAdd(&node_vl[path[i]], -1);
-            }
-            continue;
-        }
-
-        if (expanded_stop) {
-            // We expanded once; proceed directly to simulation from this node
-            sim_player = reconstruct_board_at_node(&board, &path, path_length);
+    
+    // === PHASE 1: SELECTION ===
+    // Descend from root using PUCT, adding virtual losses
+    var current_idx = params.root_idx;
+    path[path_length] = current_idx;
+    path_length++;
+    atomicAdd(&node_vl[current_idx], 1);
+    
+    loop {
+        if (path_length >= MAX_PATH_LENGTH) {
+            atomicAdd(&diagnostics.selection_path_cap, 1u);
             break;
         }
-
-        if (selection_reason == 1u) { atomicAdd(&diagnostics.selection_terminal, 1u); }
-        if (selection_reason == 2u) { atomicAdd(&diagnostics.selection_no_children, 1u); }
-        if (selection_reason == 3u) { atomicAdd(&diagnostics.selection_invalid_child, 1u); }
-        if (selection_reason == 4u) { atomicAdd(&diagnostics.selection_path_cap, 1u); }
-
-        // === PHASE 2: RECONSTRUCTION ===
-        sim_player = reconstruct_board_at_node(&board, &path, path_length);
-
-        break;
-    }
-
-    // If selection never succeeded (all retries hit expanding), we still have leaf_idx/path as last attempt.
-    // No extra handling needed; we fall through to simulation.
-
-    // Check if terminal
-    let my_moves = othello_count_valid_moves(&board, sim_player);
-    let opp_moves = othello_count_valid_moves(&board, -sim_player);
-    
-    var result: i32;
-    if (my_moves == 0 && opp_moves == 0) {
-        // Game over - count pieces
-        var player_count = 0;
-        var opp_count = 0;
-        for (var i = 0; i < 64; i++) {
-            if (board[i] == leaf_player) { player_count++; }
-            else if (board[i] == -leaf_player) { opp_count++; }
+        
+        let state = atomicLoad(&node_state[current_idx]);
+        if (state == NODE_STATE_TERMINAL) {
+            atomicAdd(&diagnostics.selection_terminal, 1u);
+            break;
         }
-        if (player_count > opp_count) { result = 2; }
-        else if (opp_count > player_count) { result = 0; }
-        else { result = 1; }
-    } else {
-        // Run simulation
-        result = othello_simulate(&board, sim_player);
-        atomicAdd(&diagnostics.rollouts, 1u);
-        // Adjust result if sim_player != leaf_player
-        if (sim_player != leaf_player) {
-            result = 2 - result;
+        
+        let info = node_info[current_idx];
+        
+        // If node has no children, it needs expansion - stop here (leaf node)
+        if (info.num_children == 0u) {
+            atomicAdd(&diagnostics.selection_no_children, 1u);
+            break;
         }
+        
+        let child = select_best_child(current_idx);
+        if (child == INVALID_INDEX) {
+            atomicAdd(&diagnostics.selection_invalid_child, 1u);
+            break;
+        }
+        
+        current_idx = child;
+        path[path_length] = current_idx;
+        path_length++;
+        atomicAdd(&node_vl[current_idx], 1);
     }
     
-    // === PHASE 3: BACKPROPAGATION ===
+    var leaf_idx = current_idx;
+    var leaf_player = node_info[leaf_idx].player_at_node;
+    
+    // === PHASE 2: EXPANSION ===
+    // Reconstruct board at leaf
+    var board = reconstruct_board(&path, path_length);
+    
+    // Try to expand if not terminal and has no children
+    var leaf_state = atomicLoad(&node_state[leaf_idx]);
+    var leaf_info = node_info[leaf_idx];
+    
+    // Retry expansion and descend deeper when contention occurs
+    var expansion_retries = 0u;
+    while (leaf_state != NODE_STATE_TERMINAL && expansion_retries < 5u) {
+        // Check if this node needs expansion
+        if (leaf_info.num_children == 0u) {
+            let expanded = expand_node(leaf_idx, &board);
+            
+            if (expanded) {
+                // Successfully expanded - done
+                break;
+            }
+            
+            // Failed to expand (another thread is expanding)
+            expansion_retries++;
+            
+            // Reload to see if another thread finished expanding
+            leaf_info = node_info[leaf_idx];
+            leaf_state = atomicLoad(&node_state[leaf_idx]);
+        }
+        
+        // If node now has children (either we expanded or someone else did),
+        // descend to one of them to try expanding deeper
+        if (leaf_info.num_children > 0u) {
+            let child = select_best_child(leaf_idx);
+            if (child == INVALID_INDEX) {
+                break;  // No valid child found
+            }
+            
+            // Remove vl from current, add to child
+            atomicAdd(&node_vl[leaf_idx], -1);
+            
+            leaf_idx = child;
+            path[path_length] = leaf_idx;
+            path_length++;
+            atomicAdd(&node_vl[leaf_idx], 1);
+            
+            // Update state for next iteration
+            leaf_player = node_info[leaf_idx].player_at_node;
+            leaf_state = atomicLoad(&node_state[leaf_idx]);
+            leaf_info = node_info[leaf_idx];
+            
+            // Reconstruct board with new path
+            board = reconstruct_board(&path, path_length);
+            
+            // Continue loop to try expanding this child
+            expansion_retries = 0u;  // Reset retry counter for new node
+        } else {
+            // Node still has no children and we failed to expand - give up
+            break;
+        }
+    }
+    
+    // === PHASE 3: SIMULATION ===
+    let sim_result = simulate_game(&board, leaf_player);
+    atomicAdd(&diagnostics.rollouts, 1u);
+    
+    // === PHASE 4: BACKPROPAGATION ===
+    // Update all nodes along path
     for (var i = 0u; i < path_length; i++) {
         let node_idx = path[i];
         
@@ -789,17 +705,16 @@ fn mcts_othello_iteration(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Increment visits
         atomicAdd(&node_visits[node_idx], 1);
         
-        // Calculate reward from Parent's perspective (Action Value)
-        // We want to store wins for the player who made the move TO this node.
-        // That player is -node_player.
+        // Calculate reward from parent's perspective
+        // The player who moved TO this node is -node_player
+        // (because player_at_node is the player who plays FROM this node)
         let node_player = node_info[node_idx].player_at_node;
-        var reward = result;
+        let parent_player = -node_player;
         
-        // If the player who moved to this node (-node_player) is NOT the winner (leaf_player),
-        // then they lost (reward = 2 - result).
-        // Note: result is 2 for leaf_player win, 0 for loss, 1 for draw.
-        if (-node_player != leaf_player) {
-            reward = 2 - result;
+        var reward = sim_result;
+        // If parent_player is not the simulation winner (leaf_player), flip the result
+        if (parent_player != leaf_player) {
+            reward = 2 - sim_result;
         }
         
         atomicAdd(&node_wins[node_idx], reward);
