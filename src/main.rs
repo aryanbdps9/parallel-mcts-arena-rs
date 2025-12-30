@@ -247,6 +247,16 @@ struct Args {
     /// Typical range: 0.01 (very greedy) to 1.0 (more exploratory).
     #[arg(long, default_value_t = 0.6)]
     gpu_temperature: f32,
+
+    /// Maximum nodes for GPU-native MCTS tree (Othello).
+    /// 
+    /// If not specified, automatically calculated based on GPU buffer limits (~8.2M).
+    /// Set higher if you have GPU memory to spare (each node uses ~552 bytes total).
+    /// Examples: 10000000 (10M) for 5.5GB, 20000000 (20M) for 11GB
+    /// 
+    /// WARNING: Setting too high will cause GPU allocation failures!
+    #[arg(long)]
+    gpu_max_nodes: Option<u32>,
 }
 
 /// Main entry point for the Parallel Multi-Game MCTS Engine
@@ -372,6 +382,7 @@ fn main() -> io::Result<()> {
             args.gpu_native_batch_size,
             args.gpu_virtual_loss_weight,
             args.gpu_temperature,
+            args.gpu_max_nodes,
         );
         
         return gui::run_gui(gui_app)

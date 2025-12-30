@@ -27,4 +27,5 @@ pub const HIVE_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/hive.wgsl"
 pub const MCTS_TREE_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/mcts_tree.wgsl"));
 
 /// GPU-native MCTS for Othello (complete iteration in one kernel)
+#[allow(dead_code)]
 pub const MCTS_OTHELLO_SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/mcts_othello.wgsl"));

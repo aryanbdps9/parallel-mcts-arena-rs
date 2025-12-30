@@ -158,6 +158,7 @@ impl AIWorker {
         gpu_native_batch_size: u32,
         gpu_virtual_loss_weight: f32,
         gpu_temperature: f32,
+        gpu_max_nodes: Option<u32>,
     ) -> Self {
         use std::sync::mpsc::channel;
         use std::collections::HashMap;
@@ -250,7 +251,8 @@ impl AIWorker {
                                     gpu_exploration_constant as f32,
                                     gpu_virtual_loss_weight,
                                     gpu_temperature,
-                                    timeout,  // Add timeout parameter
+                                    timeout,
+                                    gpu_max_nodes,
                                 ) {
                                     if telemetry.saturated {
                                         eprintln!(
@@ -583,6 +585,8 @@ pub struct GuiApp {
     pub gpu_virtual_loss_weight: f32,
     /// Temperature for GPU-native softmax selection
     pub gpu_temperature: f32,
+    /// Optional override for max nodes in GPU-native MCTS
+    pub gpu_max_nodes: Option<u32>,
     pub selected_settings_index: usize,
 
     // UI state
@@ -631,6 +635,7 @@ impl GuiApp {
         gpu_native_batch_size: u32,
         gpu_virtual_loss_weight: f32,
         gpu_temperature: f32,
+        gpu_max_nodes: Option<u32>,
     ) -> Self {
         let default_game = GameWrapper::Gomoku(GomokuState::new(board_size, line_size));
         let game_controller = GameController::new(default_game.clone());
@@ -648,7 +653,7 @@ impl GuiApp {
             game_status: GameStatus::InProgress,
             move_history: Vec::new(),
             game_renderer: renderer,
-            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q, gpu_native_batch_size, gpu_virtual_loss_weight, gpu_temperature),
+            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q, gpu_native_batch_size, gpu_virtual_loss_weight, gpu_temperature, gpu_max_nodes),
             ai_thinking: false,
             ai_thinking_start: None,
             last_search_stats: None,
@@ -670,6 +675,7 @@ impl GuiApp {
             gpu_native_batch_size,
             gpu_virtual_loss_weight,
             gpu_temperature,
+            gpu_max_nodes,
             selected_settings_index: 0,
             needs_redraw: true,
             hover_button: None,
@@ -737,6 +743,7 @@ impl GuiApp {
             self.gpu_native_batch_size,
             self.gpu_virtual_loss_weight,
             self.gpu_temperature,
+            self.gpu_max_nodes,
         );
 
         // Check if AI should move first

@@ -961,6 +961,7 @@ impl<S: GameState> MCTS<S> {
     /// * `num_batches` - Number of batches to run
     /// * `exploration` - C_puct exploration parameter
     /// * `virtual_loss_weight` - Weight applied to virtual loss during selection
+    /// * `gpu_max_nodes` - Optional override for max nodes (None = auto-calculate from GPU limits)
     ///
     /// # Returns
     /// The best move as (x, y), total visits, Q value, children stats, total nodes allocated, and GPU telemetry
@@ -976,6 +977,7 @@ impl<S: GameState> MCTS<S> {
         virtual_loss_weight: f32,
         temperature: f32,
         timeout_secs: u64,
+        gpu_max_nodes: Option<u32>,
     ) -> Option<((usize, usize), i32, f64, Vec<(usize, usize, i32, i32, f64)>, u32, gpu::OthelloRunTelemetry)> {
         use std::sync::Arc;
 
@@ -1009,12 +1011,36 @@ impl<S: GameState> MCTS<S> {
             ));
         }
 
-        // Use existing GPU-native engine if available (no new allocations needed)
+        // Use existing GPU-native engine if available (check if max_nodes matches)
         let gpu_mcts_arc = {
             let mut guard = self.gpu_native_othello.lock();
-            if let Some(ref existing) = *guard {
-                existing.clone()
+            
+            // Check if we can reuse existing engine
+            let should_recreate = if let Some(ref existing) = *guard {
+                if let Some(requested) = gpu_max_nodes {
+                    let existing_capacity = existing.lock().get_capacity();
+                    if existing_capacity != requested {
+                        eprintln!(
+                            "[GPU-Native WARNING] Requested max_nodes={} but existing engine has capacity={}. Recreating engine...",
+                            requested, existing_capacity
+                        );
+                        true  // Recreate with new capacity
+                    } else {
+                        false  // Capacity matches, reuse
+                    }
+                } else {
+                    false  // No user override, reuse existing
+                }
             } else {
+                true  // No existing engine, need to create
+            };
+            
+            if !should_recreate {
+                guard.as_ref().unwrap().clone()
+            } else {
+                // Drop existing if any
+                *guard = None;
+                
                 // Need to create a new engine - get or create GPU context
                 let gpu_context = if let Some(ref acc) = self.gpu_accelerator {
                     acc.lock().get_context()
@@ -1032,9 +1058,14 @@ impl<S: GameState> MCTS<S> {
                 // Each node requires ~256 bytes for children_indices buffer (64 children * 4 bytes)
                 // This is the largest single buffer, so it dictates the limit
                 let max_storage_size = gpu_context.max_storage_buffer_binding_size();
-                // Use 90% of the limit to be safe, and ensure we don't overflow
-                let max_nodes = (max_storage_size as f64 * 0.9 / 256.0) as u32;
-                eprintln!("[GPU-Native] Max nodes set to {} based on storage limit of {} bytes", max_nodes, max_storage_size);
+                // Use 98% of the limit - we can be aggressive since we have capacity monitoring
+                let max_nodes = gpu_max_nodes.unwrap_or_else(|| {
+                    (max_storage_size as f64 * 0.98 / 256.0) as u32
+                });
+                eprintln!("[GPU-Native] Max nodes set to {} {}based on storage limit of {} bytes", 
+                    max_nodes, 
+                    if gpu_max_nodes.is_some() { "(user override) " } else { "" },
+                    max_storage_size);
 
                 let new_engine = gpu::GpuOthelloMcts::new(
                     gpu_context,
@@ -1158,12 +1189,13 @@ impl<S: GameState> MCTS<S> {
                 break;
             }
 
-            // If we are within 10% of capacity, stop dispatching more batches to avoid illegal proposals
-            let cap_guard = (telemetry.node_capacity as f32 * 0.9) as u32;
-            if telemetry.alloc_count_after >= cap_guard {
+            // If we are within 2% of capacity, stop dispatching more batches to avoid illegal proposals
+            let nodes_in_use = telemetry.alloc_count_after.saturating_sub(telemetry.free_count_after);
+            let cap_guard = (telemetry.node_capacity as f32 * 0.98) as u32;
+            if nodes_in_use >= cap_guard {
                 eprintln!(
-                    "[GPU-Native WARNING] Node pool near capacity: {} / {} after batch {}; stopping early",
-                    telemetry.alloc_count_after, telemetry.node_capacity, batch
+                    "[GPU-Native WARNING] Node pool near capacity: {} in use ({} allocated - {} freed) / {} after batch {}; stopping early",
+                    nodes_in_use, telemetry.alloc_count_after, telemetry.free_count_after, telemetry.node_capacity, batch
                 );
                 break;
             }
@@ -1325,7 +1357,8 @@ impl<S: GameState> MCTS<S> {
 
         // Calculate max_nodes based on GPU limits
         let max_storage_size = gpu_context.max_storage_buffer_binding_size();
-        let max_nodes = (max_storage_size as f64 * 0.9 / 256.0) as u32;
+        // Use 98% of the limit - we can be aggressive since we have capacity monitoring
+        let max_nodes = (max_storage_size as f64 * 0.98 / 256.0) as u32;
         eprintln!("[GPU-Native] Max nodes set to {} based on storage limit of {} bytes", max_nodes, max_storage_size);
 
         let mut engine = gpu::GpuOthelloMcts::new(gpu_context, max_nodes, iterations_per_batch);

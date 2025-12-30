@@ -92,7 +92,9 @@ fn main() {
                 num_batches,
                 1.4,
                 1.0, // virtual loss weight
-                0, // No timeout, use batch limit
+                1.0, // temperature
+                0, // timeout_secs
+                None, // gpu_max_nodes
             );
             let elapsed = start.elapsed();
             
