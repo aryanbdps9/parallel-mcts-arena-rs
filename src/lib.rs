@@ -1058,10 +1058,18 @@ impl<S: GameState> MCTS<S> {
                 // Each node requires ~256 bytes for children_indices buffer (64 children * 4 bytes)
                 // This is the largest single buffer, so it dictates the limit
                 let max_storage_size = gpu_context.max_storage_buffer_binding_size();
+                if max_storage_size == 0 {
+                    eprintln!("[GPU-Native HOST FATAL] GPU context reports max_storage_buffer_binding_size == 0! Cannot allocate node pool. This is a driver or hardware issue.");
+                    panic!("GPU context reports max_storage_buffer_binding_size == 0; cannot create node pool");
+                }
                 // Use 98% of the limit - we can be aggressive since we have capacity monitoring
                 let max_nodes = gpu_max_nodes.unwrap_or_else(|| {
                     (max_storage_size as f64 * 0.98 / 256.0) as u32
                 });
+                if max_nodes == 0 {
+                    eprintln!("[GPU-Native HOST FATAL] Computed max_nodes == 0 (max_storage_size = {}). Cannot create node pool. This is a driver, hardware, or configuration issue.", max_storage_size);
+                    panic!("Computed max_nodes == 0; cannot create node pool");
+                }
                 eprintln!("[GPU-Native] Max nodes set to {} {}based on storage limit of {} bytes", 
                     max_nodes, 
                     if gpu_max_nodes.is_some() { "(user override) " } else { "" },
@@ -1071,12 +1079,11 @@ impl<S: GameState> MCTS<S> {
                     gpu_context,
                     max_nodes,
                     iterations_per_batch,
-                );
+                ).expect("Failed to create GpuOthelloMcts");
+                eprintln!("[GPU-Native HOST] After creation: new_engine.get_capacity() = {}", new_engine.get_capacity());
                 let engine_arc = Arc::new(Mutex::new(new_engine));
-                
                 // Store it in the MCTS struct for reuse across searches
                 *guard = Some(engine_arc.clone());
-                
                 engine_arc
             }
         };
@@ -1361,7 +1368,8 @@ impl<S: GameState> MCTS<S> {
         let max_nodes = (max_storage_size as f64 * 0.98 / 256.0) as u32;
         eprintln!("[GPU-Native] Max nodes set to {} based on storage limit of {} bytes", max_nodes, max_storage_size);
 
-        let mut engine = gpu::GpuOthelloMcts::new(gpu_context, max_nodes, iterations_per_batch);
+        let mut engine = gpu::GpuOthelloMcts::new(gpu_context, max_nodes, iterations_per_batch)
+            .expect("Failed to create GpuOthelloMcts");
         engine.init_tree(board, current_player, legal_moves);
         *self.gpu_native_othello.lock() = Some(Arc::new(Mutex::new(engine)));
     }

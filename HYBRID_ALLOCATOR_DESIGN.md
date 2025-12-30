@@ -1,5 +1,6 @@
 # Hybrid Allocator Design (Updated as of December 2025)
 
+
 ## Overview
 This document describes the current design of the hybrid memory allocator for GPU-native Monte Carlo Tree Search (MCTS) in Othello, as implemented in the `parallel-mcts-arena` project. The allocator is designed for high performance, robustness, and correctness, supporting large-scale tree search on the GPU with per-workgroup free lists, generational node tracking, and diagnostics.
 
@@ -476,3 +477,35 @@ This hybrid approach combines the best of:
 ---
 
 **Ready to implement?** Review this design and give the go-ahead! 🚀
+
+---
+
+## Selective Node Recycling and Pruning Policy (December 2025 Update)
+
+### Motivation
+
+The allocator should never prune large, valuable subtrees solely due to memory pressure. Pruning should only occur for subtrees that become unreachable after a move (natural pruning), or for nodes that are objectively low-value.
+
+### New Policy
+
+1. **Natural Pruning Only:**  
+    - Subtrees are pruned only when they become unreachable due to a root move (advance_root).  
+    - No reachable subtree is pruned just because memory is low.
+
+2. **Selective Node Recycling:**  
+    - When nearing memory capacity, instead of pruning entire subtrees, only recycle (prune) nodes with the lowest PUCT value (i.e., least promising/visited/valuable leaves).
+    - Maintain a small pool or priority queue of recyclable nodes, and only recycle these when absolutely necessary.
+    - Never delete high-value, high-visit, or high-PUCT nodes.
+
+3. **Graceful Degradation:**  
+    - If memory is exhausted and no low-value leaves are available, pause or slow down search, or play the move early and start rollouts instead of expansion.
+    - Log a warning or reduce batch size, but never delete valuable subtrees.
+
+4. **Diagnostics:**  
+    - Track and log memory pressure events, node recycling frequency, and the value distribution of recycled nodes.
+    - Use this data to tune the recycling policy.
+
+### Expected Outcome
+
+- Only “dead” or low-value parts of the tree are pruned, preserving valuable search information and improving AI performance.
+- Memory pressure never causes the loss of high-value subtrees.

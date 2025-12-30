@@ -18,6 +18,8 @@ gpu = ["wgpu", "bytemuck", "pollster", "futures"]
 
 # Runtime Dependencies
 [dependencies]
+# Random number generation for MCTS playouts
+rand = "0.8"
 # Command line argument parsing
 clap = { version = "4.5.40", features = ["derive"] }
 # Parallel processing for multi-threaded MCTS

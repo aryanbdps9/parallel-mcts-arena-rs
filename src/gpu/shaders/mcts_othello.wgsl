@@ -2,9 +2,61 @@
 // Main MCTS Kernel Implementation (restored minimal version)
 // =============================================================================
 fn mcts_othello_iteration(global_id: vec3<u32>) {
-    // Example: do nothing (replace with actual logic as needed)
-    // This is a placeholder to ensure the entry point is valid.
-    // TODO: Restore full kernel logic if needed.
+        // Diagnostic: count kernel entries
+        atomicAdd(&diagnostics._pad0, 1u); // Use _pad0 as "kernel_entries" counter
+    // Minimal MCTS search loop
+    let my_workgroup = global_id.x % 256u;
+    let thread_id = global_id.x;
+    init_rng(thread_id, params.seed);
+
+    // Selection phase: start at root
+    var path: array<u32, MAX_PATH_LENGTH>;
+    var path_len: u32 = 0u;
+    var current = params.root_idx;
+    path[path_len] = current;
+    path_len++;
+
+    // Traverse down the tree until a leaf or terminal node
+    loop {
+        let info = node_info[current];
+        let state = atomicLoad(&node_state[current]);
+        if (state != NODE_STATE_READY) {
+            atomicAdd(&diagnostics.selection_terminal, 1u);
+            break;
+        }
+        if (info.num_children == 0u) {
+            atomicAdd(&diagnostics.selection_no_children, 1u);
+            break;
+        }
+        if (path_len >= MAX_PATH_LENGTH) {
+            atomicAdd(&diagnostics.selection_path_cap, 1u);
+            break;
+        }
+        // Select child
+        let child = select_best_child(current);
+        if (child == INVALID_INDEX) {
+            atomicAdd(&diagnostics.selection_invalid_child, 1u);
+            break;
+        }
+        path[path_len] = child;
+        path_len++;
+        current = child;
+    }
+
+    // Expansion phase
+    atomicAdd(&diagnostics.expansion_attempts, 1u);
+    var board = reconstruct_board(&path, path_len);
+    let expand_success = expand_node(current, &board, my_workgroup);
+    if (expand_success) {
+        atomicAdd(&diagnostics.expansion_success, 1u);
+    }
+
+    // Rollout phase
+    atomicAdd(&diagnostics.rollouts, 1u);
+    // (Stub: actual rollout logic can be added here)
+
+    // Backpropagation phase (stub)
+    // (Stub: actual backprop logic can be added here)
 }
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -445,7 +497,53 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
     if (alloc_idx < params.max_nodes) {
         return alloc_idx;
     }
+
+    // Value-based node recycling: scan for low-value leaves
+    // Only attempt a small window to avoid stalls; randomize start
+    let scan_window: u32 = 128u;
+    let start_idx = rand_u32() % (params.max_nodes - scan_window);
+    var best_idx: u32 = INVALID_INDEX;
+    var best_visits: i32 = 1000000000;
+    for (var i = 0u; i < scan_window; i++) {
+        let node_idx = start_idx + i;
+        if (node_idx == params.root_idx) { continue; }
+        let info = node_info[node_idx];
+        // Only recycle leaf nodes that are not root, not already empty, and not in use
+        let state = atomicLoad(&node_state[node_idx]);
+        if (state != NODE_STATE_READY) { continue; }
+        if (info.num_children != 0u) { continue; }
+        let visits = atomicLoad(&node_visits[node_idx]);
+        // Only consider nodes with very low visits (e.g., <= 1)
+        if (visits < best_visits && visits <= 1) {
+            best_visits = visits;
+            best_idx = node_idx;
+        }
+    }
+    if (best_idx != INVALID_INDEX) {
+        // Recycle this node
+        atomicStore(&node_visits[best_idx], 0);
+        atomicStore(&node_wins[best_idx], 0);
+        atomicStore(&node_vl[best_idx], 0);
+        atomicStore(&node_state[best_idx], NODE_STATE_EMPTY);
+        node_info[best_idx] = NodeInfo(INVALID_INDEX, INVALID_INDEX, 0u, 0);
+        for (var i = 0u; i < MAX_CHILDREN; i++) {
+            set_child_idx(best_idx, i, INVALID_INDEX);
+            set_child_prior(best_idx, i, 0.0);
+        }
+        // Add to free list and return
+        let local_top2 = atomicAdd(&free_tops[my_workgroup], 1u);
+        if (local_top2 < 8192u) {
+            free_lists[my_workgroup][local_top2] = best_idx;
+        }
+        // Diagnostics: count recycling event and value
+        atomicAdd(&diagnostics.alloc_failures, 1u); // Still count as alloc failure
+        // Optionally, add more detailed recycling diagnostics here
+        return best_idx;
+    }
+
+    // No recyclable node found: log memory pressure and fail
     atomicAdd(&diagnostics.alloc_failures, 1u);
+    // Optionally, add a separate memory pressure counter here
     return INVALID_INDEX;
 }
 
@@ -527,11 +625,40 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
     // Try to acquire expanding lock
     let old_state = atomicCompareExchangeWeak(&node_state[node_idx], NODE_STATE_READY, NODE_STATE_EXPANDING);
     if (old_state.exchanged == false || old_state.old_value != NODE_STATE_READY) {
+        atomicAdd(&diagnostics.expansion_locked, 1u);
         return false;  // Someone else is expanding or already expanded
     }
-    // ...existing expansion logic for a single attempt...
-    // (This should generate children and update node_info, node_state, etc.)
-    // For now, just return true to indicate a successful expansion attempt.
+
+    // Minimal expansion: generate all valid moves for the current player
+    let info = node_info[node_idx];
+    let player = info.player_at_node;
+    var num_children: u32 = 0u;
+    for (var y = 0; y < i32(params.board_height); y++) {
+        for (var x = 0; x < i32(params.board_width); x++) {
+            if (is_valid_move(board, x, y, player)) {
+                // Allocate child node
+                let child_idx = try_allocate_node(my_workgroup);
+                if (child_idx == INVALID_INDEX) {
+                    continue;
+                }
+                // Set up child node info
+                node_info[child_idx] = NodeInfo(node_idx, encode_move(x, y), 0u, -player);
+                atomicStore(&node_state[child_idx], NODE_STATE_READY);
+                set_child_idx(node_idx, num_children, child_idx);
+                set_child_prior(node_idx, num_children, 1.0); // Uniform prior for now
+                num_children++;
+                if (num_children >= MAX_CHILDREN) {
+                    break;
+                }
+            }
+        }
+        if (num_children >= MAX_CHILDREN) {
+            break;
+        }
+    }
+    // Update parent node info
+    node_info[node_idx].num_children = num_children;
+    atomicStore(&node_state[node_idx], NODE_STATE_READY);
     return true;
 }
 

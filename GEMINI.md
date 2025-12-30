@@ -1,3 +1,99 @@
+### Prompt Template (2025, User Style)
+
+When you need to report a bug, request a fix, or hand off to another AI or developer, use the following prompt format. This template is designed to be direct, actionable, and to-the-point, matching the original user style:
+
+```
+Instructions (repeat and follow, no omission):
+1. Isolate every bug into a minimal, targeted test that reproduces the failure.
+2. Ensure the test fails before any fix is applied.
+3. Fix the bug in the codebase.
+4. Ensure the test now passes after the fix.
+5. Only report success if the test is proven to catch the bug and the bug is fixed.
+6. Never request manual terminal intervention or ask the user to kill a terminal.
+7. Repeat and follow these instructions for every new issue.
+
+Additional context:
+- All code and documentation must be kept in sync. Any architectural or behavioral changes must be documented in the relevant design docs.
+- GPU_ARCHITECTURE.md describes the old architecture. HYBRID_ALLOCATOR_DESIGN.md describes the new/next design. Always reference both for architectural context.
+- Logs provided by the user are for context only and should not be included in the prompt.
+- These instructions must be included in every generated prompt, so the user can simply ask for a prompt next time.
+```
+
+---
+
+### Note on Prompt Generation
+
+Whenever you are asked to "make me a prompt," use the template above. Always:
+- Repeat the instructions exactly, with any updates or clarifications.
+- Reference HYBRID_ALLOCATOR_DESIGN.md as the new/next design, and GPU_ARCHITECTURE.md as the old design.
+- Keep code and documentation in sync.
+- Do not include user logs in the prompt.
+- Place this note and the template at the top of GEMINI.md for easy reference.
+
+### Prompt Generation Instructions (2025)
+
+When asked to "make me a prompt" for debugging or bug reporting, follow these steps:
+
+1. **Summarize the workflow and expectations:**
+  - State that all bugs must be isolated into a minimal, targeted test that fails with the bug present and passes only when the bug is truly fixed.
+  - State that the workflow is fully automated: never request manual terminal intervention, and never ask the user to kill a terminal.
+  - State that all code and documentation must be kept in sync, and all architectural or behavioral changes must be documented in the relevant design docs.
+  - State that GPU_ARCHITECTURE.md describes the old architecture, and HYBRID_ALLOCATOR_DESIGN.md describes the new/next design.
+  - State that logs provided by the user are for context only and should not be included in the prompt.
+  - State that these instructions should be included in every generated prompt, so the user can simply ask for a prompt next time.
+
+2. **Update documentation as needed:**
+  - If the bug or fix involves architectural changes, update HYBRID_ALLOCATOR_DESIGN.md.
+  - If the workflow or expectations change, update this section and reference the change in the prompt.
+
+3. **Prompt content:**
+  - The prompt should be clear, concise, and actionable for the next AI or developer.
+  - It should always repeat the workflow and instructions above, with any updates or clarifications.
+
+---
+### Debugging Workflow (2025)
+
+The current workflow for debugging GPU-native MCTS (especially for hard-to-reproduce or runtime-only bugs) is as follows:
+
+1. **User runs the release build** (e.g., `play.exe` with relevant arguments) and observes a problem (freeze, crash, incorrect stats, etc.).
+  - User provides logs, command-line arguments, and any relevant runtime output or error messages.
+
+2. **AI reviews the logs and context** to understand the failure mode and hypothesize root causes.
+
+3. **Test-driven isolation:**
+  - AI adds or updates a test that captures the bug or its symptoms. If the bug cannot be reproduced in a test, AI requests more info or diagnostics from the user.
+  - The test must fail if the bug is present, and pass only when the bug is truly fixed (not by weakening or silencing the test).
+
+4. **Iterative diagnostics and patching:**
+  - AI may add runtime diagnostics (e.g., logging, telemetry, assertions) to help isolate the bug.
+  - If more info is needed, AI requests the user to run the release build again and provide updated logs/output.
+  - This loop continues: add diagnostics → user runs release → AI analyzes logs → repeat until the bug is isolated.
+
+5. **Bug fix and validation:**
+  - Once the root cause is found, AI patches the code to fix the bug.
+  - All tests (debug and release) must pass, and the fix must not introduce new warnings or errors.
+  - AI ensures that all warnings are addressed (not just silenced), and that the codebase remains clean.
+
+6. **Documentation and communication:**
+  - Any architectural or behavioral changes are documented in the relevant design docs.
+  - Progress, blockers, and next steps are communicated clearly.
+
+**Key principles:**
+- Never nerf or silence a test to "fix" a bug; only a real fix is acceptable.
+- Always keep the codebase warning-free and tests passing before considering a bug resolved.
+- Use diagnostics and test-driven development to ensure bugs are isolated and fixed robustly.
+
+This workflow ensures that even subtle or release-only bugs are reliably captured, diagnosed, and fixed, with a clean and maintainable codebase.
+### Working Style
+
+- Always prioritize correctness and robustness: Never weaken or skip tests, and always ensure all tests pass before considering a change complete.
+- Use continuous validation: After every change, run the full test suite and do not proceed until all errors and warnings are resolved.
+- If a bug is reported, write a test that captures the bug before attempting a fix. Only consider the bug fixed when the test passes.
+- Document all architectural or behavioral changes in the relevant design documents (e.g., HYBRID_ALLOCATOR_DESIGN.md) as part of the workflow.
+- Prefer incremental, well-validated improvements over speculative or large refactors.
+- If a bug cannot be reproduced in a test, request more data or a reliable reproduction before proceeding.
+- Communicate progress and blockers clearly, and keep the codebase and documentation in sync at all times.
+
 ### Goal
 Make GPU-native MCTS clearly outperform CPU-only MCTS in strength and throughput while staying correct, stable, and reusable across turns and games.  Main idea is this: We'll run MCTS on CPU and GPU almost identically (except the async thing maybe), but identical in terms of identical reward shaping (if any), identical rollout (including rollout parameters if any), etc. Since with GPU we can throw more compute at MCTS, it should outcompete an almost identical MCTS with fewer compute (CPU). The following is written by the AI who worked on it with me. So, please take it with a grain of salt.
 
