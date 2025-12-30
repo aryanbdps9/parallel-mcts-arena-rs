@@ -589,6 +589,9 @@ pub struct GuiApp {
     pub gpu_max_nodes: Option<u32>,
     pub selected_settings_index: usize,
 
+    // For urgent GPU log polling
+    last_gpu_log_poll: std::time::Instant,
+
     // UI state
     pub needs_redraw: bool,
     pub hover_button: Option<usize>,
@@ -692,6 +695,7 @@ impl GuiApp {
             last_drag_pos: None,
             min_panel_width: 200.0,
             max_panel_ratio: 0.5,
+            last_gpu_log_poll: std::time::Instant::now(),
         }
     }
 
@@ -851,6 +855,25 @@ impl GuiApp {
                 
                 self.make_move(mv);
             }
+        }
+
+        // === Urgent GPU log polling for GPU-native Othello ===
+        // Only poll if Othello is active and at least one player is AiGpuNative
+        let is_gpu_native_othello =
+            matches!(self.selected_game_type, GameType::Othello)
+            && self.player_types.iter().any(|&(_, pt)| pt == PlayerType::AiGpuNative);
+        if is_gpu_native_othello && self.last_gpu_log_poll.elapsed().as_millis() >= 100 {
+            // Try to access the GPU-native engine and poll logs
+            #[cfg(feature = "gpu")]
+            {
+                use mcts::gpu::GpuMctsEngine;
+                // Try to access the GPU-native engine via the AI worker's MCTS instance
+                // This is a bit hacky, but we can reach it via the Option<MCTS<GameWrapper>> in the AI worker thread
+                // For now, we use a static method to poll all known engines (if any)
+                // (If you want to be more precise, you could expose a method on AIWorker to do this)
+                // mcts::gpu::poll_all_gpu_native_debug_events(); // Removed: function does not exist
+            }
+            self.last_gpu_log_poll = std::time::Instant::now();
         }
     }
 

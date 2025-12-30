@@ -8,7 +8,18 @@ use crate::gpu::GpuContext;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MctsOthelloParams {
-    pub dummy: u32,
+    pub num_iterations: u32,
+    pub max_nodes: u32,
+    pub exploration: f32,
+    pub virtual_loss_weight: f32,
+    pub root_idx: u32,
+    pub seed: u32,
+    pub board_width: u32,
+    pub board_height: u32,
+    pub game_type: u32,
+    pub temperature: f32,
+    pub _pad0: u32,
+    pub _pad1: u32,
 }
 
 #[repr(C)]
@@ -18,6 +29,8 @@ pub struct OthelloNodeInfo {
     pub move_id: u32,
     pub num_children: u32,
     pub player_at_node: i32,
+    pub flags: u32, // bit 0: deleted, bit 1: zero, bit 2: dirty
+    pub _pad: u32,  // for alignment (optional, for 32-byte struct)
 }
 
 #[repr(C)]
@@ -35,6 +48,7 @@ pub struct OthelloDiagnostics {
     pub exp_lock_retry: u32,
     pub expansion_terminal: u32,
     pub alloc_failures: u32,
+    pub recycling_events: u32, // NEW: count value-based recycling
     pub rollouts: u32,
     pub _pad0: u32,
     pub _pad1: u32,

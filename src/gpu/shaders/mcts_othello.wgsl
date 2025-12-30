@@ -53,10 +53,26 @@ fn mcts_othello_iteration(global_id: vec3<u32>) {
 
     // Rollout phase
     atomicAdd(&diagnostics.rollouts, 1u);
-    // (Stub: actual rollout logic can be added here)
+    // Simulate a real Othello game from the leaf node
+    var rollout_board = reconstruct_board(&path, path_len);
+    let leaf_player = node_info[current].player_at_node;
+    let rollout_result = simulate_game(&rollout_board, leaf_player);
 
-    // Backpropagation phase (stub)
-    // (Stub: actual backprop logic can be added here)
+    // Backpropagation phase
+    for (var i = path_len; i > 0u; i--) {
+        let node_idx = path[i - 1u];
+        // Remove virtual loss
+        atomicAdd(&node_vl[node_idx], -1);
+        // Increment visits
+        atomicAdd(&node_visits[node_idx], 1);
+        // Calculate reward from node's perspective
+        let node_player = node_info[node_idx].player_at_node;
+        var reward = rollout_result;
+        if (node_player != leaf_player) {
+            reward = 2 - rollout_result;
+        }
+        atomicAdd(&node_wins[node_idx], reward);
+    }
 }
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -77,9 +93,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // Constants
 // =============================================================================
 
+
 const MAX_CHILDREN: u32 = 64u;
 const MAX_PATH_LENGTH: u32 = 128u;
 const INVALID_INDEX: u32 = 0xFFFFFFFFu;
+
+// Explicit error codes for select_best_child
+const SELECT_BEST_CHILD_NO_CHILDREN: u32 = 0xFFFFFFFEu;
+const SELECT_BEST_CHILD_NO_VALID: u32 = 0xFFFFFFFDu;
+const SELECT_BEST_CHILD_SOFTMAX_PANIC: u32 = 0xFFFFFFFCu;
 
 const NODE_STATE_EMPTY: u32 = 0u;
 const NODE_STATE_EXPANDING: u32 = 1u;
@@ -116,6 +138,8 @@ struct NodeInfo {
     move_id: u32,       // Encoded as y * width + x, or INVALID for root
     num_children: u32,
     player_at_node: i32,
+    flags: u32,         // bit 0: deleted, bit 1: zero, bit 2: dirty
+    _pad: u32,          // for alignment (optional, for 32-byte struct)
 }
 
 struct Diagnostics {
@@ -131,6 +155,7 @@ struct Diagnostics {
     exp_lock_retry: atomic<u32>,
     expansion_terminal: atomic<u32>,
     alloc_failures: atomic<u32>,
+    recycling_events: atomic<u32>, // NEW: count value-based recycling
     rollouts: atomic<u32>,
     _pad0: atomic<u32>,
     _pad1: atomic<u32>,
@@ -151,8 +176,6 @@ struct Diagnostics {
 // Per-workgroup free lists
 @group(0) @binding(7) var<storage, read_write> free_lists: array<array<u32, 8192>, 256>;
 @group(0) @binding(8) var<storage, read_write> free_tops: array<atomic<u32>, 256>;
-// Generational tracking
-@group(0) @binding(9) var<storage, read_write> node_generations: array<u32>;
 
 // Group 1: Execution State
 @group(1) @binding(0) var<uniform> params: MctsParams;
@@ -438,48 +461,64 @@ fn calculate_puct(parent_idx: u32, child_slot: u32) -> f32 {
 fn select_best_child(parent_idx: u32) -> u32 {
     let info = node_info[parent_idx];
     let num_children = info.num_children;
-    
     if (num_children == 0u) {
-        return INVALID_INDEX;
+        return SELECT_BEST_CHILD_NO_CHILDREN;
     }
-    
-    // Calculate PUCT scores for all children
+
+    // Collect valid children (child_idx != INVALID_INDEX)
+    var valid_slots: array<u32, 64>;
+    var valid_count: u32 = 0u;
+    for (var i = 0u; i < num_children; i++) {
+        let child_idx = get_child_idx(parent_idx, i);
+        if (child_idx != INVALID_INDEX) {
+            valid_slots[valid_count] = i;
+            valid_count++;
+        }
+    }
+    if (valid_count == 0u) {
+        return SELECT_BEST_CHILD_NO_VALID;
+    }
+
+    // Calculate PUCT scores for valid children only
     var scores: array<f32, 64>;
     var max_score = -1e9;
-    
-    for (var i = 0u; i < num_children; i++) {
-        scores[i] = calculate_puct(parent_idx, i);
-        max_score = max(max_score, scores[i]);
+    for (var j = 0u; j < valid_count; j++) {
+        let slot = valid_slots[j];
+        scores[j] = calculate_puct(parent_idx, slot);
+        max_score = max(max_score, scores[j]);
     }
-    
+
     // Convert to probabilities using softmax with temperature (subtract max for numerical stability)
     var probs: array<f32, 64>;
     var sum_exp = 0.0;
-    let temp = max(params.temperature, 0.001);  // Prevent division by zero
-    
-    for (var i = 0u; i < num_children; i++) {
-        probs[i] = exp((scores[i] - max_score) / temp);
-        sum_exp += probs[i];
+    let temp = max(params.temperature, 0.00001);
+    for (var j = 0u; j < valid_count; j++) {
+        probs[j] = exp((scores[j] - max_score) / temp);
+        sum_exp += probs[j];
     }
-    
+
     // Normalize probabilities
-    for (var i = 0u; i < num_children; i++) {
-        probs[i] /= sum_exp;
+    for (var j = 0u; j < valid_count; j++) {
+        probs[j] /= sum_exp;
     }
-    
+
     // Sample from cumulative distribution
     let rand_val = rand_f32();
     var cumulative = 0.0;
-    
-    for (var i = 0u; i < num_children; i++) {
-        cumulative += probs[i];
+    for (var j = 0u; j < valid_count; j++) {
+        cumulative += probs[j];
         if (rand_val <= cumulative) {
-            return get_child_idx(parent_idx, i);
+            return get_child_idx(parent_idx, valid_slots[j]);
         }
     }
-    
+
     // Fallback (should rarely happen due to floating point precision)
-    return get_child_idx(parent_idx, num_children - 1u);
+    // PANIC: This should never happen! Print diagnostics and trap.
+    // Print parent_idx, valid_count, scores, probs, rand_val
+    // (WGSL has no printf, so use atomic counters for diagnostics)
+    atomicAdd(&diagnostics.selection_invalid_child, 1000000u); // Mark as panic
+    // Return explicit panic code; host must handle as panic
+    return SELECT_BEST_CHILD_SOFTMAX_PANIC;
 }
 
 // Try to allocate a new node
@@ -489,12 +528,18 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
     if (local_top > 0u && local_top <= 8192u) {
         let idx = free_lists[my_workgroup][local_top - 1u];
         if (idx != INVALID_INDEX) {
+            // Clear deleted and dirty bits, set zero bit if node is zeroed
+            node_info[idx].flags &= ~1u; // clear deleted
+            node_info[idx].flags &= ~(1u << 2); // clear dirty
+            // zero bit is set if node is zeroed, otherwise must be cleared by user
             return idx;
         }
     }
     // Fallback: global allocation
     let alloc_idx = atomicAdd(&alloc_counter, 1u);
     if (alloc_idx < params.max_nodes) {
+        // New node: set zero bit, clear deleted and dirty
+        node_info[alloc_idx].flags = (1u << 1); // zero bit
         return alloc_idx;
     }
 
@@ -525,7 +570,7 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
         atomicStore(&node_wins[best_idx], 0);
         atomicStore(&node_vl[best_idx], 0);
         atomicStore(&node_state[best_idx], NODE_STATE_EMPTY);
-        node_info[best_idx] = NodeInfo(INVALID_INDEX, INVALID_INDEX, 0u, 0);
+        node_info[best_idx] = NodeInfo(INVALID_INDEX, INVALID_INDEX, 0u, 0, 1u, 0u); // set deleted bit
         for (var i = 0u; i < MAX_CHILDREN; i++) {
             set_child_idx(best_idx, i, INVALID_INDEX);
             set_child_prior(best_idx, i, 0.0);
@@ -536,8 +581,7 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
             free_lists[my_workgroup][local_top2] = best_idx;
         }
         // Diagnostics: count recycling event and value
-        atomicAdd(&diagnostics.alloc_failures, 1u); // Still count as alloc failure
-        // Optionally, add more detailed recycling diagnostics here
+        atomicAdd(&diagnostics.recycling_events, 1u);
         return best_idx;
     }
 
@@ -552,6 +596,10 @@ fn free_node(node_idx: u32, my_workgroup: u32) {
     if (node_idx == INVALID_INDEX || node_idx >= params.max_nodes) {
         return;
     }
+    // Set deleted bit, clear dirty and zero bits
+    node_info[node_idx].flags |= 1u; // set deleted
+    node_info[node_idx].flags &= ~(1u << 1); // clear zero
+    node_info[node_idx].flags &= ~(1u << 2); // clear dirty
     let local_top = atomicAdd(&free_tops[my_workgroup], 1u);
     if (local_top < 8192u) {
         free_lists[my_workgroup][local_top] = node_idx;
@@ -642,7 +690,7 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
                     continue;
                 }
                 // Set up child node info
-                node_info[child_idx] = NodeInfo(node_idx, encode_move(x, y), 0u, -player);
+                node_info[child_idx] = NodeInfo(node_idx, encode_move(x, y), 0u, -player, 0u, 0u);
                 atomicStore(&node_state[child_idx], NODE_STATE_READY);
                 set_child_idx(node_idx, num_children, child_idx);
                 set_child_prior(node_idx, num_children, 1.0); // Uniform prior for now
@@ -662,34 +710,9 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
     return true;
 }
 
+
 // =============================================================================
 // Pruning Kernel - Frees unreachable nodes after advance_root
-// Generational Cleanup Kernel - Frees nodes older than cutoff generation
-@compute @workgroup_size(256)
-fn cleanup_old_generations(
-    @builtin(global_invocation_id) global_id: vec3<u32>,
-    @builtin(workgroup_id) workgroup_id: vec3<u32>
-) {
-    let node_idx = global_id.x;
-    if (node_idx >= params.max_nodes) {
-        return;
-    }
-    let cutoff_gen = params.temperature; // Reuse temperature as cutoff for demo
-    if (node_generations[node_idx] < u32(cutoff_gen)) {
-        atomicStore(&node_visits[node_idx], 0);
-        atomicStore(&node_wins[node_idx], 0);
-        atomicStore(&node_vl[node_idx], 0);
-        atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
-        node_info[node_idx] = NodeInfo(INVALID_INDEX, INVALID_INDEX, 0u, 0);
-        for (var i = 0u; i < MAX_CHILDREN; i++) {
-            set_child_idx(node_idx, i, INVALID_INDEX);
-            set_child_prior(node_idx, i, 0.0);
-        }
-        let my_workgroup = workgroup_id.x;
-        free_node(node_idx, my_workgroup);
-    }
-}
-// =============================================================================
 
 @compute @workgroup_size(256)
 fn prune_unreachable(
@@ -735,7 +758,7 @@ fn prune_unreachable(
         atomicStore(&node_wins[node_idx], 0);
         atomicStore(&node_vl[node_idx], 0);
         atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
-        node_info[node_idx] = NodeInfo(INVALID_INDEX, INVALID_INDEX, 0u, 0);
+        node_info[node_idx] = NodeInfo(INVALID_INDEX, INVALID_INDEX, 0u, 0, 1u, 0u); // set deleted bit
         for (var i = 0u; i < MAX_CHILDREN; i++) {
             set_child_idx(node_idx, i, INVALID_INDEX);
             set_child_prior(node_idx, i, 0.0);

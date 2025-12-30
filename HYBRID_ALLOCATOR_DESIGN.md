@@ -2,7 +2,7 @@
 
 
 ## Overview
-This document describes the current design of the hybrid memory allocator for GPU-native Monte Carlo Tree Search (MCTS) in Othello, as implemented in the `parallel-mcts-arena` project. The allocator is designed for high performance, robustness, and correctness, supporting large-scale tree search on the GPU with per-workgroup free lists, generational node tracking, and diagnostics.
+This document describes the current design of the hybrid memory allocator for GPU-native Monte Carlo Tree Search (MCTS) in Othello, as implemented in the `parallel-mcts-arena` project. The allocator is designed for high performance, robustness, and correctness, supporting large-scale tree search on the GPU with per-workgroup free lists and diagnostics.
 
 ## Key Features
 - **Per-Workgroup Free Lists:**
@@ -13,10 +13,6 @@ This document describes the current design of the hybrid memory allocator for GP
 - **Global Allocator Fallback:**
     - A global atomic counter is used to allocate new nodes when all local free lists are full.
     - Ensures that allocation never fails as long as there is global capacity.
-
-- **Generational Node Tracking:**
-    - Each node is tagged with a generation number to support efficient pruning and reuse of memory across MCTS iterations and root advances.
-    - Generational cleanup is performed to reclaim nodes that are no longer reachable from the current root.
 
 - **Diagnostics and Logging:**
     - Allocation, deallocation, and pruning events are logged to a diagnostics buffer for host-side analysis.
@@ -46,7 +42,7 @@ This document describes the current design of the hybrid memory allocator for GP
 
 ---
 # Hybrid Memory Allocator Design
-## Generational + Per-Workgroup Free Lists
+## Per-Workgroup Free Lists
 
 ---
 
@@ -70,10 +66,6 @@ This document describes the current design of the hybrid memory allocator for GP
 - 256 lists × 8K = 2,048,000 total free list capacity
 - **Benefit**: Only 256 threads per list instead of 2048!
 
-**2. Generational Allocation** (Predictable Cleanup)
-- Track which "generation" (turn) each node was created in
-- Keep recent generations, bulk-free old ones
-- **Benefit**: Predictable memory usage per turn
 
 **3. Fallback Global Allocator** (Safety Net)
 - If workgroup's free list is empty, allocate new node
@@ -96,20 +88,12 @@ pub struct GpuOthelloMcts {
     root_board_buffer: Buffer,
     // ... etc
     
-    // ===== NEW: Per-Workgroup Free Lists =====
+    // ===== Per-Workgroup Free Lists =====
     free_lists_buffer: Buffer,  // [256 workgroups][8192 slots] = 2M u32s
     free_tops_buffer: Buffer,   // [256] atomic<u32> counters
-    
-    // ===== NEW: Generational Tracking =====
-    generation_buffer: Buffer,   // [max_nodes] u32 - when was each node created?
-    current_generation: u32,     // CPU-side counter (increments each turn)
-    
-    // ===== MODIFIED: Global Allocator =====
-    alloc_counter_buffer: Buffer,  // Still exists, but less used
-    
-    // ===== REMOVED =====
-    // free_list_buffer: DELETED (replaced by free_lists_buffer)
-    // free_top_buffer: DELETED (replaced by free_tops_buffer)
+    // cutoff_generation: u32, // REMOVED: generational cleanup no longer used
+    // ===== Global Allocator =====
+    alloc_counter_buffer: Buffer,  // Global atomic counter for fallback allocation
 }
 ```
 
@@ -124,16 +108,12 @@ const FREE_LIST_SIZE_PER_GROUP: u32 = 8192u;  // 8K slots per workgroup
 @group(1) @binding(5) var<storage, read_write> free_lists: array<array<u32, FREE_LIST_SIZE_PER_GROUP>, WORKGROUPS>;
 @group(1) @binding(6) var<storage, read_write> free_tops: array<atomic<u32>, WORKGROUPS>;
 
-// Generational tracking
-@group(1) @binding(7) var<storage, read_write> node_generations: array<u32>;
-
 // Global allocator (fallback)
 @group(1) @binding(8) var<storage, read_write> alloc_counter: atomic<u32>;
 
-// Params (add current_generation)
+// Params
 struct MctsParams {
     // ... existing fields ...
-    current_generation: u32,  // NEW
 }
 ```
 
@@ -145,155 +125,111 @@ struct MctsParams {
 
 ```wgsl
 fn allocate_node() -> u32 {
-    let my_workgroup = workgroup_id.x;  // 0-255
-    
-    // Step 1: Try to pop from my workgroup's free list
-    let local_top = atomicSub(&free_tops[my_workgroup], 1u);
-    
-    if (local_top > 0u && local_top <= FREE_LIST_SIZE_PER_GROUP) {
-        // Success! Got a recycled node from my workgroup
-        let node_idx = free_lists[my_workgroup][local_top - 1u];
-        
-        // Mark it as belonging to current generation
-        node_generations[node_idx] = params.current_generation;
-        
-        return node_idx;
-    } else {
-        // My workgroup's free list is empty - restore the counter
-        atomicAdd(&free_tops[my_workgroup], 1u);
+    let my_workgroup = workgroup_id.x; // 0-255
+
+    // Step 1: Try to pop from my workgroup's free list (LIFO)
+    let local_top = atomicLoad(&free_tops[my_workgroup]);
+    if (local_top > 0u) {
+        let maybe_idx = atomicSub(&free_tops[my_workgroup], 1u);
+        if (maybe_idx > 0u && maybe_idx <= FREE_LIST_SIZE_PER_GROUP) {
+            let node_idx = free_lists[my_workgroup][maybe_idx - 1u];
+            // Node is now allocated and ready for use
+            return node_idx;
+        } else {
+            // Roll back if contention or underflow
+            atomicAdd(&free_tops[my_workgroup], 1u);
+        }
     }
-    
-    // Step 2: Fallback to global allocator (fresh node)
+
+    // Step 2: Fallback to global allocator (consume new/free memory)
     let node_idx = atomicAdd(&alloc_counter, 1u);
-    
     if (node_idx < params.max_nodes) {
-        // Mark as current generation
-        node_generations[node_idx] = params.current_generation;
+        // Node is now allocated and ready for use
         return node_idx;
     }
-    
-    // Step 3: Out of memory
-    return INVALID_INDEX;
+
+    // Step 3: Memory pressure fallback (not just INVALID_INDEX)
+    // Instead of returning INVALID_INDEX, trigger memory pressure handling:
+    // - Stop expansion, only allow rollouts
+    // - Optionally, signal to host or log event
+    // - Return a sentinel or handle gracefully
+    return INVALID_INDEX; // Actual handling is policy-dependent
 }
 ```
 
 **Key Points:**
 - Only ~256 threads contend per free list (vs 2048 before)
-- If a workgroup's list is empty, falls back to global allocation
-- Every node tagged with generation number
+- If a workgroup's list is empty, falls back to global allocation (consuming new/free memory)
+- Node state is managed via node_state and value-based recycling
+- If all memory is exhausted, memory pressure policy is triggered (see below)
 
 ---
 
-### 2. **Pruning (`prune_unreachable_nodes()`)**
+### 2. **Pruning Unreachable Subtrees (Efficient Top-Down Freeing)**
 
-```wgsl
-fn prune_unreachable(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let node_idx = global_id.x;
-    let my_workgroup = workgroup_id.x;
-    
-    if (node_idx >= params.max_nodes) {
-        return;
-    }
-    
-    // Root is always reachable
-    if (node_idx == params.root_idx) {
-        return;
-    }
-    
-    // Walk up parent pointers to check reachability
-    var current = node_idx;
-    var depth = 0u;
-    var found_root = false;
-    
-    while (depth < 128u) {
-        let info = node_info[current];
-        
-        if (current == params.root_idx) {
-            found_root = true;
-            break;
-        }
-        
-        if (info.parent_idx == INVALID_INDEX) {
-            break;
-        }
-        
-        current = info.parent_idx;
-        depth++;
-    }
-    
-    // If not reachable, free this node
-    if (!found_root) {
-        // Clear node data
-        atomicStore(&node_visits[node_idx], 0);
-        atomicStore(&node_wins[node_idx], 0);
-        atomicStore(&node_vl[node_idx], 0);
-        atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
-        
-        node_info[node_idx] = NodeInfo(INVALID_INDEX, INVALID_INDEX, 0u, 0);
-        
-        for (var i = 0u; i < MAX_CHILDREN; i++) {
-            set_child_idx(node_idx, i, INVALID_INDEX);
-            set_child_prior(node_idx, i, 0.0);
-        }
-        
-        // Add to MY WORKGROUP's free list
-        let local_top = atomicAdd(&free_tops[my_workgroup], 1u);
-        
-        // Only add if there's space in this workgroup's list
-        if (local_top < FREE_LIST_SIZE_PER_GROUP) {
-            free_lists[my_workgroup][local_top] = node_idx;
-        }
-        // If overflow, node is cleaned but not recyclable (acceptable loss)
-    }
-}
-```
+
+
+After re-rooting (i.e., after a move is made and the root node is changed), we know exactly which subtrees are no longer reachable: all children of the previous root except the selected child. Instead of scanning the entire node pool or doing bottom-up reachability checks, we can efficiently free these subtrees using a top-down traversal with a deleted bit, and distribute the work efficiently across parallel workers:
+
+**TODO:** Implement periodic rebalancing of per-workgroup free lists to address long-term imbalance. For now, focus on workgroup stealing (if a workgroup's free list is empty, it can steal nodes from other workgroups or the global free list).
+
+**Single-Pass Deleted-Bit Algorithm:**
+
+
+**Efficient Parallel Work Distribution (Dynamic Partitioning):**
+
+1. Identify all children of the outgoing root except the selected child (these are the roots of unreachable subtrees).
+2. Launch a parallel pruning kernel where each worker dynamically claims work from a global atomic counter or work queue.
+3. Each worker performs a top-down traversal (BFS or DFS) of the subtree it claims, visiting all descendants. The atomic deleted bit ensures each node is only processed once, even if multiple workers reach it via different paths.
+4. For each visited node:
+    - Atomically set a `deleted` bit (or field) in the node. If the bit was already set, skip further processing for this node (deduplication).
+    - Optionally, add the node to the appropriate workgroup's free list for recycling. If the workgroup's free list is full, push the node to a global free list for overflow handling.
+    - Do not clear other node data immediately; allocation and traversal logic will respect the deleted bit. The deleted bit should be checked only in allocation and pruning contexts, not in the main MCTS search path for performance.
+
+**Why this works:**
+
+- The atomic set-and-check of the deleted bit ensures that each node is only processed (and freed) once, even if multiple workers reach it via different paths.
+- No node will be missed, as all descendants are visited from the known subtree roots.
+- No ancestor will be deleted before its descendants in a way that causes missed nodes, because the deleted bit prevents double-processing and the traversal is exhaustive from each root.
+- Dynamic partitioning (atomic work queue/counter) ensures efficient load balancing and prevents bottlenecks from large subtrees.
 
 **Key Points:**
-- Each thread adds to its own workgroup's free list
-- If a workgroup's list fills up (8K nodes), extras are just cleaned but not recycled
-- No global contention!
 
----
+- Only a single pass is needed; no need for a second clearing pass.
+- The atomic deleted bit guarantees no duplicates and no missed nodes, even with parallel workers.
+- Allocation and traversal logic must check the deleted bit to avoid using freed nodes, but this check should be as infrequent as possible for performance.
+- Optionally, a background or periodic pass can clear node data for debugging or memory hygiene, but this is not required for correctness.
+- Logging should never be verbose; aggregate fast events and log only at a slower rate to avoid buffer saturation and performance impact.
 
-### 3. **Generational Cleanup (Every N turns)**
+----
 
-```rust
-// CPU-side (in advance_root or search_gpu_native_othello)
-fn maybe_cleanup_old_generations(&mut self) {
-    const GENERATIONS_TO_KEEP: u32 = 3;  // Keep last 3 turns
-    
-    if self.current_generation > GENERATIONS_TO_KEEP {
-        let cutoff_gen = self.current_generation - GENERATIONS_TO_KEEP;
-        
-        // Run a GPU compute pass to bulk-free old generations
-        self.free_old_generations(cutoff_gen);
-    }
-}
-```
+
+### 3. **Diagnostics and Logging**
+
+The allocator tracks and logs the following events in a diagnostics buffer (GPU-side struct, host-readable):
 
 ```wgsl
-// GPU shader
-fn free_old_generations(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let node_idx = global_id.x;
-    let my_workgroup = workgroup_id.x;
-    
-    if (node_idx >= params.max_nodes) {
-        return;
-    }
-    
-    // Check if this node is from an old generation
-    if (node_generations[node_idx] < params.cutoff_generation) {
-        // Free it (same as pruning logic)
-        // Clear data...
-        // Add to workgroup free list...
-    }
+struct Diagnostics {
+    selection_terminal: atomic<u32>,
+    selection_no_children: atomic<u32>,
+    selection_invalid_child: atomic<u32>,
+    selection_path_cap: atomic<u32>,
+    expansion_attempts: atomic<u32>,
+    expansion_success: atomic<u32>,
+    expansion_locked: atomic<u32>,
+    exp_lock_rollout: atomic<u32>,
+    exp_lock_sibling: atomic<u32>,
+    exp_lock_retry: atomic<u32>,
+    expansion_terminal: atomic<u32>,
+    alloc_failures: atomic<u32>,
+    recycling_events: atomic<u32>,
+    rollouts: atomic<u32>,
+    _pad0: atomic<u32>,
+    _pad1: atomic<u32>,
 }
 ```
 
-**Key Points:**
-- Periodically free ALL nodes from old generations
-- Keeps memory usage predictable
-- Prevents indefinite growth
+**Host code** reads this buffer after search to analyze allocation failures, recycling, and memory pressure. This enables robust debugging and profiling of the allocator's behavior under load.
 
 ---
 
@@ -305,8 +241,6 @@ init_tree():
 - Create root (node 0) + 4 children (nodes 1-4)
 - alloc_counter = 5
 - all free_tops[0..255] = 0
-- current_generation = 0
-- node_generations[0..4] = 0
 ```
 
 ### Turn 2: First Search
@@ -316,7 +250,6 @@ run_iterations():
 - Workgroup 0 threads try to allocate:
   - Check free_tops[0] = 0 → empty
   - Fall back to global: nodes 5, 6, 7... allocated
-  - Mark them: node_generations[5..] = 0
 - After search: alloc_counter = 490,000
 ```
 
@@ -324,7 +257,6 @@ run_iterations():
 ```
 advance_root(move=(3,2)):
 - Set root_idx = 2
-- current_generation++ = 1
 - prune_unreachable_nodes():
   - Nodes 0, 1, 3, 4 and descendants freed
   - Workgroup 0 adds nodes [0, 1, ...] to free_lists[0]
@@ -340,19 +272,10 @@ run_iterations():
 - Workgroup 0 threads allocate:
   - Check free_tops[0] = 1800 → have recycled nodes!
   - Pop from free_lists[0][1799] → reuse old node
-  - Mark: node_generations[reused] = 1
 - Much less global allocation needed
 - Most nodes come from free lists
 ```
 
-### Turn 10: Generational Cleanup
-```
-current_generation = 7
-cleanup_old_generations(cutoff=4):
-- Free ALL nodes with generation < 4
-- Keeps nodes from generations 4, 5, 6, 7
-- Prevents indefinite accumulation
-```
 
 ---
 
@@ -370,7 +293,7 @@ cleanup_old_generations(cutoff=4):
 
 ### ✅ **Simplicity**
 - **Conceptually clear**: "Each workgroup manages its own recycling bin"
-- **Easy to reason about**: Generation numbers make cleanup predictable
+- **Easy to reason about**: Node state and recycling make cleanup predictable
 - **Incremental migration**: Can add features one at a time
 
 ---
@@ -388,11 +311,17 @@ New: 256 × 8K u32s + 256 atomics = 8MB + 1KB
 - Some workgroups might have full free lists, others empty
 - **Mitigation:** Workgroups can "steal" from global allocator
 
-### ⚠️ **Generational Overhead**
-```
-node_generations: [2M] u32 = 8MB additional memory
-```
-**Impact:** ~0.2% of total GPU memory
+
+
+
+### ⚠️ **Zero Bit and Deleted Bit**
+Both bits are stored in a single integer field (e.g., node_info.flags or similar), not as separate fields. For 2M nodes, this is just 2 bits per node, packed into a u32 or u8 as appropriate.
+
+**deleted bit:** Indicates the node is free, but must be claimed and "washed" (reset/cleared) before reuse. Used for nodes that have just been freed by pruning or recycling.
+
+**zero bit:** Indicates the node is already zeroed and ready for immediate allocation and use, with no further clearing required. Used for nodes that have never been allocated or have been explicitly zeroed in a background pass.
+
+**Impact:** Both bits are lightweight, and together allow the allocator to distinguish between "fresh" and "needs-wash" nodes, optimizing allocation and reuse paths. In the current implementation, node state is tracked via a `node_state` enum (e.g., EMPTY, READY, etc.), and value-based recycling is used to reclaim memory. Allocation logic checks node state, not explicit bitfields. If no nodes are available, memory pressure policy is triggered as described above.
 
 ---
 
@@ -403,17 +332,6 @@ node_generations: [2M] u32 = 8MB additional memory
 2. Replaced `free_top_buffer` with `free_tops_buffer` (array of atomics)
 3. Updated WGSL allocation logic to use workgroup_id
 4. Tested: Overflow eliminated, no freezes
-
-### Phase 2: Add Generational Tracking ✅ (Complete)
-1. Added `node_generations` buffer
-2. Added `current_generation` to params
-3. Nodes are tagged on allocation
-4. Generation increments each turn
-
-### Phase 3: Add Generational Cleanup ✅ (Complete)
-1. Periodic cleanup pass implemented
-2. Nodes older than N generations are freed
-3. Tuned and validated with tests (default: keep last 3 generations)
 
 ---
 
@@ -429,10 +347,10 @@ Turn 2: alloc=1.9M, free_top=3.3M ← OVERFLOW! → FREEZE
 ```
 Turn 1: alloc=490K, free_tops[0]=0, ..., free_tops[255]=0
 Turn 2: alloc=490K, free_tops[0]=1.8K, ..., free_tops[255]=1.9K
-        Total freed: ~480K distributed across 256 lists
-        Average per list: ~1875 nodes (well under 8K cap)
+    Total freed: ~480K distributed across 256 lists
+    Average per list: ~1875 nodes (well under 8K cap)
 Turn 3: alloc=490K (reusing nodes from free lists)
-...stable indefinitely...
+...stable indefinitely, with memory pressure policy handling exhaustion gracefully...
 ```
 
 ### Performance Metrics:
@@ -443,20 +361,36 @@ Turn 3: alloc=490K (reusing nodes from free lists)
 
 ---
 
+
 ## Open Questions
 
 1. **Free list size per workgroup?**
-   - Proposed: 8192 (8K)
-   - Too small? Could make 16K if needed
-   - Too large? Could reduce to 4K
+    - Proposed: 8192 (8K)
+    - Too small? Could make 16K if needed
+    - Too large? Could reduce to 4K
 
-2. **Generational cleanup frequency?**
-   - Every turn? Every 3 turns? Every 10 turns?
-   - Can tune based on testing
+2. **Free list overflow?**
+    - If a workgroup's free list is full, nodes are pushed to a global free list for overflow handling.
 
 3. **Load balancing?**
-   - If one workgroup's list is full, should it "donate" to others?
-   - Probably not needed - global allocator handles it
+    - If one workgroup's list is empty, it can steal nodes from other workgroups or the global free list.
+    - TODO: Implement periodic rebalancing for long-term fairness.
+
+4. **Traversal context?**
+    - Traversal refers to the freeing/pruning operation after re-rooting, not to the main MCTS search path.
+
+5. **Visit count heuristic?**
+    - For now, use visit counts to guide worker assignment to subtrees.
+
+6. **Logging policy?**
+    - Logging should be aggregate and rate-limited, never verbose.
+
+7. **What remains on CPU in GPU-native MCTS?**
+    - In a fully GPU-native MCTS, the only CPU-side responsibilities are:
+      - Orchestrating kernel launches (dispatches)
+      - Transferring input/output data (e.g., initial board state, final statistics)
+      - Reading diagnostics buffers
+      - (Other AI, game logic, and search are all on GPU)
 
 ---
 
@@ -465,7 +399,6 @@ Turn 3: alloc=490K (reusing nodes from free lists)
 This hybrid approach combines the best of:
 - **Free lists**: Memory reuse without fragmentation
 - **Per-workgroup**: Eliminates contention and overflow
-- **Generational**: Predictable cleanup and bounds
 
 **Risk Level:** 🟢 **LOW**
 - Incremental changes
@@ -484,7 +417,28 @@ This hybrid approach combines the best of:
 
 ### Motivation
 
-The allocator should never prune large, valuable subtrees solely due to memory pressure. Pruning should only occur for subtrees that become unreachable after a move (natural pruning), or for nodes that are objectively low-value.
+The allocator should never prune large, valuable subtrees solely due to memory pressure. Pruning should only occur for subtrees that become unreachable after a move (natural pruning), or for nodes that are objectively low-value. 
+
+
+### Memory Pressure Policy (2025 Update)
+
+When the allocator detects that GPU memory is nearly exhausted (e.g., global alloc counter >= max_nodes):
+
+1. Elegantly stop all search work on the GPU (while keeping data members consistent).
+
+2. **If root visits exceed a threshold (e.g., > X):**
+    - Play the move early (select the best child of the root based on current statistics).
+    - Immediately prune all non-selected subtrees using the efficient top-down freeing method.
+    - Log a terminal message indicating that an early move was played due to memory pressure.
+
+3. **If root visits are below the threshold:**
+    - Stop expansion (do not allocate new nodes), but continue rollouts (simulations) on the existing tree.
+    - When the threshold to play early move is reached or time runs out, play the move and prune as above.
+
+This policy ensures the system never overruns memory, maintains robust operation, and degrades gracefully under pressure. It also prioritizes search quality by only playing early when enough information has been gathered. The allocation function should not simply return INVALID_INDEX on exhaustion, but should trigger this policy and handle the situation gracefully.
+
+
+---
 
 ### New Policy
 

@@ -34,6 +34,10 @@ use super::shaders::MCTS_TREE_SHADER;
 const MAX_CHILDREN: u32 = 64;
 const MAX_PATH_LENGTH: u32 = 128;
 const INVALID_INDEX: u32 = 0xFFFFFFFF;
+// Must match WGSL error codes
+const SELECT_BEST_CHILD_NO_CHILDREN: u32 = 0xFFFFFFFE;
+const SELECT_BEST_CHILD_NO_VALID: u32 = 0xFFFFFFFD;
+const SELECT_BEST_CHILD_SOFTMAX_PANIC: u32 = 0xFFFFFFFC;
 const WORKGROUP_SIZE: u32 = 64;
 
 // Node states
@@ -129,6 +133,9 @@ pub struct GpuMctsEngine {
     node_state_buffer: Buffer,
     children_indices_buffer: Buffer,
     children_priors_buffer: Buffer,
+    // Hybrid allocator buffers
+    free_lists_buffer: Buffer,        // [256][8192] u32s, per-workgroup free lists
+    free_tops_buffer: Buffer,         // [256] u32s, per-workgroup free list tops
 
     // Execution state buffers
     params_buffer: Buffer,
@@ -172,6 +179,20 @@ impl GpuMctsEngine {
         board_height: u32,
     ) -> Self {
         let device = context.device();
+
+        // Per-workgroup free lists (256 workgroups x 8192 slots = 2M u32s)
+        let free_lists_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Free Lists"),
+            size: (256 * 8192 * std::mem::size_of::<u32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let free_tops_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Free Tops"),
+            size: (256 * std::mem::size_of::<u32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
 
         // Create shader module
         let shader_module = device.create_shader_module(ShaderModuleDescriptor {
@@ -345,6 +366,8 @@ impl GpuMctsEngine {
             node_state_buffer,
             children_indices_buffer,
             children_priors_buffer,
+            free_lists_buffer,
+            free_tops_buffer,
             params_buffer,
             work_items_buffer,
             paths_buffer,
@@ -435,6 +458,39 @@ impl GpuMctsEngine {
                 // children_priors
                 BindGroupLayoutEntry {
                     binding: 6,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // free_lists_buffer
+                BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // free_tops_buffer
+                BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // node_generations_buffer
+                BindGroupLayoutEntry {
+                    binding: 9,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
@@ -647,35 +703,16 @@ impl GpuMctsEngine {
         self.node_pool_bind_group = Some(device.create_bind_group(&BindGroupDescriptor {
             label: Some("Node Pool Bind Group"),
             layout: &self.node_pool_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: self.node_info_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: self.node_visits_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: self.node_wins_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: self.node_vl_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 4,
-                    resource: self.node_state_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 5,
-                    resource: self.children_indices_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 6,
-                    resource: self.children_priors_buffer.as_entire_binding(),
-                },
+            entries: &[ 
+                BindGroupEntry { binding: 0, resource: self.node_info_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: self.node_visits_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: self.node_wins_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: self.node_vl_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: self.node_state_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: self.children_indices_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: self.children_priors_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 7, resource: self.free_lists_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 8, resource: self.free_tops_buffer.as_entire_binding() },
             ],
         }));
 
@@ -918,8 +955,14 @@ impl GpuMctsEngine {
 
         for i in 0..root_info.num_children as usize {
             let child_idx = children_indices[i];
-            if child_idx == INVALID_INDEX {
+            // Handle explicit error codes from select_best_child
+            if child_idx == INVALID_INDEX ||
+               child_idx == SELECT_BEST_CHILD_NO_CHILDREN ||
+               child_idx == SELECT_BEST_CHILD_NO_VALID {
                 continue;
+            }
+            if child_idx == SELECT_BEST_CHILD_SOFTMAX_PANIC {
+                panic!("select_best_child: SOFTMAX_PANIC error code returned by GPU. This indicates a bug in the selection logic. Please check diagnostics and shader code.");
             }
 
             // Read child stats (this is inefficient - should batch)
