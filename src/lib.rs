@@ -1027,7 +1027,6 @@ impl<S: GameState> MCTS<S> {
         // Use existing GPU-native engine if available (check if max_nodes matches)
         let gpu_mcts_arc = {
             let mut guard = self.gpu_native_othello.lock();
-            
             // Check if we can reuse existing engine
             let should_recreate = if let Some(ref existing) = *guard {
                 if let Some(requested) = gpu_max_nodes {
@@ -1047,13 +1046,13 @@ impl<S: GameState> MCTS<S> {
             } else {
                 true  // No existing engine, need to create
             };
-            
+
             if !should_recreate {
                 guard.as_ref().unwrap().clone()
             } else {
                 // Drop existing if any
                 *guard = None;
-                
+
                 // Need to create a new engine - get or create GPU context
                 let gpu_context = if let Some(ref acc) = self.gpu_accelerator {
                     acc.lock().get_context()
@@ -1065,7 +1064,7 @@ impl<S: GameState> MCTS<S> {
                         Err(_) => return None,
                     }
                 };
-                
+
                 // Create new engine
                 // Calculate max_nodes based on GPU limits
                 // Each node requires ~256 bytes for children_indices buffer (64 children * 4 bytes)
@@ -1095,6 +1094,20 @@ impl<S: GameState> MCTS<S> {
                 ).expect("Failed to create GpuOthelloMcts");
                 eprintln!("[GPU-Native HOST] After creation: new_engine.get_capacity() = {}", new_engine.get_capacity());
                 let engine_arc = Arc::new(new_engine);
+                // --- Start urgent event logger for real gameplay ---
+                #[cfg(feature = "gpu")]
+                {
+                    use crate::gpu::urgent_event_logger::start_and_log_urgent_events_othello;
+                    use std::sync::atomic::AtomicBool;
+                    use std::sync::Arc as StdArc;
+                    static LOGGER_STARTED: std::sync::Once = std::sync::Once::new();
+                    LOGGER_STARTED.call_once(|| {
+                        let stop_flag = StdArc::new(AtomicBool::new(false));
+                        // Use a reasonable polling interval (e.g., 1000 ms)
+                        let _ = start_and_log_urgent_events_othello(engine_arc.clone(), 100, stop_flag.clone());
+                        // Note: stop_flag is intentionally leaked for process lifetime
+                    });
+                }
                 // Store it in the MCTS struct for reuse across searches
                 *guard = Some(engine_arc.clone());
                 engine_arc
@@ -1221,7 +1234,10 @@ impl<S: GameState> MCTS<S> {
         
         // Final flush to ensure all work completes
         gpu_mcts.flush_and_wait();
-        
+
+        // --- Dispatch urgent event kernel for logging ---
+        gpu_mcts.dispatch_prune_unreachable_topdown();
+
         eprintln!("[GPU-Native] Completed {} batches ({} iterations) in {:.2}s", 
             batch, batch as u64 * iterations_per_batch as u64, start_time.elapsed().as_secs_f64());
 
@@ -1380,6 +1396,9 @@ impl<S: GameState> MCTS<S> {
 
         let engine = gpu::GpuOthelloMcts::new(gpu_context, max_nodes, iterations_per_batch)
             .expect("Failed to create GpuOthelloMcts");
+        // Bind urgent event buffer to GPU pipeline
+        let device = engine.context.device();
+        engine.create_bind_groups(device);
         engine.init_tree(board, current_player, legal_moves);
         *self.gpu_native_othello.lock() = Some(Arc::new(engine));
     }

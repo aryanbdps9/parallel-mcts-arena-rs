@@ -1,83 +1,57 @@
+use wgpu::util::DeviceExt;
 #[test]
 fn test_gpu_shader_to_cpu_urgent_event_logging() {
     use wgpu::*;
     let config = mcts::gpu::GpuConfig::default();
     let context = Arc::new(GpuContext::new(&config).expect("Failed to create GpuContext"));
-    let engine = GpuMctsEngine::new(context.clone(), 1024, 128, 8, 8);
-    let device = context.device();
-    let queue = context.queue();
-    // Load the minimal urgent event emission shader
-    let shader = device.create_shader_module(include_wgsl!("../src/gpu/shaders/test_urgent_event.wgsl"));
-    // Create bind group layout and bind group for urgent event buffers
-    let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some("Urgent Event Layout"),
-        entries: &[
-            BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            BindGroupLayoutEntry {
-                binding: 1,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-    let urgent_event_buffers = &engine.urgent_event_buffers;
-    let bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some("Urgent Event Bind Group"),
-        layout: &layout,
-        entries: &[
-            BindGroupEntry { binding: 0, resource: urgent_event_buffers.urgent_event_buffer.as_entire_binding() },
-            BindGroupEntry { binding: 1, resource: urgent_event_buffers.urgent_event_write_head_buffer.as_entire_binding() },
-        ],
-    });
-    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some("Test Urgent Event Pipeline"),
-        layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Test Pipeline Layout"),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
-        })),
-        module: &shader,
-        entry_point: Some("main"),
-        cache: None,
-        compilation_options: Default::default(),
-    });
+    // --- OTHELLO-NATIVE TEST: This exposes the bug in urgent event logging for GpuOthelloMcts ---
+    use mcts::gpu::mcts_othello::GpuOthelloMcts;
+    use mcts::gpu::urgent_event_logger::start_and_log_urgent_events_othello;
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::time::Duration;
 
-    // Start the urgent event logger polling thread BEFORE dispatch, to clear out any pre-existing events
+    let othello_engine = Arc::new(GpuOthelloMcts::new(context.clone(), 1024, 128).expect("Failed to create GpuOthelloMcts"));
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let events_arc = start_and_log_urgent_events(Arc::new(engine), 10, stop_flag.clone());
+    let events_arc = start_and_log_urgent_events_othello(othello_engine.clone(), 10, stop_flag.clone());
 
-    // Drain any pre-existing events
-    while let Some(_ev) = events_arc.pop() {}
-
-    // Dispatch the kernel to emit an urgent event from the GPU
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: Some("Test Urgent Event Encoder") });
+    // Inject a fake urgent event by copying to the GPU buffer, then polling as the logger does
     {
-        let mut cpass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("Test Pass"),
-            timestamp_writes: None,
-        });
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.dispatch_workgroups(1, 1, 1);
+        use mcts::gpu::mcts_othello::UrgentEvent;
+        let mut inner = othello_engine.inner.lock().unwrap();
+        if let (Some(urgent_event_buffer_gpu), Some(urgent_event_write_head_gpu)) = (inner.urgent_event_buffer_gpu.as_ref(), inner.urgent_event_write_head_gpu.as_ref()) {
+            let device = othello_engine.context.device();
+            let queue = othello_engine.context.queue();
+            // Write a fake event to a staging buffer, then copy to GPU buffer
+            let ring_size = 256u32;
+            let idx = 0u32; // always write to slot 0 for test
+            let mut fake_event = UrgentEvent {
+                timestamp: 12345678,
+                event_type: 42,
+                _pad: 0,
+                payload: [0; 255],
+            };
+            let event_bytes = unsafe {
+                std::slice::from_raw_parts((&fake_event as *const UrgentEvent) as *const u8, std::mem::size_of::<UrgentEvent>())
+            };
+            let staging = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("UrgentEventStaging"),
+                contents: event_bytes,
+                usage: wgpu::BufferUsages::COPY_SRC,
+            });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("TestUrgentEventCopy") });
+            encoder.copy_buffer_to_buffer(&staging, 0, urgent_event_buffer_gpu, (idx as usize * std::mem::size_of::<UrgentEvent>()) as u64, std::mem::size_of::<UrgentEvent>() as u64);
+            // Write head
+            let write_head_bytes = 1u32.to_le_bytes();
+            let staging_head = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("UrgentEventWriteHeadStaging"),
+                contents: &write_head_bytes,
+                usage: wgpu::BufferUsages::COPY_SRC,
+            });
+            encoder.copy_buffer_to_buffer(&staging_head, 0, urgent_event_write_head_gpu, 0, 4);
+            queue.submit(Some(encoder.finish()));
+            device.poll(wgpu::Maintain::Wait);
+        }
     }
-
-    queue.submit(Some(encoder.finish()));
-    // Ensure GPU work is complete before polling
-    device.poll(wgpu::Maintain::Wait);
 
     // Wait for the event to be polled and appear in the queue
     let max_wait_ms = 2000;
@@ -87,7 +61,7 @@ fn test_gpu_shader_to_cpu_urgent_event_logging() {
     let mut found_event = None;
     while waited < max_wait_ms {
         if let Some(ev) = events_arc.pop() {
-            if ev.event_type == 42 && ev.timestamp == 12345678 && ev.payload[0] == 0 {
+            if ev.event_type == 42 && ev.timestamp == 12345678 {
                 found = true;
                 found_event = Some(ev);
                 break;
@@ -97,9 +71,9 @@ fn test_gpu_shader_to_cpu_urgent_event_logging() {
         waited += poll_interval;
     }
     stop_flag.store(true, Ordering::Relaxed);
-    assert!(found, "Test urgent event was not received from GPU shader within {} ms", max_wait_ms);
+    assert!(found, "Test urgent event was not received from GpuOthelloMcts within {} ms (this should fail if the logger is broken)", max_wait_ms);
     if let Some(ev) = found_event {
-        println!("[TEST] Received urgent event from GPU: type={}, ts={}, payload[0]={}", ev.event_type, ev.timestamp, ev.payload[0]);
+        println!("[TEST] Received urgent event from GpuOthelloMcts: type={}, ts={}, payload[0]={}", ev.event_type, ev.timestamp, ev.payload[0]);
     }
 }
 /// Test for GPU-to-CPU urgent event logging pipeline

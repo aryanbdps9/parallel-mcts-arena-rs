@@ -602,6 +602,8 @@ pub struct GuiApp {
     pub selected_how_to_play_game: usize,
     pub game_selection_scroll: i32,
     pub settings_scroll: i32,
+        // Removed stray line
+        // virtual_los
 
     // Resizable panel state
     /// Width of the right info panel (0.0 to 1.0 as percentage of available width)

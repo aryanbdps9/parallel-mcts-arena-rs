@@ -1,4 +1,474 @@
 impl GpuOthelloMcts {
+        /// Dispatch the GPU pruning kernel and bind the urgent event buffer for logging
+        pub fn dispatch_prune_unreachable_topdown(&self) {
+            // ...existing code...
+            use wgpu::{BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindGroupEntry, BindGroupDescriptor, ShaderStages, BindingType, BufferBindingType, ComputePassDescriptor};
+            let context = &self.context;
+            let device = context.device();
+            let queue = context.queue();
+            // === DUMMY GROUP 4 (for prune kernel @group(4) bindings) ===
+            let dummy_group4_buffers: Vec<wgpu::Buffer> = (0..=2)
+                .map(|i| device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Dummy Group4 Buffer {} (Othello)", i)),
+                    size: 65_536,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                }))
+                .collect();
+            let dummy_group4_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Dummy Layout 4 (prune kernel)"),
+                entries: &[ 
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+            let dummy_group4_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Dummy Group4 Bind Group (Othello)"),
+                layout: &dummy_group4_layout,
+                entries: &[ 
+                    BindGroupEntry { binding: 0, resource: dummy_group4_buffers[0].as_entire_binding() },
+                    BindGroupEntry { binding: 1, resource: dummy_group4_buffers[1].as_entire_binding() },
+                    BindGroupEntry { binding: 2, resource: dummy_group4_buffers[2].as_entire_binding() },
+                ],
+            });
+            // Only lock to get buffer references, then drop lock before GPU ops
+            let (urgent_event_buffer_gpu, urgent_event_write_head_gpu, urgent_event_buffer_host, urgent_event_write_head_host) = {
+                let inner = self.inner.lock().unwrap();
+                (
+                    inner.urgent_event_buffer_gpu.as_ref().expect("urgent_event_buffer_gpu missing").clone(),
+                    inner.urgent_event_write_head_gpu.as_ref().expect("urgent_event_write_head_gpu missing").clone(),
+                    inner.urgent_event_buffer_host.as_ref().expect("urgent_event_buffer_host missing").clone(),
+                    inner.urgent_event_write_head_host.as_ref().expect("urgent_event_write_head_host missing").clone(),
+                )
+            };
+
+            println!("[DIAG] Starting dispatch_prune_unreachable_topdown...");
+
+            // Create bind group layout and bind group for urgent event logging (group 3, matching WGSL)
+            let urgent_event_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Urgent Event Layout (Othello, group 3)"),
+                entries: &[ 
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+            println!("[DIAG] Created urgent event bind group layout (group 3).");
+            let urgent_event_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Urgent Event Bind Group (Othello, group 3)"),
+                layout: &urgent_event_layout,
+                entries: &[ 
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: urgent_event_buffer_gpu.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: urgent_event_write_head_gpu.as_entire_binding(),
+                    },
+                ],
+            });
+            println!("[DIAG] Created urgent event bind group (group 3).");
+
+            // === DUMMY BUFFERS AND LAYOUTS FOR ALL GROUPS (0-4) ===
+            println!("[DIAG] Creating dummy buffers and layouts for groups 0-3...");
+            // Group 0: bindings 0-8
+            let dummy_group0_buffers: Vec<wgpu::Buffer> = (0..=8)
+                .map(|i| device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Dummy Group0 Buffer {} (Othello)", i)),
+                    size: 65_536,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
+                    mapped_at_creation: false,
+                }))
+                .collect();
+            let dummy_group1_buffers: Vec<wgpu::Buffer> = (0..=4)
+                .map(|i| device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Dummy Group1 Buffer {} (Othello)", i)),
+                    size: 65_536,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
+                    mapped_at_creation: false,
+                }))
+                .collect();
+            let dummy_group2_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Dummy Group2 Buffer 0 (Othello)"),
+                size: 65_536,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
+                mapped_at_creation: false,
+            });
+            let dummy_group3_buffers: Vec<wgpu::Buffer> = (0..=1)
+                .map(|i| device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("Dummy Group3 Buffer {} (Othello)", i)),
+                    size: 264_192,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                }))
+                .collect();
+            let dummy_group0_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Dummy Layout 0 (with buffers)"),
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                    BindGroupLayoutEntry { binding: 1, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                    BindGroupLayoutEntry { binding: 2, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                    BindGroupLayoutEntry { binding: 3, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                    BindGroupLayoutEntry { binding: 4, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                    BindGroupLayoutEntry { binding: 5, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                    BindGroupLayoutEntry { binding: 6, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                    BindGroupLayoutEntry { binding: 7, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                    BindGroupLayoutEntry { binding: 8, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                ],
+            });
+            let dummy_group1_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Dummy Layout 1 (with buffers)"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+            let dummy_group2_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Dummy Layout 2 (with buffer)"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+            let dummy_group3_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Dummy Layout 3 (with buffers)"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+            // Collect all dummy layouts for pipeline layout
+            let mut dummy_layouts = vec![&dummy_group0_layout, &dummy_group1_layout, &dummy_group2_layout, &dummy_group3_layout];
+
+            // Load the pruning kernel pipeline
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Othello MCTS Prune Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mcts_othello.wgsl").into()),
+            });
+            println!("[DIAG] Created shader module for prune kernel.");
+            // Pipeline layout: dummies at 0-3, dummy_group4_layout at 4, urgent_event_layout at 5
+            let mut bind_group_layouts = dummy_layouts.clone();
+            bind_group_layouts.push(&dummy_group4_layout); // index 4
+            bind_group_layouts.push(&urgent_event_layout); // index 5
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Othello Prune Pipeline Layout"),
+                bind_group_layouts: &bind_group_layouts,
+                push_constant_ranges: &[],
+            });
+            println!("[DIAG] Created pipeline layout.");
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Othello Prune Pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("prune_unreachable_topdown"),
+                cache: None,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            });
+            println!("[DIAG] Created compute pipeline for prune kernel.");
+
+            // Now create the dummy bind groups (after layouts are used for pipeline)
+            let dummy_group0_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Dummy Group0 Bind Group (Othello)"),
+                layout: &dummy_group0_layout,
+                entries: &[ 
+                    BindGroupEntry { binding: 0, resource: dummy_group0_buffers[0].as_entire_binding() },
+                    BindGroupEntry { binding: 1, resource: dummy_group0_buffers[1].as_entire_binding() },
+                    BindGroupEntry { binding: 2, resource: dummy_group0_buffers[2].as_entire_binding() },
+                    BindGroupEntry { binding: 3, resource: dummy_group0_buffers[3].as_entire_binding() },
+                    BindGroupEntry { binding: 4, resource: dummy_group0_buffers[4].as_entire_binding() },
+                    BindGroupEntry { binding: 5, resource: dummy_group0_buffers[5].as_entire_binding() },
+                    BindGroupEntry { binding: 6, resource: dummy_group0_buffers[6].as_entire_binding() },
+                    BindGroupEntry { binding: 7, resource: dummy_group0_buffers[7].as_entire_binding() },
+                    BindGroupEntry { binding: 8, resource: dummy_group0_buffers[8].as_entire_binding() },
+                ],
+            });
+            let dummy_group1_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Dummy Group1 Bind Group (Othello)"),
+                layout: &dummy_group1_layout,
+                entries: &[
+                    BindGroupEntry { binding: 0, resource: dummy_group1_buffers[0].as_entire_binding() },
+                    BindGroupEntry { binding: 1, resource: dummy_group1_buffers[1].as_entire_binding() },
+                    BindGroupEntry { binding: 2, resource: dummy_group1_buffers[2].as_entire_binding() },
+                    BindGroupEntry { binding: 3, resource: dummy_group1_buffers[3].as_entire_binding() },
+                    BindGroupEntry { binding: 4, resource: dummy_group1_buffers[4].as_entire_binding() },
+                ],
+            });
+            let dummy_group2_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Dummy Group2 Bind Group (Othello)"),
+                layout: &dummy_group2_layout,
+                entries: &[BindGroupEntry { binding: 0, resource: dummy_group2_buffer.as_entire_binding() }],
+            });
+            // dummy_group3_bind_group is no longer needed (urgent event buffer now at group 3)
+
+            // Load the pruning kernel pipeline
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Othello MCTS Prune Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mcts_othello.wgsl").into()),
+            });
+            // Pipeline layout: dummies at 0-3, dummy_group4_layout at 4, urgent_event_layout at 5
+            let mut bind_group_layouts = dummy_layouts.clone();
+            bind_group_layouts.push(&dummy_group4_layout); // index 4
+            bind_group_layouts.push(&urgent_event_layout); // index 5
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Othello Prune Pipeline Layout"),
+                bind_group_layouts: &bind_group_layouts,
+                push_constant_ranges: &[],
+            });
+            let _pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Othello Prune Pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("prune_unreachable_topdown"),
+                cache: None,
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            });
+
+            // Create dummy bind groups for groups 1, 2, 3 in this scope
+            // ...existing code...
+
+            // Dispatch the kernel
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Othello Prune Encoder"),
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Othello Prune ComputePass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &dummy_group0_bind_group, &[]); // group 0
+                pass.set_bind_group(1, &dummy_group1_bind_group, &[]); // group 1
+                pass.set_bind_group(2, &dummy_group2_bind_group, &[]); // group 2
+                pass.set_bind_group(3, &urgent_event_bind_group, &[]); // group 3, legacy (if needed)
+                pass.set_bind_group(4, &dummy_group4_bind_group, &[]); // group 4, prune kernel dummies
+                pass.set_bind_group(5, &urgent_event_bind_group, &[]); // group 5, urgent event buffer (matches layout)
+                println!("[DIAG] Set all bind groups and pipeline (dummy group 4 at 4, urgent event at 5). Dispatching workgroups...");
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            queue.submit(Some(encoder.finish()));
+            // Optionally: poll device to ensure completion
+            device.poll(wgpu::Maintain::Wait);
+            println!("[DIAG] Kernel dispatched and device polled. Checking urgent event buffer...");
+
+            // DIAGNOSTIC: Copy GPU buffer to host-mapped buffer, then map and print from host buffer
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("UrgentEventBuffer Copy Encoder (DIAG)"),
+            });
+            encoder.copy_buffer_to_buffer(
+                &urgent_event_buffer_gpu,
+                0,
+                &urgent_event_buffer_host,
+                0,
+                16,
+            );
+            encoder.copy_buffer_to_buffer(
+                &urgent_event_write_head_gpu,
+                0,
+                &urgent_event_write_head_host,
+                0,
+                16,
+            );
+            queue.submit(Some(encoder.finish()));
+            device.poll(wgpu::Maintain::Wait);
+
+            // Map and print from host buffer
+            {
+                use wgpu::MapMode;
+                let buffer_slice = urgent_event_buffer_host.slice(..16);
+                let (tx, rx) = std::sync::mpsc::channel();
+                buffer_slice.map_async(MapMode::Read, move |v| { tx.send(v).unwrap(); });
+                device.poll(wgpu::Maintain::Wait);
+                let _ = rx.recv();
+                let data = buffer_slice.get_mapped_range();
+                println!("[DIAG] urgent_event_buffer_host[0..16]: {:?}", &data[..]);
+                drop(data);
+                urgent_event_buffer_host.unmap();
+            }
+            {
+                use wgpu::MapMode;
+                let buffer_slice = urgent_event_write_head_host.slice(..16);
+                let (tx, rx) = std::sync::mpsc::channel();
+                buffer_slice.map_async(MapMode::Read, move |v| { tx.send(v).unwrap(); });
+                device.poll(wgpu::Maintain::Wait);
+                let _ = rx.recv();
+                let data = buffer_slice.get_mapped_range();
+                println!("[DIAG] urgent_event_write_head_host[0..16]: {:?}", &data[..]);
+                drop(data);
+                urgent_event_write_head_host.unmap();
+            }
+            println!("[DIAG] Finished dispatch_prune_unreachable_topdown.\n");
+        }
+    /// Create bind groups for urgent event logging (binds host-mapped urgent event buffer to GPU pipeline)
+    pub fn create_bind_groups(&self, device: &wgpu::Device) {
+        use wgpu::{BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindGroupEntry, BindGroupDescriptor, ShaderStages, BindingType, BufferBindingType};
+        let inner = self.inner.lock().unwrap();
+        let urgent_event_buffer = inner.urgent_event_buffer_gpu.as_ref().expect("urgent_event_buffer_gpu missing");
+        let urgent_event_write_head = inner.urgent_event_write_head_gpu.as_ref().expect("urgent_event_write_head_gpu missing");
+
+        // Create layout matching WGSL: @group(3) @binding(0/1) for urgent event buffer/write_head
+        let urgent_event_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Urgent Event Layout (Othello)"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let _urgent_event_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Urgent Event Bind Group (Othello)"),
+            layout: &urgent_event_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: urgent_event_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: urgent_event_write_head.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Optionally: store bind group/layout in self if needed for later dispatch
+        // (add fields to GpuOthelloMctsInner if you want to keep them)
+        // For now, just ensure creation succeeds and is used in pipeline setup.
+    }
 
         /// Simulate pruning: reset visits for nodes not in legal_moves
         pub fn prune_unreachable_nodes(&mut self) {
@@ -134,9 +604,12 @@ pub struct GpuOthelloMctsInner {
     pub wins: Vec<i32>,
     pub seen_boards: HashSet<[i32; 64]>,
     pub expanded_nodes: HashSet<[i32; 64]>,
-    // Urgent event ring buffer (host-mapped)
-    pub urgent_event_buffer: Option<*mut UrgentEvent>,
-    pub urgent_event_write_head: Option<*mut u32>,
+    // GPU-side urgent event buffers (bound to pipeline, not mapped)
+    pub urgent_event_buffer_gpu: Option<Arc<wgpu::Buffer>>,
+    pub urgent_event_write_head_gpu: Option<Arc<wgpu::Buffer>>,
+    // Host-mapped urgent event buffers (for polling, never bound to pipeline)
+    pub urgent_event_buffer_host: Option<Arc<wgpu::Buffer>>,
+    pub urgent_event_write_head_host: Option<Arc<wgpu::Buffer>>,
 }
 
 impl GpuOthelloMcts {
@@ -185,9 +658,46 @@ impl GpuOthelloMcts {
         max_nodes: u32,
         _max_iterations: u32,
     ) -> Result<GpuOthelloMcts, String> {
+        use wgpu::BufferUsages;
         if max_nodes == 0 {
             return Err("max_nodes must be > 0".to_string());
         }
+
+        // Allocate urgent event buffer and write head for GPU and host
+        let device = context.device();
+        let urgent_event_ring_size = 256;
+        let urgent_event_struct_size = std::mem::size_of::<UrgentEvent>();
+        let urgent_event_buffer_size = urgent_event_ring_size * urgent_event_struct_size;
+        let urgent_event_write_head_size = 32_768;
+
+        // GPU-side buffers (bound to pipeline, not mapped)
+        let urgent_event_buffer_gpu = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("UrgentEventBufferGPU"),
+            size: urgent_event_buffer_size as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        let urgent_event_write_head_gpu = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("UrgentEventWriteHeadGPU"),
+            size: urgent_event_write_head_size as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        // Host-mapped buffers (for polling, never bound to pipeline)
+        let urgent_event_buffer_host = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("UrgentEventBufferHost"),
+            size: urgent_event_buffer_size as u64,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        let urgent_event_write_head_host = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("UrgentEventWriteHeadHost"),
+            size: urgent_event_write_head_size as u64,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
         Ok(GpuOthelloMcts {
             context,
             inner: Mutex::new(GpuOthelloMctsInner {
@@ -199,8 +709,10 @@ impl GpuOthelloMcts {
                 wins: vec![0; 64],
                 seen_boards: HashSet::new(),
                 expanded_nodes: HashSet::new(),
-                urgent_event_buffer: None,
-                urgent_event_write_head: None,
+                urgent_event_buffer_gpu: Some(urgent_event_buffer_gpu),
+                urgent_event_write_head_gpu: Some(urgent_event_write_head_gpu),
+                urgent_event_buffer_host: Some(urgent_event_buffer_host),
+                urgent_event_write_head_host: Some(urgent_event_write_head_host),
             }),
             _not_send_sync: std::marker::PhantomData,
         })

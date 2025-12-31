@@ -30,7 +30,7 @@ fn test_cpu_to_cpu_urgent_event_logging() {
     let mut found = false;
     while waited < max_wait_ms {
         if let Some(ev) = events_arc.pop() {
-            if ev.event_type == event_type && ev.timestamp == timestamp {
+            if ev.event_type == event_type && u64::from(ev.timestamp) == timestamp {
                 // Decode the string from the payload
                 let mut bytes = Vec::new();
                 for word in ev.payload.iter() {

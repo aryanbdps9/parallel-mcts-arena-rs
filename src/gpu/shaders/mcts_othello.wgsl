@@ -23,8 +23,29 @@ fn atomic_set_deleted(node_idx: u32) -> bool {
     return (old & 1u) == 0u; // true if not previously deleted
 }
 
+// Shared atomics for PRUNING_START/END coordination
+var<workgroup> pruning_started: atomic<u32>;
+var<workgroup> pruning_threads_remaining: atomic<u32>;
+
 @compute @workgroup_size(64)
-fn prune_unreachable_topdown(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn prune_unreachable_topdown(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invocation_index) local_idx: u32, @builtin(num_workgroups) num_wg: vec3<u32>, @builtin(workgroup_id) wg_id: vec3<u32>) {
+    // Only one workgroup for now; if multi-workgroup, use global atomics in a buffer
+    if (local_idx == 0u) {
+        atomicStore(&pruning_started, 0u);
+        atomicStore(&pruning_threads_remaining, 64u); // workgroup_size
+    }
+    workgroupBarrier();
+
+    // First thread to set pruning_started = 1 logs PRUNING_START
+    let was_started = atomicExchange(&pruning_started, 1u);
+    if (was_started == 0u) {
+        var payload: array<u32, 255>;
+        payload[0] = global_id.x;
+        for (var i = 1u; i < 255u; i++) { payload[i] = 0u; }
+        write_urgent_event(URGENT_EVENT_PRUNING_START, &payload);
+    }
+
+    // ...existing code...
     let tid = global_id.x;
     // Each worker pops work from the global queue
     loop {
@@ -59,6 +80,17 @@ fn prune_unreachable_topdown(@builtin(global_invocation_id) global_id: vec3<u32>
         }
         // Optionally: add node to free list (not shown here)
     }
+
+    // Last thread to decrement pruning_threads_remaining to 0 logs PRUNING_END
+    let threads_left = atomicSub(&pruning_threads_remaining, 1u);
+    if (threads_left == 1u) {
+        var payload: array<u32, 255>;
+        payload[0] = global_id.x;
+        for (var i = 1u; i < 255u; i++) { payload[i] = 0u; }
+        write_urgent_event(URGENT_EVENT_PRUNING_END, &payload);
+    }
+    workgroupBarrier();
+    // Optionally: log RESUME_WORKERS event here if you want to resume MCTS workers after pruning
 }
 // =============================================================================
 // Urgent Event Logging Buffer (Ring Buffer)
@@ -77,9 +109,14 @@ struct UrgentEvent {
 // =============================================================================
 // Urgent Event Types
 // =============================================================================
+
 const URGENT_EVENT_START: u32 = 1u;
 const URGENT_EVENT_HALT: u32 = 2u;
-const URGENT_EVENT_REROOT: u32 = 3u;
+const URGENT_EVENT_REROOT_START: u32 = 10u;
+const URGENT_EVENT_REROOT_END: u32 = 11u;
+const URGENT_EVENT_PRUNING_START: u32 = 12u;
+const URGENT_EVENT_PRUNING_END: u32 = 13u;
+const URGENT_EVENT_MEMORY_PRESSURE: u32 = 14u;
 
 // =============================================================================
 // Helper: Write an urgent event to the ring buffer
@@ -100,17 +137,35 @@ fn write_urgent_event(event_type: u32, payload: ptr<function, array<u32, 255>>) 
 // =============================================================================
 // Main MCTS Kernel Implementation (restored minimal version)
 // =============================================================================
-fn mcts_othello_iteration(global_id: vec3<u32>) {
-    // Diagnostic: count kernel entries
+// Shared atomics for REROOT_START/END coordination
+var<workgroup> reroot_started: atomic<u32>;
+var<workgroup> reroot_threads_remaining: atomic<u32>;
+
+fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32) {
+    // Only one workgroup for now; if multi-workgroup, use global atomics in a buffer
+    if (local_idx == 0u) {
+        atomicStore(&reroot_started, 0u);
+        atomicStore(&reroot_threads_remaining, 64u); // workgroup_size
+    }
+    workgroupBarrier();
+
+    // First thread to set reroot_started = 1 logs REROOT_START
+    let was_started = atomicExchange(&reroot_started, 1u);
+    if (was_started == 0u) {
+        var payload_reroot: array<u32, 255>;
+        payload_reroot[0] = global_id.x;
+        for (var i = 1u; i < 255u; i++) { payload_reroot[i] = 0u; }
+        write_urgent_event(URGENT_EVENT_REROOT_START, &payload_reroot);
+    }
+
+    // ...existing code...
     atomicAdd(&diagnostics._pad0, 1u); // Use _pad0 as "kernel_entries" counter
-    // Minimal MCTS search loop
     let my_workgroup = global_id.x % 256u;
     let thread_id = global_id.x;
     init_rng(thread_id, params.seed);
 
     // --- Log a START event at the beginning of each iteration ---
     var payload: array<u32, 255>;
-    // Optionally fill payload with useful info (e.g., thread_id, root_idx)
     payload[0] = thread_id;
     payload[1] = params.root_idx;
     for (var i = 2u; i < 255u; i++) { payload[i] = 0u; }
@@ -157,10 +212,18 @@ fn mcts_othello_iteration(global_id: vec3<u32>) {
     if (expand_success) {
         atomicAdd(&diagnostics.expansion_success, 1u);
     }
+    else {
+        // Log MEMORY_PRESSURE event if expansion failed (likely due to OOM)
+        if (global_id.x == 0u) {
+            var payload_mem: array<u32, 255>;
+            payload_mem[0] = current;
+            for (var i = 1u; i < 255u; i++) { payload_mem[i] = 0u; }
+            write_urgent_event(URGENT_EVENT_MEMORY_PRESSURE, &payload_mem);
+        }
+    }
 
     // Rollout phase
     atomicAdd(&diagnostics.rollouts, 1u);
-    // Simulate a real Othello game from the leaf node
     var rollout_board = reconstruct_board(&path, path_len);
     let leaf_player = node_info[current].player_at_node;
     let rollout_result = simulate_game(&rollout_board, leaf_player);
@@ -168,11 +231,8 @@ fn mcts_othello_iteration(global_id: vec3<u32>) {
     // Backpropagation phase
     for (var i = path_len; i > 0u; i--) {
         let node_idx = path[i - 1u];
-        // Remove virtual loss
         atomicAdd(&node_vl[node_idx], -1);
-        // Increment visits
         atomicAdd(&node_visits[node_idx], 1);
-        // Calculate reward from node's perspective
         let node_player = node_info[node_idx].player_at_node;
         var reward = rollout_result;
         if (node_player != leaf_player) {
@@ -180,10 +240,20 @@ fn mcts_othello_iteration(global_id: vec3<u32>) {
         }
         atomicAdd(&node_wins[node_idx], reward);
     }
+
+    // Last thread to decrement reroot_threads_remaining to 0 logs REROOT_END
+    let threads_left = atomicSub(&reroot_threads_remaining, 1u);
+    if (threads_left == 1u) {
+        var payload_reroot_end: array<u32, 255>;
+        payload_reroot_end[0] = global_id.x;
+        for (var i = 1u; i < 255u; i++) { payload_reroot_end[i] = 0u; }
+        write_urgent_event(URGENT_EVENT_REROOT_END, &payload_reroot_end);
+    }
+    workgroupBarrier();
 }
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    mcts_othello_iteration(global_id);
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invocation_index) local_idx: u32) {
+    mcts_othello_iteration(global_id, local_idx);
 }
 // =============================================================================
 // GPU-Native MCTS for Othello - Clean Implementation

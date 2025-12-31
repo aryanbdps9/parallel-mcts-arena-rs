@@ -313,7 +313,7 @@ fn main() -> io::Result<()> {
                     let context = Arc::new(crate::gpu::context::GpuContext::new(&crate::gpu::GpuConfig::default()).expect("Failed to create GpuContext"));
                     let gpu_engine = Arc::new(GpuMctsEngine::new(context.clone(), args.max_nodes as u32, args.gpu_native_batch_size, 8, 8));
                     let stop_flag = Arc::new(AtomicBool::new(false));
-                    let _events = start_and_log_urgent_events(gpu_engine, 1000, stop_flag.clone());
+                    let _events = start_and_log_urgent_events(gpu_engine, 100, stop_flag.clone());
                     // Main loop placeholder: run for a few seconds to demonstrate event logging
                     std::thread::sleep(std::time::Duration::from_secs(10));
                     stop_flag.store(true, Ordering::Relaxed);
