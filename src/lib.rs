@@ -1,33 +1,41 @@
-//! # Parallel Monte Carlo Tree Search (MCTS) Library
-//!
-//! This library provides a generic, parallel implementation of Monte Carlo Tree Search
-//! that can be used with any game that implements the `GameState` trait.
-//!
-//! ## Key Features
-//! - **Parallel Search**: Uses Rayon for multi-threaded tree search
-//! - **Thread Safety**: RwLock-based concurrent access to the search tree
-//! - **Virtual Losses**: Prevents multiple threads from exploring the same paths
-//! - **Memory Management**: Node recycling and automatic tree pruning
-//! - **PUCT Selection**: Enhanced UCB1 formula with prior probabilities
-//! - **GPU Acceleration** (optional): Batch PUCT calculation on GPU for large trees
-//!
-//! ## Example Usage
-//! ```rust
-//! use mcts::{MCTS, GameState};
-//! use mcts::games::connect4::Connect4State;
-//!
-//! // Your game must implement GameState
-//! let game_state = Connect4State::new(7, 6, 4);
-//! let mut mcts = MCTS::new(1.4, 8, 1000000);
-//! let (best_move, stats) = mcts.search(&game_state, 0, 0, 30); // 30 second timeout
-//! ```
-//!
-//! ## GPU Acceleration
-//! To enable GPU acceleration, build with the `gpu` feature:
-//! ```bash
-//! cargo build --features gpu
-//! ```
-//! Then use `MCTS::with_gpu()` to create a GPU-accelerated engine.
+#[cfg(feature = "gpu")]
+pub use crate::gpu::context::GpuContext;
+#[cfg(feature = "gpu")]
+pub use crate::gpu::GpuConfig;
+#[cfg(feature = "gpu")]
+pub use crate::gpu::mcts_othello::{GpuOthelloMcts, UrgentEvent};
+#[cfg(feature = "gpu")]
+pub use crate::gpu::mcts_gpu::UrgentEventBuffers;
+/// # Parallel Monte Carlo Tree Search (MCTS) Library
+///
+/// This library provides a generic, parallel implementation of Monte Carlo Tree Search
+/// that can be used with any game that implements the `GameState` trait.
+///
+/// ## Key Features
+/// - **Parallel Search**: Uses Rayon for multi-threaded tree search
+/// - **Thread Safety**: RwLock-based concurrent access to the search tree
+/// - **Virtual Losses**: Prevents multiple threads from exploring the same paths
+/// - **Memory Management**: Node recycling and automatic tree pruning
+/// - **PUCT Selection**: Enhanced UCB1 formula with prior probabilities
+/// - **GPU Acceleration** (optional): Batch PUCT calculation on GPU for large trees
+///
+/// ## Example Usage
+/// ```rust
+/// use mcts::{MCTS, GameState};
+/// use mcts::games::connect4::Connect4State;
+///
+/// // Your game must implement GameState
+/// let game_state = Connect4State::new(7, 6, 4);
+/// let mut mcts = MCTS::new(1.4, 8, 1000000);
+/// let (best_move, stats) = mcts.search(&game_state, 0, 0, 30); // 30 second timeout
+/// ```
+///
+/// ## GPU Acceleration
+/// To enable GPU acceleration, build with the `gpu` feature:
+/// ```bash
+/// cargo build --features gpu
+/// ```
+/// Then use `MCTS::with_gpu()` to create a GPU-accelerated engine.
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -462,10 +470,15 @@ pub struct MCTS<S: GameState> {
     /// Persistent GPU-native Othello MCTS engine for tree reuse
     /// Wrapped in Mutex to allow interior mutability (lazy initialization)
     #[cfg(feature = "gpu")]
-    gpu_native_othello: Mutex<Option<Arc<Mutex<gpu::GpuOthelloMcts>>>>,
+    gpu_native_othello: Mutex<Option<Arc<gpu::GpuOthelloMcts>>>,
 }
 
 impl<S: GameState> MCTS<S> {
+        /// Returns a clone of the GPU-native Othello engine (if available) for urgent event polling/logging.
+        #[cfg(feature = "gpu")]
+        pub fn get_gpu_native_othello(&self) -> Option<std::sync::Arc<gpu::GpuOthelloMcts>> {
+            self.gpu_native_othello.lock().as_ref().cloned()
+        }
     /// Creates a new MCTS engine.
     ///
     /// # Arguments
@@ -1018,7 +1031,7 @@ impl<S: GameState> MCTS<S> {
             // Check if we can reuse existing engine
             let should_recreate = if let Some(ref existing) = *guard {
                 if let Some(requested) = gpu_max_nodes {
-                    let existing_capacity = existing.lock().get_capacity();
+                    let existing_capacity = existing.get_capacity();
                     if existing_capacity != requested {
                         eprintln!(
                             "[GPU-Native WARNING] Requested max_nodes={} but existing engine has capacity={}. Recreating engine...",
@@ -1081,14 +1094,14 @@ impl<S: GameState> MCTS<S> {
                     iterations_per_batch,
                 ).expect("Failed to create GpuOthelloMcts");
                 eprintln!("[GPU-Native HOST] After creation: new_engine.get_capacity() = {}", new_engine.get_capacity());
-                let engine_arc = Arc::new(Mutex::new(new_engine));
+                let engine_arc = Arc::new(new_engine);
                 // Store it in the MCTS struct for reuse across searches
                 *guard = Some(engine_arc.clone());
                 engine_arc
             }
         };
 
-        let mut gpu_mcts = gpu_mcts_arc.lock();
+        let gpu_mcts = gpu_mcts_arc.clone();
 
         // Check if we need to initialize or can continue from existing tree
         let root_visits = gpu_mcts.get_root_visits();
@@ -1118,6 +1131,7 @@ impl<S: GameState> MCTS<S> {
 
         if root_visits == 0 || is_new_game {
             // Fresh tree needed
+            // If we have exclusive access, unwrap Arc and mutate directly
             gpu_mcts.init_tree(board, current_player, &legal_moves);
         }
         // Note: Tree reuse via advance_root is handled separately through advance_root_gpu_native()
@@ -1171,7 +1185,7 @@ impl<S: GameState> MCTS<S> {
                 // No timeout - use batch count limit
                 break;
             }
-            
+            // If we have exclusive access, unwrap Arc and mutate directly
             let telemetry = gpu_mcts.run_iterations(
                 iterations_per_batch,
                 exploration,
@@ -1180,14 +1194,10 @@ impl<S: GameState> MCTS<S> {
                 seed.wrapping_add(batch * 1000),
             );
             last_telemetry = Some(telemetry);
-            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-            batch += 1;
-            
             // Force GPU sync every 100 batches to prevent command buffer buildup
             if batch % 100 == 0 {
                 gpu_mcts.flush_and_wait();
             }
-
             if telemetry.saturated {
                 eprintln!(
                     "[GPU-Native WARNING] Node pool saturated: {} / {} nodes after batch {}",
@@ -1195,7 +1205,6 @@ impl<S: GameState> MCTS<S> {
                 );
                 break;
             }
-
             // If we are within 2% of capacity, stop dispatching more batches to avoid illegal proposals
             let nodes_in_use = telemetry.alloc_count_after.saturating_sub(telemetry.free_count_after);
             let cap_guard = (telemetry.node_capacity as f32 * 0.98) as u32;
@@ -1206,6 +1215,8 @@ impl<S: GameState> MCTS<S> {
                 );
                 break;
             }
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            batch += 1;
         }
         
         // Final flush to ensure all work completes
@@ -1340,8 +1351,7 @@ impl<S: GameState> MCTS<S> {
 
         let guard = self.gpu_native_othello.lock();
         if let Some(ref gpu_mcts_arc) = *guard {
-            let mut gpu_mcts = gpu_mcts_arc.lock();
-            gpu_mcts.advance_root(move_xy.0, move_xy.1, new_board, new_player, &legal_moves)
+            gpu_mcts_arc.advance_root(move_xy.0, move_xy.1, new_board, new_player, &legal_moves)
         } else {
             false
         }
@@ -1368,10 +1378,10 @@ impl<S: GameState> MCTS<S> {
         let max_nodes = (max_storage_size as f64 * 0.98 / 256.0) as u32;
         eprintln!("[GPU-Native] Max nodes set to {} based on storage limit of {} bytes", max_nodes, max_storage_size);
 
-        let mut engine = gpu::GpuOthelloMcts::new(gpu_context, max_nodes, iterations_per_batch)
+        let engine = gpu::GpuOthelloMcts::new(gpu_context, max_nodes, iterations_per_batch)
             .expect("Failed to create GpuOthelloMcts");
         engine.init_tree(board, current_player, legal_moves);
-        *self.gpu_native_othello.lock() = Some(Arc::new(Mutex::new(engine)));
+        *self.gpu_native_othello.lock() = Some(Arc::new(engine));
     }
 
     /// Selects the best move from children based on the configured strategy

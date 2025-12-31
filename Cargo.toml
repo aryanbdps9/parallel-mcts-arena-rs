@@ -34,6 +34,8 @@ rand_xoshiro = "0.7.0"
 tokio = { version = "1.45.1", features = ["full"] }
 # CPU information and control
 num_cpus = "1.16.0"
+# Lock-free data structures for multi-threaded logging
+crossbeam-queue = "0.3"
 # Windows API for GUI mode (optional)
 windows = { version = "0.60", features = [
     "Win32_Foundation",

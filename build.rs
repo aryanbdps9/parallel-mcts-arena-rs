@@ -20,11 +20,9 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir);
 
-    // List of shaders to process
+    // List of entry-point shaders to process (exclude include-only files)
     let shaders = [
         "puct.wgsl",
-        "common.wgsl",
-        "grid_common.wgsl",
         "gomoku.wgsl",
         "connect4.wgsl",
         "othello.wgsl",
@@ -34,15 +32,26 @@ fn main() {
         "mcts_othello.wgsl",
     ];
 
+    // List of include-only files to just copy (no validation)
+    let include_only = [
+        "common.wgsl",
+        "grid_common.wgsl",
+    ];
+
     for shader in shaders {
         let (resolved, source_map) = resolve_shader_source(shader_dir, shader);
-        
         // Validate
         validate_shader(shader, &resolved, &source_map);
-        
         // Write to OUT_DIR
         let dest_path = out_path.join(shader);
         fs::write(&dest_path, &resolved).expect("Failed to write shader to OUT_DIR");
+    }
+
+    // Just copy include-only files
+    for inc in include_only {
+        let src_path = shader_dir.join(inc);
+        let dest_path = out_path.join(inc);
+        fs::copy(&src_path, &dest_path).expect("Failed to copy include-only WGSL");
     }
 }
 

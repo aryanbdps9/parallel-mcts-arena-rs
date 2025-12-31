@@ -7,6 +7,11 @@ use mcts::games::othello::OthelloState;
 use mcts::{GameState, MCTS};
 use std::time::Instant;
 
+#[cfg(feature = "gpu")]
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu")]
+
 fn main() {
     println!("=== GPU-Native MCTS Benchmark for Othello ===\n");
 
@@ -76,6 +81,15 @@ fn main() {
     // Test 3: GPU-Native search (different batch sizes)
     #[cfg(feature = "gpu")]
     {
+        // Start urgent event polling before GPU-native search
+        use mcts::gpu::urgent_event_logger::start_and_log_urgent_events_othello;
+        let gpu_native = mcts.get_gpu_native_othello();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let _urgent_event_handle = if let Some(engine) = gpu_native {
+            Some(start_and_log_urgent_events_othello(engine, 100, stop_flag.clone()))
+        } else {
+            None
+        };
         for &iterations_per_batch in &[1024, 4096, 16384] {
             println!("--- Test 3: GPU-Native Search (batch={}) ---", iterations_per_batch);
             
@@ -110,7 +124,13 @@ fn main() {
             } else {
                 println!("GPU-native search returned no result\n");
             }
+            // Allow urgent event logger to print any remaining events
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
+        // Stop urgent event polling after GPU-native search
+        stop_flag.store(true, Ordering::Relaxed);
+        // Give logger thread time to exit
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     
     #[cfg(not(feature = "gpu"))]

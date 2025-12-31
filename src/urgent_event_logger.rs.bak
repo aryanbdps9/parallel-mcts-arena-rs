@@ -1,0 +1,92 @@
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::thread;
+use std::time::Duration;
+use mcts::gpu::mcts_gpu::GpuMctsEngine;
+use mcts::gpu::mcts_othello::{GpuOthelloMcts, UrgentEvent};
+
+/// Starts the urgent event polling thread and prints events every interval.
+pub fn start_and_log_urgent_events(
+    gpu_engine: Arc<GpuMctsEngine>,
+    poll_interval_ms: u64,
+    stop_flag: Arc<AtomicBool>,
+) -> Arc<Mutex<Vec<UrgentEvent>>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = Arc::clone(&events);
+    let engine_clone = gpu_engine.clone();
+    let stop_flag_clone = Arc::clone(&stop_flag);
+    thread::spawn(move || {
+        while !stop_flag_clone.load(Ordering::Relaxed) {
+            let raw_events = engine_clone.poll_urgent_events();
+            let mut events_guard = events_clone.lock().unwrap();
+            for raw in raw_events {
+                // SAFETY: UrgentEvent is #[repr(C)] and 1024 bytes
+                let event: UrgentEvent = unsafe { std::ptr::read(raw.as_ptr() as *const UrgentEvent) };
+                events_guard.push(event);
+            }
+            drop(events_guard);
+            thread::sleep(Duration::from_millis(poll_interval_ms));
+        }
+    });
+    // Spawn a thread to print events every interval
+    let events_clone2: Arc<Mutex<Vec<UrgentEvent>>> = Arc::clone(&events);
+    let stop_flag2 = Arc::clone(&stop_flag);
+    thread::spawn(move || {
+        while !stop_flag2.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(poll_interval_ms));
+            let mut events_guard = events_clone2.lock().unwrap();
+            if !events_guard.is_empty() {
+                for event in events_guard.iter() {
+                    println!("[URGENT EVENT] type={} ts={} payload[0]={}", event.event_type, event.timestamp, event.payload[0]);
+                }
+                events_guard.clear();
+            }
+        }
+    });
+    events
+}
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::thread;
+use std::time::Duration;
+use mcts::gpu::mcts_gpu::GpuMctsEngine;
+use mcts::gpu::mcts_othello::{GpuOthelloMcts, UrgentEvent};
+
+/// Starts the urgent event polling thread and prints events every interval.
+pub fn start_and_log_urgent_events(
+    gpu_engine: Arc<GpuMctsEngine>,
+    poll_interval_ms: u64,
+    stop_flag: Arc<AtomicBool>,
+) -> Arc<Mutex<Vec<UrgentEvent>>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = Arc::clone(&events);
+    let engine_clone = gpu_engine.clone();
+    let stop_flag_clone = Arc::clone(&stop_flag);
+    thread::spawn(move || {
+        while !stop_flag_clone.load(Ordering::Relaxed) {
+            let raw_events = engine_clone.poll_urgent_events();
+            let mut events_guard = events_clone.lock().unwrap();
+            for raw in raw_events {
+                // SAFETY: UrgentEvent is #[repr(C)] and 1024 bytes
+                let event: UrgentEvent = unsafe { std::ptr::read(raw.as_ptr() as *const UrgentEvent) };
+                events_guard.push(event);
+            }
+            drop(events_guard);
+            thread::sleep(Duration::from_millis(poll_interval_ms));
+        }
+    });
+    // Spawn a thread to print events every interval
+    let events_clone2: Arc<Mutex<Vec<UrgentEvent>>> = Arc::clone(&events);
+    let stop_flag2 = Arc::clone(&stop_flag);
+    thread::spawn(move || {
+        while !stop_flag2.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(poll_interval_ms));
+            let mut events_guard = events_clone2.lock().unwrap();
+            if !events_guard.is_empty() {
+                for event in events_guard.iter() {
+                    println!("[URGENT EVENT] type={} ts={} payload[0]={}", event.event_type, event.timestamp, event.payload[0]);
+                }
+                events_guard.clear();
+            }
+        }
+    });
+    events
+}

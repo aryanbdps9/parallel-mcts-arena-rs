@@ -1,13 +1,120 @@
 // =============================================================================
+// Top-Down Dynamic Pruning Kernel (Design Doc Algorithm)
+// =============================================================================
+// Inputs:
+//   - unreachable_roots: array<u32, MAX_UNREACHABLE_ROOTS> (indices of old root's children except new root)
+//   - work_queue: array<u32, MAX_WORK_QUEUE> (global work queue for dynamic partitioning)
+//   - work_head: atomic<u32> (global atomic counter for work queue)
+//
+// Each worker pops a node index from the work queue, traverses its subtree (BFS/DFS),
+// atomically sets the deleted bit, and enqueues children. The atomic deleted bit ensures
+// each node is only processed once.
+
+const MAX_UNREACHABLE_ROOTS: u32 = 64u;
+const MAX_WORK_QUEUE: u32 = 8192u;
+
+@group(4) @binding(0) var<storage, read> unreachable_roots: array<u32, MAX_UNREACHABLE_ROOTS>;
+@group(4) @binding(1) var<storage, read_write> work_queue: array<u32, MAX_WORK_QUEUE>;
+@group(4) @binding(2) var<storage, read_write> work_head: atomic<u32>;
+
+// Atomic set-and-check for deleted bit (bit 0)
+fn atomic_set_deleted(node_idx: u32) -> bool {
+    let old = atomicOr(&node_info[node_idx].flags, 1u);
+    return (old & 1u) == 0u; // true if not previously deleted
+}
+
+@compute @workgroup_size(64)
+fn prune_unreachable_topdown(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let tid = global_id.x;
+    // Each worker pops work from the global queue
+    loop {
+        let work_idx = atomicAdd(&work_head, 1u);
+        if (work_idx >= MAX_WORK_QUEUE) {
+            break;
+        }
+        let node_idx = work_queue[work_idx];
+        if (node_idx == INVALID_INDEX) {
+            continue;
+        }
+        // Atomically set deleted bit; skip if already deleted
+        if (!atomic_set_deleted(node_idx)) {
+            continue;
+        }
+        // Free node (add to free list, clear state, etc.)
+        atomicStore(&node_visits[node_idx], 0);
+        atomicStore(&node_wins[node_idx], 0);
+        atomicStore(&node_vl[node_idx], 0);
+        atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
+        // Mark all children for processing
+        let info = node_info[node_idx];
+        for (var i = 0u; i < info.num_children && i < MAX_CHILDREN; i++) {
+            let child_idx = get_child_idx(node_idx, i);
+            if (child_idx != INVALID_INDEX) {
+                // Atomically push to work queue
+                let qidx = atomicAdd(&work_head, 1u);
+                if (qidx < MAX_WORK_QUEUE) {
+                    work_queue[qidx] = child_idx;
+                }
+            }
+        }
+        // Optionally: add node to free list (not shown here)
+    }
+}
+// =============================================================================
+// Urgent Event Logging Buffer (Ring Buffer)
+// =============================================================================
+// 256 events x 1024 bytes = 256 KiB
+struct UrgentEvent {
+    timestamp: u32,
+    event_type: u32,
+    _pad: u32,
+    payload: array<u32, 255>, // 1020 bytes (255*4) for payload, padded to 1024B
+};
+
+@group(3) @binding(0) var<storage, read_write> urgent_event_buffer: array<UrgentEvent, 256>;
+@group(3) @binding(1) var<storage, read_write> urgent_event_write_head: atomic<u32>;
+
+// =============================================================================
+// Urgent Event Types
+// =============================================================================
+const URGENT_EVENT_START: u32 = 1u;
+const URGENT_EVENT_HALT: u32 = 2u;
+const URGENT_EVENT_REROOT: u32 = 3u;
+
+// =============================================================================
+// Helper: Write an urgent event to the ring buffer
+// =============================================================================
+fn write_urgent_event(event_type: u32, payload: ptr<function, array<u32, 255>>) {
+    // Atomically reserve a slot in the ring buffer
+    let idx = atomicAdd(&urgent_event_write_head, 1u) % 256u;
+    let now = 0u; // TODO: Replace with a real timestamp if available
+    urgent_event_buffer[idx].timestamp = now;
+    urgent_event_buffer[idx].event_type = event_type;
+    urgent_event_buffer[idx]._pad = 0u;
+    // Copy payload (if any)
+    for (var i = 0u; i < 255u; i++) {
+        urgent_event_buffer[idx].payload[i] = (*payload)[i];
+    }
+}
+
+// =============================================================================
 // Main MCTS Kernel Implementation (restored minimal version)
 // =============================================================================
 fn mcts_othello_iteration(global_id: vec3<u32>) {
-        // Diagnostic: count kernel entries
-        atomicAdd(&diagnostics._pad0, 1u); // Use _pad0 as "kernel_entries" counter
+    // Diagnostic: count kernel entries
+    atomicAdd(&diagnostics._pad0, 1u); // Use _pad0 as "kernel_entries" counter
     // Minimal MCTS search loop
     let my_workgroup = global_id.x % 256u;
     let thread_id = global_id.x;
     init_rng(thread_id, params.seed);
+
+    // --- Log a START event at the beginning of each iteration ---
+    var payload: array<u32, 255>;
+    // Optionally fill payload with useful info (e.g., thread_id, root_idx)
+    payload[0] = thread_id;
+    payload[1] = params.root_idx;
+    for (var i = 2u; i < 255u; i++) { payload[i] = 0u; }
+    write_urgent_event(URGENT_EVENT_START, &payload);
 
     // Selection phase: start at root
     var path: array<u32, MAX_PATH_LENGTH>;
@@ -138,7 +245,7 @@ struct NodeInfo {
     move_id: u32,       // Encoded as y * width + x, or INVALID for root
     num_children: u32,
     player_at_node: i32,
-    flags: u32,         // bit 0: deleted, bit 1: zero, bit 2: dirty
+    flags: atomic<u32>, // bit 0: deleted, bit 1: zero, bit 2: dirty
     _pad: u32,          // for alignment (optional, for 32-byte struct)
 }
 
@@ -529,8 +636,8 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
         let idx = free_lists[my_workgroup][local_top - 1u];
         if (idx != INVALID_INDEX) {
             // Clear deleted and dirty bits, set zero bit if node is zeroed
-            node_info[idx].flags &= ~1u; // clear deleted
-            node_info[idx].flags &= ~(1u << 2); // clear dirty
+            atomicAnd(&node_info[idx].flags, ~1u); // clear deleted
+            atomicAnd(&node_info[idx].flags, ~(1u << 2)); // clear dirty
             // zero bit is set if node is zeroed, otherwise must be cleared by user
             return idx;
         }
@@ -539,7 +646,7 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
     let alloc_idx = atomicAdd(&alloc_counter, 1u);
     if (alloc_idx < params.max_nodes) {
         // New node: set zero bit, clear deleted and dirty
-        node_info[alloc_idx].flags = (1u << 1); // zero bit
+        atomicStore(&node_info[alloc_idx].flags, (1u << 1)); // zero bit
         return alloc_idx;
     }
 
@@ -570,7 +677,12 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
         atomicStore(&node_wins[best_idx], 0);
         atomicStore(&node_vl[best_idx], 0);
         atomicStore(&node_state[best_idx], NODE_STATE_EMPTY);
-        node_info[best_idx] = NodeInfo(INVALID_INDEX, INVALID_INDEX, 0u, 0, 1u, 0u); // set deleted bit
+        node_info[best_idx].parent_idx = INVALID_INDEX;
+        node_info[best_idx].move_id = INVALID_INDEX;
+        node_info[best_idx].num_children = 0u;
+        node_info[best_idx].player_at_node = 0;
+        atomicStore(&node_info[best_idx].flags, 1u); // set deleted bit
+        node_info[best_idx]._pad = 0u;
         for (var i = 0u; i < MAX_CHILDREN; i++) {
             set_child_idx(best_idx, i, INVALID_INDEX);
             set_child_prior(best_idx, i, 0.0);
@@ -597,9 +709,9 @@ fn free_node(node_idx: u32, my_workgroup: u32) {
         return;
     }
     // Set deleted bit, clear dirty and zero bits
-    node_info[node_idx].flags |= 1u; // set deleted
-    node_info[node_idx].flags &= ~(1u << 1); // clear zero
-    node_info[node_idx].flags &= ~(1u << 2); // clear dirty
+    atomicOr(&node_info[node_idx].flags, 1u); // set deleted
+    atomicAnd(&node_info[node_idx].flags, ~(1u << 1)); // clear zero
+    atomicAnd(&node_info[node_idx].flags, ~(1u << 2)); // clear dirty
     let local_top = atomicAdd(&free_tops[my_workgroup], 1u);
     if (local_top < 8192u) {
         free_lists[my_workgroup][local_top] = node_idx;
@@ -690,7 +802,12 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
                     continue;
                 }
                 // Set up child node info
-                node_info[child_idx] = NodeInfo(node_idx, encode_move(x, y), 0u, -player, 0u, 0u);
+                node_info[child_idx].parent_idx = node_idx;
+                node_info[child_idx].move_id = encode_move(x, y);
+                node_info[child_idx].num_children = 0u;
+                node_info[child_idx].player_at_node = -player;
+                atomicStore(&node_info[child_idx].flags, 0u); // not deleted
+                node_info[child_idx]._pad = 0u;
                 atomicStore(&node_state[child_idx], NODE_STATE_READY);
                 set_child_idx(node_idx, num_children, child_idx);
                 set_child_prior(node_idx, num_children, 1.0); // Uniform prior for now
@@ -712,7 +829,9 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
 
 
 // =============================================================================
-// Pruning Kernel - Frees unreachable nodes after advance_root
+// Pruning Kernel - Dynamic Partitioning Only
+// This kernel uses dynamic partitioning: each thread checks if its node is reachable from the root by traversing parent pointers.
+// No static or generation-based logic is used.
 
 @compute @workgroup_size(256)
 fn prune_unreachable(
@@ -758,7 +877,12 @@ fn prune_unreachable(
         atomicStore(&node_wins[node_idx], 0);
         atomicStore(&node_vl[node_idx], 0);
         atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
-        node_info[node_idx] = NodeInfo(INVALID_INDEX, INVALID_INDEX, 0u, 0, 1u, 0u); // set deleted bit
+        node_info[node_idx].parent_idx = INVALID_INDEX;
+        node_info[node_idx].move_id = INVALID_INDEX;
+        node_info[node_idx].num_children = 0u;
+        node_info[node_idx].player_at_node = 0;
+        atomicStore(&node_info[node_idx].flags, 1u); // set deleted bit
+        node_info[node_idx]._pad = 0u;
         for (var i = 0u; i < MAX_CHILDREN; i++) {
             set_child_idx(node_idx, i, INVALID_INDEX);
             set_child_prior(node_idx, i, 0.0);

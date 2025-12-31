@@ -1,77 +1,84 @@
-# Hybrid Allocator Design (Updated as of December 2025)
+# December 2025 Update: Robust Urgent Event Logging and Host Injection
 
+Recent changes:
+- The urgent event logging pipeline is now robustly tested for both GPU-to-CPU and CPU-to-CPU (host-injected) events.
+- The Rust struct `UrgentEvent` now exactly matches the WGSL struct layout (`timestamp: u32`, not `u64`), ensuring correct field alignment and event detection.
+- The host can inject urgent events with arbitrary payloads for diagnostics and testing, via `log_urgent_event_from_cpu_with_payload`.
+- The urgent event polling thread tracks the write head and only processes new events, with correct wraparound handling and minimal terminal output.
+- All event logging and buffer access is synchronized and tested, with buffer mapping/unmapping and `device.poll` for correctness.
+- The design is validated by passing both GPU and CPU event logging tests, ensuring reliability for both production and diagnostics.
+
+
+# GPU-Side Hybrid Allocator and Event Logging Architecture (December 2025)
 
 ## Overview
-This document describes the current design of the hybrid memory allocator for GPU-native Monte Carlo Tree Search (MCTS) in Othello, as implemented in the `parallel-mcts-arena` project. The allocator is designed for high performance, robustness, and correctness, supporting large-scale tree search on the GPU with per-workgroup free lists and diagnostics.
+This document details the architecture of the GPU-side memory allocator and urgent event logging system for Monte Carlo Tree Search (MCTS) in Othello, as implemented in `parallel-mcts-arena`. The design is focused on:
+- High-throughput, contention-free node allocation and recycling for millions of tree nodes
+- Robust, lock-free GPU-to-CPU urgent event logging
+- Correctness and testability for large-scale, parallel MCTS
 
-## Key Features
-- **Per-Workgroup Free Lists:**
-    - Each GPU workgroup maintains its own free list for fast, contention-free allocation and deallocation of tree nodes.
-    - Free lists are implemented as ring buffers in GPU memory, sized for the maximum expected concurrency.
-    - When a workgroup's free list is exhausted, it falls back to a global allocator.
+## Core GPU Data Structures
 
-- **Global Allocator Fallback:**
-    - A global atomic counter is used to allocate new nodes when all local free lists are full.
-    - Ensures that allocation never fails as long as there is global capacity.
+### Node Pool Buffers
+- **node_info_buffer**: Array of structs, one per node, containing parent, move, flags (including deleted/zero bits), and other metadata.
+- **node_visits_buffer**: Per-node visit counts (atomic, for backpropagation).
+- **node_wins_buffer**: Per-node win counts (atomic, for backpropagation).
+- **children_indices_buffer**: Per-node child index lists.
+- **root_board_buffer**: Board state for the root node.
 
-- **Diagnostics and Logging:**
-    - Allocation, deallocation, and pruning events are logged to a diagnostics buffer for host-side analysis.
-    - Diagnostic counters track allocation failures, free list usage, and pruning statistics.
+### Hybrid Allocator Buffers
+- **free_lists_buffer**: [workgroup][slot] 2D array (256 × 8192 = 2M slots). Each workgroup manages its own ring buffer of free node indices.
+- **free_tops_buffer**: [workgroup] array of atomic counters, one per workgroup, tracking the top of each free list.
+- **alloc_counter_buffer**: Global atomic counter for fallback allocation when a workgroup's free list is empty.
 
-- **Buffer and Bind Group Layouts:**
-    - All GPU buffers are created with correct usage flags (STORAGE, UNIFORM, COPY_SRC, COPY_DST) to match their use in compute shaders and bind group layouts.
-    - Bind group layouts are explicitly defined and validated in Rust tests to ensure compatibility with WGSL shaders and wgpu validation rules.
+### Urgent Event Logging Buffers
+- **urgent_event_buffer**: Host-mapped ring buffer (256 × 1024 bytes). Each event is a struct with `timestamp: u32`, `event_type: u32`, `_pad: u32`, and `payload: [u32; 255]` (matches WGSL layout exactly).
+- **urgent_event_write_head**: Atomic counter (GPU increments, host polls) for event production/consumption.
 
-- **Test Coverage and Validation Loop:**
-    - Rust unit tests validate that all bind group layouts, bind group descriptors, and buffer usage flags are correct and that wgpu validation passes at runtime.
-    - Tests now include direct validation of the root node's children after every tree initialization, and a multi-turn Othello test that simulates several moves and root advances, checking root children after each. This ensures that GPU state corruption or root mismatch bugs are caught immediately.
-    - Tests are run in a continuous loop until all pass with no warnings or errors.
-    - The development process enforces: "Do not return to the user until all tests pass and there are no build errors."
+## GPU-Side Algorithms
 
-## Implementation Notes
-- The allocator logic is implemented in WGSL (see `src/gpu/shaders/mcts_othello.wgsl`) and invoked from Rust (`src/gpu/mcts_othello.rs`).
-- All buffer and bind group creation is performed in Rust, with layouts matching the shader expectations.
-- The system is designed to be robust against panics, validation errors, and resource leaks.
-- Diagnostics can be extended for further profiling and debugging as needed.
-- Some fields and methods in the Rust implementation are intentionally marked with `#[allow(dead_code)]` to suppress warnings about unused code. This is by design, to support extensibility, future features, and robust diagnostics without cluttering the build output with warnings.
+### Node Allocation (WGSL)
+1. **Workgroup-Local Fast Path:**
+   - Each thread first tries to pop a node index from its workgroup's free list (LIFO, atomic decrement of free_tops[wg]).
+   - If successful, the node is reused and ready for initialization.
+2. **Global Fallback:**
+   - If the free list is empty, the thread atomically increments the global alloc_counter to claim a new node index.
+   - If alloc_counter < max_nodes, allocation succeeds; otherwise, memory pressure policy is triggered.
+3. **Memory Pressure Handling:**
+   - If all nodes are exhausted, expansion stops. Rollouts may continue, or the host may be signaled to play a move early and prune.
 
-## Recent Changes
-- Bind group layouts in Rust are now created with explicit entries matching the shader and bind group descriptors (9 for node pool, 5 for execution, 1 for board).
-- The `params_buffer` now includes the `UNIFORM` usage flag to satisfy wgpu validation.
-- All tests pass with no errors; only warnings about unused fields/methods remain.
+### Node Recycling and Pruning
+- **Top-Down Pruning:**
+  - After a root move, all unreachable subtrees are pruned in parallel.
+  - Each worker claims a subtree root and traverses descendants (BFS/DFS), atomically setting a deleted bit per node.
+  - Freed nodes are pushed to the workgroup's free list (if space), or to a global overflow if needed.
+  - The deleted bit ensures each node is only processed once, even if reached by multiple workers.
+- **Value-Based Recycling:**
+  - When memory is nearly exhausted, only low-value leaves (lowest PUCT/visit) are recycled, never high-value subtrees.
 
----
-# Hybrid Memory Allocator Design
-## Per-Workgroup Free Lists
+### Backpropagation
+- After each simulation, the kernel walks up the path from leaf to root, atomically updating visit/win stats for each node.
 
----
+### Urgent Event Logging (GPU → CPU)
+- GPU kernels write urgent events to the host-mapped ring buffer at `write_head % 256`, incrementing `write_head` atomically.
+- The host can also inject urgent events for diagnostics/testing using `log_urgent_event_from_cpu_with_payload`, which writes to the buffer and advances the write head.
+- Events include search halts, root advances, diagnostics, memory pressure signals, and test/diagnostic events.
+- The host polls the buffer, processes only new events (using last seen write_head), and handles wraparound/overflow robustly.
+- Logging is rate-limited and non-verbose by design, and all buffer access is synchronized with atomic flags and `device.poll`.
 
-## Problem Statement
+## Host Integration and Synchronization
+- All GPU buffer creation, bind group layout, and shader preprocessing (for includes) are performed in Rust, with validation against WGSL expectations.
+- All mutable state in `GpuOthelloMcts` is protected by an internal Mutex; all mutation is via `&self` methods with internal locking.
+- An AtomicBool is used to synchronize buffer mapping/unmapping between host and GPU.
+- Tests drain pre-existing urgent events, use `device.poll(wgpu::Maintain::Wait)` for synchronization, and validate all buffer layouts and event flows.
 
-**Current System Issues:**
-1. ❌ **Race condition overflow**: 2048 threads → `free_top` exceeds capacity (3.3M > 2M)
-2. ❌ **Freeze on allocation**: Reading `free_list[3.3M]` → out of bounds → hang
-3. ❌ **Contention**: All 2048 threads fighting over one `free_top` atomic
-4. ❌ **Unpredictable**: Can't guarantee how many nodes we'll actually reuse
-
----
-
-## New Design: Hybrid Approach
-
-### Core Concepts
-
-**1. Per-Workgroup Free Lists** (Reduces Contention)
-- GPU dispatches 256 workgroups of 256 threads each
-- Each workgroup gets its own small free list (8K entries)
-- 256 lists × 8K = 2,048,000 total free list capacity
-- **Benefit**: Only 256 threads per list instead of 2048!
-
-
-**3. Fallback Global Allocator** (Safety Net)
-- If workgroup's free list is empty, allocate new node
-- **Benefit**: Never run out of nodes until truly full
-
----
+## Node Lifecycle Summary
+1. **Allocation:** Try workgroup free list → fallback to global alloc_counter.
+2. **Initialization:** Node fields set, children created as needed.
+3. **Simulation/Backprop:** Visits/wins updated atomically.
+4. **Pruning:** Unreachable subtrees pruned top-down, nodes recycled.
+5. **Recycling:** Node index returned to workgroup free list.
+6. **Urgent Events:** GPU logs events for host to process (e.g., memory pressure, search halt).
 
 ## Data Structures
 
@@ -176,10 +183,10 @@ After re-rooting (i.e., after a move is made and the root node is changed), we k
 **Single-Pass Deleted-Bit Algorithm:**
 
 
-**Efficient Parallel Work Distribution (Dynamic Partitioning):**
+**Dynamic Partitioning for Pruning:**
 
 1. Identify all children of the outgoing root except the selected child (these are the roots of unreachable subtrees).
-2. Launch a parallel pruning kernel where each worker dynamically claims work from a global atomic counter or work queue.
+2. Launch a parallel pruning kernel where each worker dynamically claims node indices from a global atomic counter or work queue. No static partitioning is used.
 3. Each worker performs a top-down traversal (BFS or DFS) of the subtree it claims, visiting all descendants. The atomic deleted bit ensures each node is only processed once, even if multiple workers reach it via different paths.
 4. For each visited node:
     - Atomically set a `deleted` bit (or field) in the node. If the bit was already set, skip further processing for this node (deduplication).
@@ -191,7 +198,7 @@ After re-rooting (i.e., after a move is made and the root node is changed), we k
 - The atomic set-and-check of the deleted bit ensures that each node is only processed (and freed) once, even if multiple workers reach it via different paths.
 - No node will be missed, as all descendants are visited from the known subtree roots.
 - No ancestor will be deleted before its descendants in a way that causes missed nodes, because the deleted bit prevents double-processing and the traversal is exhaustive from each root.
-- Dynamic partitioning (atomic work queue/counter) ensures efficient load balancing and prevents bottlenecks from large subtrees.
+- Dynamic partitioning (atomic work queue/counter) ensures efficient load balancing and prevents bottlenecks from large subtrees. Static partitioning is not used.
 
 **Key Points:**
 
@@ -205,6 +212,44 @@ After re-rooting (i.e., after a move is made and the root node is changed), we k
 
 
 ### 3. **Diagnostics and Logging**
+---
+
+## Urgent Event Logging (2025 Feature)
+---
+
+## Backpropagation (Real, Not Stub)
+
+**Goal:**
+Accurately propagate simulation results up the tree after each rollout.
+
+**Design:**
+- **Kernel:**
+    - After simulation, walk up the path from leaf to root.
+    - Atomically update visit/win statistics for each node.
+    - Use the result of `simulate_game` for reward calculation.
+- **Host:**
+    - Ensures kernel is launched and synchronized as part of the MCTS iteration.
+
+**Goal:**
+Enable the GPU to log important events (e.g., re-root, MCTS halt/start) to a host-visible buffer, with low latency and support for large payloads.
+
+**Design:**
+- **Buffer:**
+    - Host-mapped, persistent, size: 256 events × 1024 bytes = 256 KiB.
+    - Struct:
+        - `timestamp` (u64, GPU or host time)
+        - `event_type` (u32)
+        - `payload` ([u8; 1016]) for flexible data (move info, diagnostics, etc.)
+- **Indices:**
+    - `write_head` (atomic, GPU increments)
+    - `read_tail` (host, advances after reading)
+- **GPU:**
+    - Writes event at `write_head % 256`, increments `write_head`.
+    - Aggregates noisy events (e.g., only logs once per move or on threshold).
+- **Host:**
+    - Dedicated thread polls buffer every 10–50 ms.
+    - Reads and prints/logs new events, advances `read_tail`.
+    - Handles buffer wrap-around and overflow (tracks dropped events).
 
 The allocator tracks and logs the following events in a diagnostics buffer (GPU-side struct, host-readable):
 

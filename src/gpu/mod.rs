@@ -1,25 +1,29 @@
-//! # GPU Acceleration Module for MCTS
-//!
-//! This module provides GPU-accelerated operations for the Monte Carlo Tree Search algorithm.
-//! It leverages WebGPU (wgpu) for cross-platform GPU compute capabilities.
-//!
-//! ## Key Features
-//! - **Batch PUCT Calculation**: Compute PUCT scores for many nodes in parallel on the GPU
-//! - **GPU-Native MCTS**: Run all four MCTS phases (selection, expansion, simulation, backprop) on GPU
-//! - **Automatic Fallback**: Falls back to CPU if GPU is unavailable
-//!
-//! ## Architecture
-//! The GPU module consists of:
-//! - `GpuContext`: Manages GPU device, queues, and resources
-//! - `GpuMctsAccelerator`: Orchestrates GPU-accelerated MCTS operations (hybrid mode)
-//! - `GpuMctsEngine`: Fully GPU-native MCTS engine (all phases on GPU)
-//! - Compute shaders for PUCT calculation and state evaluation
+pub mod urgent_event_logger_debug;
+#[cfg(test)]
+mod test_urgent_event;
+/// # GPU Acceleration Module for MCTS
+///
+/// This module provides GPU-accelerated operations for the Monte Carlo Tree Search algorithm.
+/// It leverages WebGPU (wgpu) for cross-platform GPU compute capabilities.
+///
+/// ## Key Features
+/// - **Batch PUCT Calculation**: Compute PUCT scores for many nodes in parallel on the GPU
+/// - **GPU-Native MCTS**: Run all four MCTS phases (selection, expansion, simulation, backprop) on GPU
+/// - **Automatic Fallback**: Falls back to CPU if GPU is unavailable
+///
+/// ## Architecture
+/// The GPU module consists of:
+/// - `GpuContext`: Manages GPU device, queues, and resources
+/// - `GpuMctsAccelerator`: Orchestrates GPU-accelerated MCTS operations (hybrid mode)
+/// - `GpuMctsEngine`: Fully GPU-native MCTS engine (all phases on GPU)
+/// - Compute shaders for PUCT calculation and state evaluation
+pub mod urgent_event_logger;
 
-mod context;
+pub mod context;
 mod accelerator;
 mod shaders;
-mod mcts_gpu;
-mod mcts_othello;
+pub mod mcts_gpu;
+pub mod mcts_othello;
 
 pub use context::GpuContext;
 pub use accelerator::{GpuMctsAccelerator, GpuNodeData, GpuPuctResult, GpuSimulationParams};

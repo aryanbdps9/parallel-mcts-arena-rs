@@ -1,19 +1,28 @@
-//! GPU-Native MCTS Implementation
-//!
-//! This module provides a fully GPU-based Monte Carlo Tree Search where all four phases
-//! (selection, expansion, simulation, backpropagation) run on the GPU without CPU-GPU
-//! synchronization during iterations.
-//!
-//! ## Architecture
-//! - Pre-allocated node pool on GPU (no dynamic allocation during search)
-//! - Index-based tree structure (no pointers)
-//! - Atomic operations for thread coordination
-//! - Virtual losses prevent path convergence
-//!
-//! ## Benefits over Hybrid Approach
-//! - No stale path problem (paths are always current)
-//! - No CPU-GPU sync overhead during iterations
-//! - True parallel MCTS with coherent tree state
+/// Struct to hold urgent event buffers for fine-grained locking
+pub struct UrgentEventBuffers {
+    pub urgent_event_buffer: Buffer,
+    pub urgent_event_staging_buffer: Buffer,
+    pub urgent_event_write_head_buffer: Buffer,
+    pub urgent_event_write_head_staging: Buffer,
+    /// Atomic flag for synchronizing buffer access
+    pub urgent_event_buffer_in_use: std::sync::atomic::AtomicBool,
+}
+/// GPU-Native MCTS Implementation
+///
+/// This module provides a fully GPU-based Monte Carlo Tree Search where all four phases
+/// (selection, expansion, simulation, backpropagation) run on the GPU without CPU-GPU
+/// synchronization during iterations.
+///
+/// ## Architecture
+/// - Pre-allocated node pool on GPU (no dynamic allocation during search)
+/// - Index-based tree structure (no pointers)
+/// - Atomic operations for thread coordination
+/// - Virtual losses prevent path convergence
+///
+/// ## Benefits over Hybrid Approach
+/// - No stale path problem (paths are always current)
+/// - No CPU-GPU sync overhead during iterations
+/// - True parallel MCTS with coherent tree state
 
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
@@ -112,7 +121,7 @@ pub struct ChildStats {
 ///
 /// Manages the GPU resources for running MCTS entirely on the GPU.
 pub struct GpuMctsEngine {
-    context: Arc<GpuContext>,
+    pub context: Arc<GpuContext>,
 
     // Compute pipelines
     select_pipeline: ComputePipeline,
@@ -150,11 +159,15 @@ pub struct GpuMctsEngine {
     stats_buffer: Buffer,
     stats_staging_buffer: Buffer,
 
+    // Urgent event buffers (lock-free)
+    pub urgent_event_buffers: std::sync::Arc<UrgentEventBuffers>,
+
     // Bind groups (created per dispatch)
-    node_pool_bind_group: Option<BindGroup>,
-    execution_bind_group: Option<BindGroup>,
-    game_state_bind_group: Option<BindGroup>,
-    stats_bind_group: Option<BindGroup>,
+    pub node_pool_bind_group: Option<BindGroup>,
+    pub execution_bind_group: Option<BindGroup>,
+    pub game_state_bind_group: Option<BindGroup>,
+    pub stats_bind_group: Option<BindGroup>,
+    pub urgent_event_bind_group: Option<BindGroup>,
 
     // Configuration
     max_nodes: u32,
@@ -163,6 +176,116 @@ pub struct GpuMctsEngine {
 }
 
 impl GpuMctsEngine {
+    /// Log a custom urgent event from the CPU with a specific payload (for testing)
+    pub fn log_urgent_event_from_cpu_with_payload(&self, event_type: u32, timestamp: u64, payload: &[u32; 255]) {
+        let urgent_event_buffers = &self.urgent_event_buffers;
+        while urgent_event_buffers.urgent_event_buffer_in_use.swap(true, std::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        use crate::gpu::mcts_othello::UrgentEvent;
+        let event = UrgentEvent {
+            timestamp: timestamp as u32,
+            event_type,
+            _pad: 0,
+            payload: *payload,
+        };
+        let queue = self.context.queue();
+        let event_bytes: &[u8; std::mem::size_of::<UrgentEvent>()] = unsafe { std::mem::transmute(&event) };
+        let device = self.context.device();
+        let urgent_event_buffers = &self.urgent_event_buffers;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("UrgentEventWriteHeadRead"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &urgent_event_buffers.urgent_event_write_head_buffer,
+            0,
+            &urgent_event_buffers.urgent_event_write_head_staging,
+            0,
+            4,
+        );
+        queue.submit(Some(encoder.finish()));
+        let slice = urgent_event_buffers.urgent_event_write_head_staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+        let data = slice.get_mapped_range();
+        let mut write_head = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        drop(data);
+        urgent_event_buffers.urgent_event_write_head_staging.unmap();
+        let slot = (write_head % 256) as u64;
+        let offset = slot * 1024;
+        queue.write_buffer(&urgent_event_buffers.urgent_event_buffer, offset, event_bytes);
+        write_head = write_head.wrapping_add(1);
+        let write_head_bytes = write_head.to_le_bytes();
+        queue.write_buffer(&urgent_event_buffers.urgent_event_write_head_buffer, 0, &write_head_bytes);
+        urgent_event_buffers.urgent_event_buffer_in_use.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Log a string as an UrgentEvent from the CPU into the urgent_event_buffer (for test/diagnostic)
+    pub fn log_urgent_event_from_cpu(&self, event_type: u32, timestamp: u64, message: &str) {
+                // Acquire atomic flag for exclusive buffer access
+                let urgent_event_buffers = &self.urgent_event_buffers;
+                while urgent_event_buffers.urgent_event_buffer_in_use.swap(true, std::sync::atomic::Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+        use crate::gpu::mcts_othello::UrgentEvent;
+        let mut payload = [0u32; 255];
+        let msg_bytes = message.as_bytes();
+        // Copy message bytes into payload as u32 words
+        for (i, chunk) in msg_bytes.chunks(4).enumerate().take(255) {
+            let mut word = [0u8; 4];
+            for (j, b) in chunk.iter().enumerate() {
+                word[j] = *b;
+            }
+            payload[i] = u32::from_le_bytes(word);
+        }
+        let event = UrgentEvent {
+            timestamp: timestamp as u32,
+            event_type,
+            _pad: 0,
+            payload,
+        };
+        let queue = self.context.queue();
+        // SAFETY: UrgentEvent is #[repr(C)] and tightly packed for FFI/buffer transfer
+        let event_bytes: &[u8; std::mem::size_of::<UrgentEvent>()] = unsafe { std::mem::transmute(&event) };
+
+        // Read the current write head (synchronously)
+        let device = self.context.device();
+        let urgent_event_buffers = &self.urgent_event_buffers;
+        // Copy write head to staging
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("UrgentEventWriteHeadRead"),
+        });
+        encoder.copy_buffer_to_buffer(
+            &urgent_event_buffers.urgent_event_write_head_buffer,
+            0,
+            &urgent_event_buffers.urgent_event_write_head_staging,
+            0,
+            4,
+        );
+        queue.submit(Some(encoder.finish()));
+        // Map and read
+        let slice = urgent_event_buffers.urgent_event_write_head_staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+        let data = slice.get_mapped_range();
+        let mut write_head = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        drop(data);
+        urgent_event_buffers.urgent_event_write_head_staging.unmap();
+
+        // Now safe to write to the buffers
+        // Write the event at the next slot in the ring buffer
+        let slot = (write_head % 256) as u64;
+        let offset = slot * 1024;
+        queue.write_buffer(&urgent_event_buffers.urgent_event_buffer, offset, event_bytes);
+
+        // Increment the write head and write it back
+        write_head = write_head.wrapping_add(1);
+        let write_head_bytes = write_head.to_le_bytes();
+        queue.write_buffer(&urgent_event_buffers.urgent_event_write_head_buffer, 0, &write_head_bytes);
+
+        // Release atomic flag
+        urgent_event_buffers.urgent_event_buffer_in_use.store(false, std::sync::atomic::Ordering::Release);
+    }
     /// Create a new GPU MCTS engine
     ///
     /// # Arguments
@@ -173,40 +296,49 @@ impl GpuMctsEngine {
     /// * `board_height` - Game board height
     pub fn new(
         context: Arc<GpuContext>,
-        max_nodes: u32,
+        _max_nodes: u32,
         max_iterations: u32,
         board_width: u32,
         board_height: u32,
     ) -> Self {
+        eprintln!("[DIAG] GpuMctsEngine::new: before device");
         let device = context.device();
+        eprintln!("[DIAG] GpuMctsEngine::new: after device");
 
-        // Per-workgroup free lists (256 workgroups x 8192 slots = 2M u32s)
+        eprintln!("[DIAG] GpuMctsEngine::new: before free_lists_buffer");
         let free_lists_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Free Lists"),
             size: (256 * 8192 * std::mem::size_of::<u32>()) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+        eprintln!("[DIAG] GpuMctsEngine::new: after free_lists_buffer");
         let free_tops_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Free Tops"),
             size: (256 * std::mem::size_of::<u32>()) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+        eprintln!("[DIAG] GpuMctsEngine::new: after free_tops_buffer");
 
-        // Create shader module
+        eprintln!("[DIAG] GpuMctsEngine::new: before create_shader_module");
         let shader_module = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("MCTS Tree Shader"),
             source: wgpu::ShaderSource::Wgsl(MCTS_TREE_SHADER.into()),
         });
+        eprintln!("[DIAG] GpuMctsEngine::new: after create_shader_module");
 
-        // Create bind group layouts
+        eprintln!("[DIAG] GpuMctsEngine::new: before create_node_pool_layout");
         let node_pool_layout = Self::create_node_pool_layout(device);
+        eprintln!("[DIAG] GpuMctsEngine::new: after create_node_pool_layout");
         let execution_layout = Self::create_execution_layout(device);
+        eprintln!("[DIAG] GpuMctsEngine::new: after create_execution_layout");
         let game_state_layout = Self::create_game_state_layout(device);
+        eprintln!("[DIAG] GpuMctsEngine::new: after create_game_state_layout");
         let stats_layout = Self::create_stats_layout(device);
+        eprintln!("[DIAG] GpuMctsEngine::new: after create_stats_layout");
 
-        // Create pipeline layout
+        eprintln!("[DIAG] GpuMctsEngine::new: before create_pipeline_layout");
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("MCTS Pipeline Layout"),
             bind_group_layouts: &[
@@ -217,8 +349,9 @@ impl GpuMctsEngine {
             ],
             push_constant_ranges: &[],
         });
+        eprintln!("[DIAG] GpuMctsEngine::new: after create_pipeline_layout");
 
-        // Create compute pipelines
+        eprintln!("[DIAG] GpuMctsEngine::new: before create_select_pipeline");
         let select_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("MCTS Select Pipeline"),
             layout: Some(&pipeline_layout),
@@ -227,7 +360,9 @@ impl GpuMctsEngine {
             compilation_options: Default::default(),
             cache: None,
         });
+        eprintln!("[DIAG] GpuMctsEngine::new: after create_select_pipeline");
 
+        eprintln!("[DIAG] GpuMctsEngine::new: before create_backprop_pipeline");
         let backprop_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("MCTS Backprop Pipeline"),
             layout: Some(&pipeline_layout),
@@ -236,7 +371,9 @@ impl GpuMctsEngine {
             compilation_options: Default::default(),
             cache: None,
         });
+        eprintln!("[DIAG] GpuMctsEngine::new: after create_backprop_pipeline");
 
+        eprintln!("[DIAG] GpuMctsEngine::new: before create_stats_pipeline");
         let stats_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("MCTS Stats Pipeline"),
             layout: Some(&pipeline_layout),
@@ -245,16 +382,78 @@ impl GpuMctsEngine {
             compilation_options: Default::default(),
             cache: None,
         });
+        eprintln!("[DIAG] GpuMctsEngine::new: after create_stats_pipeline");
 
         // Create buffers
+        eprintln!("[DIAG] GpuMctsEngine::new: before board_size and node_info_buffer");
         let board_size = board_width * board_height;
-
+        let limits = device.limits();
+        let max_nodes = 2_000_000; // Restore to normal test value
+        let node_info_size = (max_nodes as usize * std::mem::size_of::<NodeInfo>()) as u64;
+        eprintln!("[DIAG] Device limits: max_buffer_size={} max_storage_buffer_binding_size={}", limits.max_buffer_size, limits.max_storage_buffer_binding_size);
+        eprintln!("[DIAG] node_info_buffer requested size: {} (max_nodes={} * {})", node_info_size, max_nodes, std::mem::size_of::<NodeInfo>());
+        eprintln!("[DIAG] before node_info_buffer");
         let node_info_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Node Info"),
-            size: (max_nodes as usize * std::mem::size_of::<NodeInfo>()) as u64,
+            size: node_info_size,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+        eprintln!("[DIAG] after node_info_buffer");
+
+        eprintln!("[DIAG] before node_visits_buffer");
+        let _node_visits_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Node Visits"),
+            size: (max_nodes as usize * std::mem::size_of::<i32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        eprintln!("[DIAG] after node_visits_buffer");
+
+        eprintln!("[DIAG] before node_wins_buffer");
+        let _node_wins_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Node Wins"),
+            size: (max_nodes as usize * std::mem::size_of::<i32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        eprintln!("[DIAG] after node_wins_buffer");
+
+        eprintln!("[DIAG] before node_vl_buffer");
+        let _node_vl_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Node VL"),
+            size: (max_nodes as usize * std::mem::size_of::<i32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        eprintln!("[DIAG] after node_vl_buffer");
+
+        eprintln!("[DIAG] before node_state_buffer");
+        let _node_state_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Node State"),
+            size: (max_nodes as usize * std::mem::size_of::<u32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        eprintln!("[DIAG] after node_state_buffer");
+
+        eprintln!("[DIAG] before children_indices_buffer");
+        let _children_indices_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Children Indices"),
+            size: (max_nodes as usize * std::mem::size_of::<u32>() * 8) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        eprintln!("[DIAG] after children_indices_buffer");
+
+        eprintln!("[DIAG] before children_priors_buffer");
+        let _children_priors_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Children Priors"),
+            size: (max_nodes as usize * std::mem::size_of::<f32>() * 8) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        eprintln!("[DIAG] after children_priors_buffer");
 
         let node_visits_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Node Visits"),
@@ -350,8 +549,37 @@ impl GpuMctsEngine {
             mapped_at_creation: false,
         });
 
-        Self {
-            context,
+        // Urgent event buffer (256 x 1024 bytes)
+        let urgent_event_buffers = std::sync::Arc::new(UrgentEventBuffers {
+            urgent_event_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Urgent Event Buffer"),
+                size: 264_192,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            urgent_event_staging_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Urgent Event Staging Buffer"),
+                size: 264_192,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            urgent_event_write_head_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Urgent Event Write Head Buffer"),
+                size: 4,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            urgent_event_write_head_staging: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Urgent Event Write Head Staging"),
+                size: 4,
+                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            urgent_event_buffer_in_use: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        let mut engine = Self {
+            context: context.clone(),
             select_pipeline,
             backprop_pipeline,
             stats_pipeline,
@@ -375,14 +603,70 @@ impl GpuMctsEngine {
             sim_boards_buffer,
             stats_buffer,
             stats_staging_buffer,
+            urgent_event_buffers: urgent_event_buffers.clone(),
             node_pool_bind_group: None,
             execution_bind_group: None,
             game_state_bind_group: None,
             stats_bind_group: None,
+            urgent_event_bind_group: None,
             max_nodes,
             _max_iterations: max_iterations,
             _board_size: board_size,
+        };
+        engine.create_bind_groups(&device);
+        engine
+    }
+
+    /// Poll urgent events from the GPU ring buffer
+    pub fn poll_urgent_events(&self) -> Vec<[u8; 1024]> {
+        let urgent_event_buffers = &self.urgent_event_buffers;
+        // Acquire atomic flag for exclusive buffer access
+        while urgent_event_buffers.urgent_event_buffer_in_use.swap(true, std::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
         }
+        let device = self.context.device();
+        let queue = self.context.queue();
+        let urgent_event_buffers = &self.urgent_event_buffers;
+        // Diagnostics: print buffer addresses and sizes
+        // Copy urgent event buffer and write head to staging
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Urgent Event Poll Encoder"),
+        });
+        encoder.copy_buffer_to_buffer(&urgent_event_buffers.urgent_event_buffer, 0, &urgent_event_buffers.urgent_event_staging_buffer, 0, 256 * 1024);
+        encoder.copy_buffer_to_buffer(&urgent_event_buffers.urgent_event_write_head_buffer, 0, &urgent_event_buffers.urgent_event_write_head_staging, 0, 4);
+        queue.submit(std::iter::once(encoder.finish()));
+        // Map and read write head
+        let write_head_slice = urgent_event_buffers.urgent_event_write_head_staging.slice(..);
+        write_head_slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+        let write_head_data = write_head_slice.get_mapped_range();
+        let write_head = u32::from_le_bytes([write_head_data[0], write_head_data[1], write_head_data[2], write_head_data[3]]);
+        drop(write_head_data);
+        urgent_event_buffers.urgent_event_write_head_staging.unmap();
+        // Map and read urgent event buffer
+        let event_slice = urgent_event_buffers.urgent_event_staging_buffer.slice(..);
+        event_slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::Maintain::Wait);
+        let event_data = event_slice.get_mapped_range();
+            if event_data.len() >= 16 {
+            }
+        let mut events = Vec::new();
+        for i in 0..(write_head.min(256)) {
+            let start = (i as usize) * 1024;
+            let end = start + 1024;
+            let mut event = [0u8; 1024];
+            event.copy_from_slice(&event_data[start..end]);
+            // Print first few bytes for diagnostics
+            if i < 4 {
+                eprintln!("[DIAG] urgent_event[{}] bytes: {:?}", i, &event[..16]);
+            }
+            events.push(event);
+        }
+        drop(event_data);
+        urgent_event_buffers.urgent_event_staging_buffer.unmap();
+        // Release atomic flag
+        urgent_event_buffers.urgent_event_buffer_in_use.store(false, std::sync::atomic::Ordering::Release);
+        events
     }
 
     fn create_node_pool_layout(device: &wgpu::Device) -> BindGroupLayout {
@@ -488,7 +772,7 @@ impl GpuMctsEngine {
                     },
                     count: None,
                 },
-                // node_generations_buffer
+                // (removed: node_generations_buffer, no generation-based cleanup)
                 BindGroupLayoutEntry {
                     binding: 9,
                     visibility: ShaderStages::COMPUTE,
@@ -693,11 +977,44 @@ impl GpuMctsEngine {
             bytemuck::bytes_of(&alloc_count),
         );
 
-        // Create bind groups
-        self.create_bind_groups();
     }
 
-    fn create_bind_groups(&mut self) {
+    pub fn create_bind_groups(&mut self, device: &wgpu::Device) {
+                // Create urgent event bind group (@group(3) in shader)
+                let urgent_event_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("Urgent Event Layout"),
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+                let urgent_event_buffers = &self.urgent_event_buffers;
+                self.urgent_event_bind_group = Some(device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Urgent Event Bind Group"),
+                    layout: &urgent_event_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: urgent_event_buffers.urgent_event_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: urgent_event_buffers.urgent_event_write_head_buffer.as_entire_binding() },
+                    ],
+                }));
         let device = self.context.device();
 
         self.node_pool_bind_group = Some(device.create_bind_group(&BindGroupDescriptor {
@@ -713,6 +1030,7 @@ impl GpuMctsEngine {
                 BindGroupEntry { binding: 6, resource: self.children_priors_buffer.as_entire_binding() },
                 BindGroupEntry { binding: 7, resource: self.free_lists_buffer.as_entire_binding() },
                 BindGroupEntry { binding: 8, resource: self.free_tops_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 9, resource: urgent_event_buffers.urgent_event_buffer.as_entire_binding() },
             ],
         }));
 
@@ -776,8 +1094,9 @@ impl GpuMctsEngine {
         board_height: u32,
         game_type: u32,
     ) {
+        println!("[DIAG] run_iterations: ENTERED");
         let queue = self.context.queue();
-
+        println!("[DIAG] run_iterations: got queue");
         // Upload parameters
         let params = MctsParams {
             num_iterations,
@@ -789,19 +1108,18 @@ impl GpuMctsEngine {
             board_height,
             game_type,
         };
+        println!("[DIAG] run_iterations: writing params");
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
-
         // Calculate workgroups
         let workgroups = (num_iterations + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
-
-        // Encode and submit commands
+        println!("[DIAG] run_iterations: creating encoder");
         let mut encoder = self
             .context
             .device()
             .create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("MCTS Iteration Encoder"),
             });
-
+        println!("[DIAG] run_iterations: selection pass");
         // Selection pass
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -812,12 +1130,12 @@ impl GpuMctsEngine {
             pass.set_bind_group(0, self.node_pool_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(1, self.execution_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(2, self.game_state_bind_group.as_ref().unwrap(), &[]);
-            pass.set_bind_group(3, self.stats_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(3, self.urgent_event_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(4, self.stats_bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
-
+        println!("[DIAG] run_iterations: backprop pass");
         // TODO: Add simulation pass here (game-specific)
-
         // Backpropagation pass
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -828,11 +1146,13 @@ impl GpuMctsEngine {
             pass.set_bind_group(0, self.node_pool_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(1, self.execution_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(2, self.game_state_bind_group.as_ref().unwrap(), &[]);
-            pass.set_bind_group(3, self.stats_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(3, self.urgent_event_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(4, self.stats_bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
-
+        println!("[DIAG] run_iterations: queue.submit");
         queue.submit(std::iter::once(encoder.finish()));
+        println!("[DIAG] run_iterations: end");
     }
 
     /// Get statistics from the tree (requires GPU sync)

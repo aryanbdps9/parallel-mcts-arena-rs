@@ -866,7 +866,7 @@ impl GuiApp {
             // Try to access the GPU-native engine and poll logs
             #[cfg(feature = "gpu")]
             {
-                use mcts::gpu::GpuMctsEngine;
+                // use mcts::gpu::GpuMctsEngine; // removed unused import
                 // Try to access the GPU-native engine via the AI worker's MCTS instance
                 // This is a bit hacky, but we can reach it via the Option<MCTS<GameWrapper>> in the AI worker thread
                 // For now, we use a static method to poll all known engines (if any)

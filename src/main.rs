@@ -1,38 +1,39 @@
-//! # Parallel Multi-Game MCTS Engine
-//!
-//! This is the main entry point for a comprehensive multi-game engine that supports:
-//! - **Gomoku** (Five in a Row)
-//! - **Connect 4** (Four in a Row)  
-//! - **Othello** (Reversi)
-//! - **Blokus** (Territory Control)
-//!
-//! The engine uses a sophisticated parallel Monte Carlo Tree Search (MCTS) algorithm
-//! for AI gameplay with advanced features like virtual losses, node recycling,
-//! and adaptive time management.
-//!
-//! ## Architecture Overview
-//! - **Game Abstraction**: Unified interface for all game types
-//! - **Parallel AI**: Multi-threaded MCTS with configurable parameters
-//! - **State Management**: Comprehensive application state tracking
-//!
-//! ## Key Features
-//! - Multiple game support with unified AI engine
-//! - Parallel MCTS with virtual losses and tree reuse
-//! - Real-time AI analysis and move statistics
-//! - Configurable AI difficulty and time limits
-//! - Background AI computation with progressive updates
-//!
-//! ## Performance Considerations
-//! - Use `--release` flag for optimal AI performance
-//! - Default 8 threads provide good balance for most systems
-//! - Tree sharing between moves reduces redundant computation
-//! - Virtual losses prevent thread collision in parallel search
-//!
-//! ## Usage Examples
-//! ```bash
-//! # Launch with graphical user interface (Windows only)
-//! cargo run --release --features gui -- --gui
-//! ```
+mod urgent_event_logger;
+/// # Parallel Multi-Game MCTS Engine
+///
+/// This is the main entry point for a comprehensive multi-game engine that supports:
+/// - **Gomoku** (Five in a Row)
+/// - **Connect 4** (Four in a Row)  
+/// - **Othello** (Reversi)
+/// - **Blokus** (Territory Control)
+///
+/// The engine uses a sophisticated parallel Monte Carlo Tree Search (MCTS) algorithm
+/// for AI gameplay with advanced features like virtual losses, node recycling,
+/// and adaptive time management.
+///
+/// ## Architecture Overview
+/// - **Game Abstraction**: Unified interface for all game types
+/// - **Parallel AI**: Multi-threaded MCTS with configurable parameters
+/// - **State Management**: Comprehensive application state tracking
+///
+/// ## Key Features
+/// - Multiple game support with unified AI engine
+/// - Parallel MCTS with virtual losses and tree reuse
+/// - Real-time AI analysis and move statistics
+/// - Configurable AI difficulty and time limits
+/// - Background AI computation with progressive updates
+///
+/// ## Performance Considerations
+/// - Use `--release` flag for optimal AI performance
+/// - Default 8 threads provide good balance for most systems
+/// - Tree sharing between moves reduces redundant computation
+/// - Virtual losses prevent thread collision in parallel search
+///
+/// ## Usage Examples
+/// ```bash
+/// # Launch with graphical user interface (Windows only)
+/// cargo run --release --features gui -- --gui
+/// ```
 
 // Import the main application modules
 // Each module handles a specific aspect of the application:
@@ -298,6 +299,27 @@ struct Args {
 /// cargo run --release --features gui -- --game Connect4 --board-size 9 --line-size 4
 /// ```
 fn main() -> io::Result<()> {
+        // Example: Start urgent event polling/logging for GPU-native Othello (non-GUI)
+        #[cfg(not(feature = "gui"))]
+        {
+            use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+            use crate::gpu::mcts_gpu::GpuMctsEngine;
+            use crate::gpu::mcts_othello::GpuOthelloMcts;
+            use urgent_event_logger::start_and_log_urgent_events;
+            // Only run for Othello and if GPU-native mode is selected (simplified check)
+            if let Some(game_name) = &args.game {
+                if game_name.to_lowercase() == "othello" {
+                    // Create GPU engine (example, adjust as needed for your actual engine creation)
+                    let context = Arc::new(crate::gpu::context::GpuContext::new(&crate::gpu::GpuConfig::default()).expect("Failed to create GpuContext"));
+                    let gpu_engine = Arc::new(GpuMctsEngine::new(context.clone(), args.max_nodes as u32, args.gpu_native_batch_size, 8, 8));
+                    let stop_flag = Arc::new(AtomicBool::new(false));
+                    let _events = start_and_log_urgent_events(gpu_engine, 1000, stop_flag.clone());
+                    // Main loop placeholder: run for a few seconds to demonstrate event logging
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    stop_flag.store(true, Ordering::Relaxed);
+                }
+            }
+        }
     let mut args = Args::parse();
 
     // Apply game-specific default configurations

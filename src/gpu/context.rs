@@ -65,11 +65,13 @@ impl GpuContext {
     /// * `Ok(GpuContext)` if initialization succeeds
     /// * `Err(GpuError)` if initialization fails
     pub fn new(config: &GpuConfig) -> Result<Self, GpuError> {
-        // Create instance with all backends enabled
+
+        eprintln!("[DIAG] GpuContext::new: before Instance::new");
         let instance = Instance::new(InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
+        eprintln!("[DIAG] GpuContext::new: after Instance::new");
 
         // Request adapter with specified power preference
         let power_preference = if config.prefer_high_performance {
@@ -78,22 +80,31 @@ impl GpuContext {
             PowerPreference::LowPower
         };
 
+        eprintln!("[DIAG] GpuContext::new: before request_adapter");
         let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions {
             power_preference,
             compatible_surface: None,
             force_fallback_adapter: false,
-        }))
-        .ok_or_else(|| GpuError::NoAdapter("No suitable GPU adapter found".to_string()))?;
+        }));
+        eprintln!("[DIAG] GpuContext::new: after pollster::block_on(request_adapter)");
+        let adapter = match adapter {
+            Some(a) => a,
+            None => {
+                eprintln!("[DIAG] GpuContext::new: request_adapter returned None");
+                return Err(GpuError::NoAdapter("No suitable GPU adapter found".to_string()));
+            }
+        };
+        eprintln!("[DIAG] GpuContext::new: after adapter Some/None check");
 
         let adapter_info = adapter.get_info();
-        
+        eprintln!("[DIAG] GpuContext::new: got adapter_info");
         if config.debug_mode {
             eprintln!("GPU Adapter: {} ({:?})", adapter_info.name, adapter_info.backend);
             eprintln!("Driver: {}", adapter_info.driver);
         }
 
-        // Request device with reasonable limits
-        let (device, queue) = pollster::block_on(adapter.request_device(
+        eprintln!("[DIAG] GpuContext::new: before request_device");
+        let device_future = adapter.request_device(
             &DeviceDescriptor {
                 label: Some("MCTS GPU Device"),
                 required_features: Features::empty(),
@@ -101,8 +112,11 @@ impl GpuContext {
                 memory_hints: Default::default(),
             },
             None,
-        ))
-        .map_err(|e| GpuError::DeviceRequest(e.to_string()))?;
+        );
+        eprintln!("[DIAG] GpuContext::new: after request_device (future created)");
+        let (device, queue) = pollster::block_on(device_future)
+            .map_err(|e| GpuError::DeviceRequest(e.to_string()))?;
+        eprintln!("[DIAG] GpuContext::new: after pollster::block_on(request_device)");
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
@@ -112,17 +126,22 @@ impl GpuContext {
         let max_buffer_size = limits.max_buffer_size;
         let max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size;
 
-        // Compile shaders
+        eprintln!("[DIAG] GpuContext::new: before create_shader_module");
         let puct_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PUCT Shader"),
             source: wgpu::ShaderSource::Wgsl(shaders::PUCT_SHADER.into()),
         });
+        eprintln!("[DIAG] GpuContext::new: after create_shader_module");
 
         // Create bind group layouts
+        eprintln!("[DIAG] GpuContext::new: before create_puct_bind_group_layout");
         let puct_bind_group_layout = Self::create_puct_bind_group_layout(&device);
+        eprintln!("[DIAG] GpuContext::new: after create_puct_bind_group_layout");
         let eval_bind_group_layout = Self::create_eval_bind_group_layout(&device);
+        eprintln!("[DIAG] GpuContext::new: after create_eval_bind_group_layout");
 
         // Create pipelines
+        eprintln!("[DIAG] GpuContext::new: before create_puct_pipeline");
         let puct_pipeline = Self::create_compute_pipeline(
             &device,
             &puct_shader,
@@ -130,6 +149,7 @@ impl GpuContext {
             &puct_bind_group_layout,
             "PUCT Pipeline",
         );
+        eprintln!("[DIAG] GpuContext::new: after create_puct_pipeline");
 
         // Helper closure to create game pipelines
         let create_game_pipeline = |source: String, entry: &str, name: &str| -> ComputePipeline {
@@ -146,6 +166,7 @@ impl GpuContext {
             )
         };
 
+        eprintln!("[DIAG] GpuContext::new: before create_game_pipelines");
         let gomoku_eval_pipeline = create_game_pipeline(
             shaders::GOMOKU_SHADER.to_string(),
             "evaluate_gomoku",
@@ -175,6 +196,7 @@ impl GpuContext {
             "evaluate_hive",
             "Hive Eval"
         );
+        eprintln!("[DIAG] GpuContext::new: after create_game_pipelines");
 
         Ok(Self {
             device,

@@ -1,4 +1,55 @@
-#include "grid_common.wgsl"
+// END inlined RNG
+
+// BEGIN inlined get_cell from common.wgsl
+fn get_cell(board_idx: u32, x: i32, y: i32) -> i32 {
+    if (x < 0 || x >= i32(params.board_width) || y < 0 || y >= i32(params.board_height)) {
+        return 0; // Out of bounds treated as empty
+    }
+    let idx = board_idx * params.board_width * params.board_height + u32(y) * params.board_width + u32(x);
+    return boards[idx];
+}
+// END inlined get_cell
+// END inlined common.wgsl
+
+// BEGIN inlined RNG from common.wgsl
+var<private> rng_state: u32;
+
+fn pcg_hash(input: u32) -> u32 {
+    var state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn rand() -> f32 {
+    rng_state ^= rng_state << 13u;
+    rng_state ^= rng_state >> 17u;
+    rng_state ^= rng_state << 5u;
+    rng_state = pcg_hash(rng_state);
+    return f32(rng_state) / 4294967296.0;
+}
+
+fn rand_range(min: u32, max: u32) -> u32 {
+    return min + u32(rand() * f32(max - min));
+}
+// END inlined RNG
+
+// BEGIN inlined common.wgsl
+struct SimulationParams {
+    board_width: u32,
+    board_height: u32,
+    current_player: i32,
+    use_heuristic: u32,
+    seed: u32,
+}
+
+struct SimulationResult {
+    score: f32,
+}
+
+@group(0) @binding(0) var<storage, read_write> boards: array<i32>;
+@group(0) @binding(1) var<storage, read_write> results: array<SimulationResult>;
+@group(0) @binding(2) var<uniform> params: SimulationParams;
+// END inlined common.wgsl
 
 const BLOKUS_PIECES: array<u32, 168> = array<u32, 168>(
     0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u, 0x00000001u,

@@ -1,4 +1,4 @@
-#include "common.wgsl"
+// WGSL does not support #include. Manually paste shared code here if needed.
 
 // Check N-in-a-row win condition
 fn check_line_win(board_idx: u32, player: i32, line_size: i32) -> bool {
