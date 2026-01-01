@@ -19,6 +19,9 @@ mod test_urgent_event;
 /// - Compute shaders for PUCT calculation and state evaluation
 pub mod urgent_event_logger;
 
+pub use urgent_event_logger::start_and_log_urgent_events_othello;
+pub use mcts_othello::assert_no_early_exit_events;
+
 pub mod context;
 mod accelerator;
 mod shaders;

@@ -1,7 +1,7 @@
 use wgpu::util::DeviceExt;
 #[test]
 fn test_gpu_shader_to_cpu_urgent_event_logging() {
-    use wgpu::*;
+    // use wgpu::*;
     let config = mcts::gpu::GpuConfig::default();
     let context = Arc::new(GpuContext::new(&config).expect("Failed to create GpuContext"));
     // --- OTHELLO-NATIVE TEST: This exposes the bug in urgent event logging for GpuOthelloMcts ---
@@ -17,14 +17,14 @@ fn test_gpu_shader_to_cpu_urgent_event_logging() {
     // Inject a fake urgent event by copying to the GPU buffer, then polling as the logger does
     {
         use mcts::gpu::mcts_othello::UrgentEvent;
-        let mut inner = othello_engine.inner.lock().unwrap();
+        let inner = othello_engine.inner.lock().unwrap();
         if let (Some(urgent_event_buffer_gpu), Some(urgent_event_write_head_gpu)) = (inner.urgent_event_buffer_gpu.as_ref(), inner.urgent_event_write_head_gpu.as_ref()) {
             let device = othello_engine.context.device();
             let queue = othello_engine.context.queue();
             // Write a fake event to a staging buffer, then copy to GPU buffer
-            let ring_size = 256u32;
+            let _ring_size = 256u32;
             let idx = 0u32; // always write to slot 0 for test
-            let mut fake_event = UrgentEvent {
+            let fake_event = UrgentEvent {
                 timestamp: 12345678,
                 event_type: 42,
                 _pad: 0,

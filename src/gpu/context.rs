@@ -36,8 +36,8 @@ impl std::error::Error for GpuError {}
 
 /// GPU Context with device, queue, and compute pipelines
 pub struct GpuContext {
-    device: Arc<Device>,
-    queue: Arc<Queue>,
+    pub device: Arc<Device>,
+    pub queue: Arc<Queue>,
     adapter_info: wgpu::AdapterInfo,
     puct_pipeline: ComputePipeline,
     pub gomoku_eval_pipeline: ComputePipeline,

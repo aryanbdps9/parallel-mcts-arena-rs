@@ -2,7 +2,7 @@
 #[test]
 fn test_wgpu_device_smoke() {
     use wgpu::Instance;
-    use wgpu::Backends;
+    // use wgpu::Backends;
     use pollster::block_on;
     eprintln!("[DIAG] wgpu_device_smoke: before instance");
     let instance = Instance::new(wgpu::InstanceDescriptor {

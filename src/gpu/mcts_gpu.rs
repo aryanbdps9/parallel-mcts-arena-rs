@@ -121,6 +121,8 @@ pub struct ChildStats {
 ///
 /// Manages the GPU resources for running MCTS entirely on the GPU.
 pub struct GpuMctsEngine {
+    _dummy_pruning_layout: BindGroupLayout,
+    dummy_pruning_bind_group: Option<BindGroup>,
     pub context: Arc<GpuContext>,
 
     // Compute pipelines
@@ -133,6 +135,8 @@ pub struct GpuMctsEngine {
     execution_layout: BindGroupLayout,
     game_state_layout: BindGroupLayout,
     stats_layout: BindGroupLayout,
+    urgent_event_layout: BindGroupLayout,
+    global_reroot_layout: BindGroupLayout,
 
     // Node pool buffers
     node_info_buffer: Buffer,
@@ -159,6 +163,9 @@ pub struct GpuMctsEngine {
     stats_buffer: Buffer,
     stats_staging_buffer: Buffer,
 
+    // Global reroot coordination (group 6)
+    global_reroot_buffer: Buffer,
+
     // Urgent event buffers (lock-free)
     pub urgent_event_buffers: std::sync::Arc<UrgentEventBuffers>,
 
@@ -168,6 +175,7 @@ pub struct GpuMctsEngine {
     pub game_state_bind_group: Option<BindGroup>,
     pub stats_bind_group: Option<BindGroup>,
     pub urgent_event_bind_group: Option<BindGroup>,
+    pub global_reroot_bind_group: Option<BindGroup>,
 
     // Configuration
     max_nodes: u32,
@@ -301,6 +309,70 @@ impl GpuMctsEngine {
         board_width: u32,
         board_height: u32,
     ) -> Self {
+        let device = context.device();
+        // Create dummy buffers for group(4) (pruning kernel) to satisfy pipeline layout
+        let dummy_unreachable_roots = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dummy Unreachable Roots"),
+            size: 4,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let dummy_work_queue = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dummy Work Queue"),
+            size: 4,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let dummy_work_head = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dummy Work Head"),
+            size: 4,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let dummy_pruning_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Dummy Pruning Layout"),
+            entries: &[ 
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let dummy_pruning_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Dummy Pruning Bind Group"),
+            layout: &dummy_pruning_layout,
+            entries: &[ 
+                BindGroupEntry { binding: 0, resource: dummy_unreachable_roots.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: dummy_work_queue.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: dummy_work_head.as_entire_binding() },
+            ],
+        });
         eprintln!("[DIAG] GpuMctsEngine::new: before device");
         let device = context.device();
         eprintln!("[DIAG] GpuMctsEngine::new: after device");
@@ -337,6 +409,47 @@ impl GpuMctsEngine {
         eprintln!("[DIAG] GpuMctsEngine::new: after create_game_state_layout");
         let stats_layout = Self::create_stats_layout(device);
         eprintln!("[DIAG] GpuMctsEngine::new: after create_stats_layout");
+        let urgent_event_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Urgent Event Layout"),
+            entries: &[ 
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let global_reroot_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Global Reroot Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
 
         eprintln!("[DIAG] GpuMctsEngine::new: before create_pipeline_layout");
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -346,6 +459,9 @@ impl GpuMctsEngine {
                 &execution_layout,
                 &game_state_layout,
                 &stats_layout,
+                &dummy_pruning_layout, // index 4
+                &urgent_event_layout, // index 5
+                &global_reroot_layout, // index 6
             ],
             push_constant_ranges: &[],
         });
@@ -549,6 +665,13 @@ impl GpuMctsEngine {
             mapped_at_creation: false,
         });
 
+        let global_reroot_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Global Reroot Buffer"),
+            size: 4, // atomic<u32>
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
         // Urgent event buffer (256 x 1024 bytes)
         let urgent_event_buffers = std::sync::Arc::new(UrgentEventBuffers {
             urgent_event_buffer: device.create_buffer(&wgpu::BufferDescriptor {
@@ -579,6 +702,8 @@ impl GpuMctsEngine {
         });
 
         let mut engine = Self {
+                        _dummy_pruning_layout: dummy_pruning_layout,
+                        dummy_pruning_bind_group: Some(dummy_pruning_bind_group),
             context: context.clone(),
             select_pipeline,
             backprop_pipeline,
@@ -587,6 +712,8 @@ impl GpuMctsEngine {
             execution_layout,
             game_state_layout,
             stats_layout,
+            urgent_event_layout,
+            global_reroot_layout,
             node_info_buffer,
             node_visits_buffer,
             node_wins_buffer,
@@ -603,12 +730,14 @@ impl GpuMctsEngine {
             sim_boards_buffer,
             stats_buffer,
             stats_staging_buffer,
+            global_reroot_buffer,
             urgent_event_buffers: urgent_event_buffers.clone(),
             node_pool_bind_group: None,
             execution_bind_group: None,
             game_state_bind_group: None,
             stats_bind_group: None,
             urgent_event_bind_group: None,
+            global_reroot_bind_group: None,
             max_nodes,
             _max_iterations: max_iterations,
             _board_size: board_size,
@@ -683,6 +812,7 @@ impl GpuMctsEngine {
                         min_binding_size: None,
                     },
                     count: None,
+
                 },
                 // node_visits (atomic)
                 BindGroupLayoutEntry {
@@ -764,17 +894,6 @@ impl GpuMctsEngine {
                 // free_tops_buffer
                 BindGroupLayoutEntry {
                     binding: 8,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // (removed: node_generations_buffer, no generation-based cleanup)
-                BindGroupLayoutEntry {
-                    binding: 9,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
@@ -980,42 +1099,24 @@ impl GpuMctsEngine {
     }
 
     pub fn create_bind_groups(&mut self, device: &wgpu::Device) {
-                // Create urgent event bind group (@group(3) in shader)
-                let urgent_event_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: Some("Urgent Event Layout"),
-                    entries: &[
-                        BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-                let urgent_event_buffers = &self.urgent_event_buffers;
-                self.urgent_event_bind_group = Some(device.create_bind_group(&BindGroupDescriptor {
-                    label: Some("Urgent Event Bind Group"),
-                    layout: &urgent_event_layout,
-                    entries: &[
-                        BindGroupEntry { binding: 0, resource: urgent_event_buffers.urgent_event_buffer.as_entire_binding() },
-                        BindGroupEntry { binding: 1, resource: urgent_event_buffers.urgent_event_write_head_buffer.as_entire_binding() },
-                    ],
-                }));
-        let device = self.context.device();
+        let urgent_event_buffers = &self.urgent_event_buffers;
+        
+        self.urgent_event_bind_group = Some(device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Urgent Event Bind Group"),
+            layout: &self.urgent_event_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: urgent_event_buffers.urgent_event_buffer.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: urgent_event_buffers.urgent_event_write_head_buffer.as_entire_binding() },
+            ],
+        }));
+
+        self.global_reroot_bind_group = Some(device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Global Reroot Bind Group"),
+            layout: &self.global_reroot_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: self.global_reroot_buffer.as_entire_binding() },
+            ],
+        }));
 
         self.node_pool_bind_group = Some(device.create_bind_group(&BindGroupDescriptor {
             label: Some("Node Pool Bind Group"),
@@ -1030,7 +1131,6 @@ impl GpuMctsEngine {
                 BindGroupEntry { binding: 6, resource: self.children_priors_buffer.as_entire_binding() },
                 BindGroupEntry { binding: 7, resource: self.free_lists_buffer.as_entire_binding() },
                 BindGroupEntry { binding: 8, resource: self.free_tops_buffer.as_entire_binding() },
-                BindGroupEntry { binding: 9, resource: urgent_event_buffers.urgent_event_buffer.as_entire_binding() },
             ],
         }));
 
@@ -1112,6 +1212,11 @@ impl GpuMctsEngine {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         // Calculate workgroups
         let workgroups = (num_iterations + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+        
+        // Initialize global_reroot_buffer with total threads
+        let total_threads = workgroups * WORKGROUP_SIZE;
+        queue.write_buffer(&self.global_reroot_buffer, 0, bytemuck::bytes_of(&total_threads));
+
         println!("[DIAG] run_iterations: creating encoder");
         let mut encoder = self
             .context
@@ -1130,8 +1235,10 @@ impl GpuMctsEngine {
             pass.set_bind_group(0, self.node_pool_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(1, self.execution_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(2, self.game_state_bind_group.as_ref().unwrap(), &[]);
-            pass.set_bind_group(3, self.urgent_event_bind_group.as_ref().unwrap(), &[]);
-            pass.set_bind_group(4, self.stats_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(3, self.stats_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(4, self.dummy_pruning_bind_group.as_ref().unwrap(), &[]); // always set dummy at 4
+            pass.set_bind_group(5, self.urgent_event_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(6, self.global_reroot_bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
         println!("[DIAG] run_iterations: backprop pass");
@@ -1146,8 +1253,10 @@ impl GpuMctsEngine {
             pass.set_bind_group(0, self.node_pool_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(1, self.execution_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(2, self.game_state_bind_group.as_ref().unwrap(), &[]);
-            pass.set_bind_group(3, self.urgent_event_bind_group.as_ref().unwrap(), &[]);
-            pass.set_bind_group(4, self.stats_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(3, self.stats_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(4, self.dummy_pruning_bind_group.as_ref().unwrap(), &[]); // always set dummy at 4
+            pass.set_bind_group(5, self.urgent_event_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(6, self.global_reroot_bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
         println!("[DIAG] run_iterations: queue.submit");
@@ -1175,6 +1284,7 @@ impl GpuMctsEngine {
             pass.set_bind_group(1, self.execution_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(2, self.game_state_bind_group.as_ref().unwrap(), &[]);
             pass.set_bind_group(3, self.stats_bind_group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(4, self.dummy_pruning_bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
 

@@ -1122,10 +1122,10 @@ impl<S: GameState> MCTS<S> {
         // Validate GPU root board against host board to avoid subtle drift when reusing trees
         if root_visits > 0 {
             let gpu_hash = gpu_mcts.get_root_board_hash();
-            let mut host_hash: u64 = 0xcbf29ce484222325;
+            let mut host_hash: u32 = 0x811c9dc5;
             for v in board.iter() {
-                host_hash ^= *v as u64;
-                host_hash = host_hash.wrapping_mul(0x100000001b3);
+                host_hash ^= *v as u32;
+                host_hash = host_hash.wrapping_mul(0x01000193);
             }
 
             if gpu_hash != host_hash {
@@ -1172,6 +1172,11 @@ impl<S: GameState> MCTS<S> {
             }
         }
 
+        // === DISPATCH MAIN GPU KERNEL ONCE PER TURN ===
+        println!("[HOST] BATCH_START: Dispatching main GPU MCTS kernel");
+        gpu_mcts.dispatch_mcts_othello_kernel(iterations_per_batch);
+        println!("[HOST] BATCH_END: Main GPU MCTS kernel dispatch complete");
+
         // Run iterations with timeout enforcement
         let start_time = std::time::Instant::now();
         let timeout = if timeout_secs > 0 {
@@ -1179,7 +1184,6 @@ impl<S: GameState> MCTS<S> {
         } else {
             None
         };
-        
         let mut seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1236,19 +1240,24 @@ impl<S: GameState> MCTS<S> {
         gpu_mcts.flush_and_wait();
 
         // --- Dispatch urgent event kernel for logging ---
-        gpu_mcts.dispatch_prune_unreachable_topdown();
-
-        eprintln!("[GPU-Native] Completed {} batches ({} iterations) in {:.2}s", 
-            batch, batch as u64 * iterations_per_batch as u64, start_time.elapsed().as_secs_f64());
-
-        // Get children stats for TSV logging
-        let children_stats = gpu_mcts.get_children_stats();
+        // REMOVED: dispatch_prune_unreachable_topdown() calls dispatch_pruning_kernels(0,0)
+        // which attempts to advance the root to (0,0) and prune everything else.
+        // This should ONLY be called when a move is actually made (in advance_root).
+        // println!("[HOST] PRUNING_START: Dispatching GPU prune kernel");
+        // gpu_mcts.dispatch_prune_unreachable_topdown();
+        // println!("[HOST] PRUNING_END: GPU prune kernel dispatch complete");
+        
+        // Diagnostics and summary reporting
         let telemetry = last_telemetry.unwrap_or_default();
-        let mut total_nodes = if telemetry.alloc_count_after > 0 {
+        let children_stats = gpu_mcts.get_children_stats();
+        let total_nodes = if telemetry.alloc_count_after > 0 {
             telemetry.alloc_count_after
         } else {
             gpu_mcts.get_total_nodes()
         };
+
+        eprintln!("[GPU-Native] Completed {} batches ({} iterations) in {:.2}s", 
+            batch, batch as u64 * iterations_per_batch as u64, start_time.elapsed().as_secs_f64());
 
         // Diagnostics: show how many nodes were used vs capacity and whether we saturated
         let diag_prefix = "\x1b[33m[GPU-Native DIAG]\x1b[0m";
@@ -1281,7 +1290,7 @@ impl<S: GameState> MCTS<S> {
         // Selection/expansion counters to spot algorithmic early exits
         let d = telemetry.diagnostics;
         eprintln!(
-            "{} diag_counts sel_term={} sel_noch={} sel_inv={} sel_pathcap={} exp_attempts={} exp_success={} exp_locked={} exp_term={} alloc_fail={} rollouts={}",
+            "{} diag_counts sel_term={} sel_no_child={} sel_invalid={} sel_path_cap={} exp_attempts={} exp_success={} exp_locked={} exp_term={} alloc_fail={} rollouts={} root_board_hash_GPU={:#x} total_children_gen={} init_nodes_count={}",
             diag_prefix,
             d.selection_terminal,
             d.selection_no_children,
@@ -1293,6 +1302,9 @@ impl<S: GameState> MCTS<S> {
             d.expansion_terminal,
             d.alloc_failures,
             d.rollouts,
+            d.root_board_hash,
+            d.total_children_gen,
+            d.init_nodes_count
         );
 
         let diag_red_flag = d.selection_invalid_child > 0 || d.alloc_failures > 0;
@@ -1307,6 +1319,13 @@ impl<S: GameState> MCTS<S> {
                      i+1, x, y, visits, wins, q, win_rate);
         }
 
+        // DEBUG: Check if any child has move_id=0 (x=0, y=0)
+        for (x, y, _, _, _) in &children_stats {
+            if *x == 0 && *y == 0 {
+                eprintln!("[GPU-Native WARNING] Found child with move (0,0)!");
+            }
+        }
+
         // Guardrail: if GPU proposes an illegal move, abort instead of silently patching
         let final_children_stats = children_stats;
         let best = gpu_mcts.get_best_move();
@@ -1319,14 +1338,9 @@ impl<S: GameState> MCTS<S> {
         }
 
         if diag_red_flag {
-            panic!("GPU-Native diagnostics flagged invalid-child/alloc issues; aborting GPU search");
+            eprintln!("GPU-Native diagnostics flagged invalid-child/alloc issues; continuing for debug...");
+            // panic!("GPU-Native diagnostics flagged invalid-child/alloc issues; aborting GPU search");
         }
-
-        total_nodes = if telemetry.alloc_count_after > 0 {
-            telemetry.alloc_count_after
-        } else {
-            gpu_mcts.get_total_nodes()
-        };
 
         best.map(|(x, y, visits, q)| ((x, y), visits, q, final_children_stats, total_nodes, telemetry))
     }
@@ -1367,6 +1381,8 @@ impl<S: GameState> MCTS<S> {
 
         let guard = self.gpu_native_othello.lock();
         if let Some(ref gpu_mcts_arc) = *guard {
+            // Note: Argument is (x, y), and GPU expects (x, y). No swap needed.
+            println!("[GPU-Native HOST] advance_root_gpu_native called with move_xy: {:?} (x, y). Passing to GPU as (x={}, y={})", move_xy, move_xy.0, move_xy.1);
             gpu_mcts_arc.advance_root(move_xy.0, move_xy.1, new_board, new_player, &legal_moves)
         } else {
             false

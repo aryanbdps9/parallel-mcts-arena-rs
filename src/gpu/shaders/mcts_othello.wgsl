@@ -1,21 +1,22 @@
 // =============================================================================
-// Top-Down Dynamic Pruning Kernel (Design Doc Algorithm)
+// Two-Phase Pruning (Design Doc Algorithm)
 // =============================================================================
-// Inputs:
-//   - unreachable_roots: array<u32, MAX_UNREACHABLE_ROOTS> (indices of old root's children except new root)
-//   - work_queue: array<u32, MAX_WORK_QUEUE> (global work queue for dynamic partitioning)
-//   - work_head: atomic<u32> (global atomic counter for work queue)
-//
-// Each worker pops a node index from the work queue, traverses its subtree (BFS/DFS),
-// atomically sets the deleted bit, and enqueues children. The atomic deleted bit ensures
-// each node is only processed once.
 
-const MAX_UNREACHABLE_ROOTS: u32 = 64u;
-const MAX_WORK_QUEUE: u32 = 8192u;
+struct RerootParams {
+    move_x: u32,
+    move_y: u32,
+    current_root: u32,
+    _padding: u32,
+};
 
-@group(4) @binding(0) var<storage, read> unreachable_roots: array<u32, MAX_UNREACHABLE_ROOTS>;
-@group(4) @binding(1) var<storage, read_write> work_queue: array<u32, MAX_WORK_QUEUE>;
-@group(4) @binding(2) var<storage, read_write> work_head: atomic<u32>;
+@group(4) @binding(0) var<uniform> reroot_params: RerootParams;
+@group(4) @binding(1) var<storage, read_write> new_root_output: u32;
+@group(4) @binding(2) var<storage, read_write> global_free_queue: array<u32>;
+@group(4) @binding(3) var<storage, read_write> global_free_head: atomic<u32>;
+@group(4) @binding(4) var<storage, read_write> work_queue: array<u32>;
+@group(4) @binding(5) var<storage, read_write> work_head: atomic<u32>;
+@group(4) @binding(6) var<storage, read_write> work_claimed: atomic<u32>;
+@group(4) @binding(7) var<storage, read_write> work_completed: atomic<u32>;
 
 // Atomic set-and-check for deleted bit (bit 0)
 fn atomic_set_deleted(node_idx: u32) -> bool {
@@ -23,74 +24,121 @@ fn atomic_set_deleted(node_idx: u32) -> bool {
     return (old & 1u) == 0u; // true if not previously deleted
 }
 
-// Shared atomics for PRUNING_START/END coordination
-var<workgroup> pruning_started: atomic<u32>;
-var<workgroup> pruning_threads_remaining: atomic<u32>;
+@compute @workgroup_size(1)
+fn identify_garbage() {
+    let current_root = reroot_params.current_root;
+    let move_x = reroot_params.move_x;
+    let move_y = reroot_params.move_y;
+    let target_move_id = encode_move(i32(move_x), i32(move_y));
+
+    // Reset work queue
+    atomicStore(&work_head, 0u);
+    atomicStore(&work_claimed, 0u);
+    atomicStore(&work_completed, 0u);
+    
+    let info = node_info[current_root];
+    var found_new_root = false;
+
+    if (info.num_children == 0u) {
+        new_root_output = 0xFFFFFFF0u; // DEBUG: No children
+        // Also mark the old root as garbage
+        let qidx = atomicAdd(&work_head, 1u);
+        work_queue[qidx] = current_root;
+        return;
+    }
+
+    for (var i = 0u; i < info.num_children && i < MAX_CHILDREN; i++) {
+        let child_idx = get_child_idx(current_root, i);
+        if (child_idx == INVALID_INDEX) { continue; }
+        
+        let child_info = node_info[child_idx];
+        if (child_info.move_id == target_move_id) {
+            // This is the survivor
+            new_root_output = child_idx;
+            found_new_root = true;
+        } else {
+            // DEBUG: If we fail to find the move, let's see what moves ARE there.
+            // We can't print from shader, but we can maybe return the first mismatch as an error code?
+            // For now, just mark as garbage.
+            
+            // This is garbage
+            let qidx = atomicAdd(&work_head, 1u);
+            work_queue[qidx] = child_idx;
+        }
+    }
+
+    if (!found_new_root) {
+        // DEBUG: Return the first child's move_id and num_children to see what we have
+        if (info.num_children > 0u) {
+             let first_child = get_child_idx(current_root, 0u);
+             if (first_child != INVALID_INDEX) {
+                 let first_move = node_info[first_child].move_id;
+                 // Encode num_children and first move into the error code
+                 // 0xE0000000 | (num_children << 8) | first_move
+                 new_root_output = 0xE0000000u | ((info.num_children & 0xFFu) << 8u) | (first_move & 0xFFu);
+             } else {
+                 new_root_output = INVALID_INDEX;
+             }
+        } else {
+             new_root_output = INVALID_INDEX;
+        }
+    } else {
+        // Also mark the old root as garbage
+        let qidx = atomicAdd(&work_head, 1u);
+        work_queue[qidx] = current_root;
+    }
+}
 
 @compute @workgroup_size(64)
-fn prune_unreachable_topdown(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invocation_index) local_idx: u32, @builtin(num_workgroups) num_wg: vec3<u32>, @builtin(workgroup_id) wg_id: vec3<u32>) {
-    // Only one workgroup for now; if multi-workgroup, use global atomics in a buffer
-    if (local_idx == 0u) {
-        atomicStore(&pruning_started, 0u);
-        atomicStore(&pruning_threads_remaining, 64u); // workgroup_size
-    }
-    workgroupBarrier();
-
-    // First thread to set pruning_started = 1 logs PRUNING_START
-    let was_started = atomicExchange(&pruning_started, 1u);
-    if (was_started == 0u) {
-        var payload: array<u32, 255>;
-        payload[0] = global_id.x;
-        for (var i = 1u; i < 255u; i++) { payload[i] = 0u; }
-        write_urgent_event(URGENT_EVENT_PRUNING_START, &payload);
-    }
-
-    // ...existing code...
+fn prune_unreachable_topdown(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let tid = global_id.x;
-    // Each worker pops work from the global queue
+    
     loop {
-        let work_idx = atomicAdd(&work_head, 1u);
-        if (work_idx >= MAX_WORK_QUEUE) {
-            break;
-        }
-        let node_idx = work_queue[work_idx];
-        if (node_idx == INVALID_INDEX) {
-            continue;
-        }
-        // Atomically set deleted bit; skip if already deleted
-        if (!atomic_set_deleted(node_idx)) {
-            continue;
-        }
-        // Free node (add to free list, clear state, etc.)
-        atomicStore(&node_visits[node_idx], 0);
-        atomicStore(&node_wins[node_idx], 0);
-        atomicStore(&node_vl[node_idx], 0);
-        atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
-        // Mark all children for processing
-        let info = node_info[node_idx];
-        for (var i = 0u; i < info.num_children && i < MAX_CHILDREN; i++) {
-            let child_idx = get_child_idx(node_idx, i);
-            if (child_idx != INVALID_INDEX) {
-                // Atomically push to work queue
-                let qidx = atomicAdd(&work_head, 1u);
-                if (qidx < MAX_WORK_QUEUE) {
-                    work_queue[qidx] = child_idx;
+        let head = atomicLoad(&work_head);
+        let claimed = atomicLoad(&work_claimed);
+        
+        if (claimed < head) {
+            // Try to claim
+            let original = atomicCompareExchangeWeak(&work_claimed, claimed, claimed + 1u);
+            if (original.exchanged) {
+                // We got task `claimed`
+                let node_idx = work_queue[claimed];
+                
+                if (node_idx != INVALID_INDEX && atomic_set_deleted(node_idx)) {
+                    // Free node
+                    atomicStore(&node_visits[node_idx], 0);
+                    atomicStore(&node_wins[node_idx], 0);
+                    atomicStore(&node_vl[node_idx], 0);
+                    atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
+                    
+                    // Add to global free queue
+                    // Note: We should check overflow, but for now we assume it fits
+                    let free_idx = atomicAdd(&global_free_head, 1u);
+                    // Assuming global_free_queue is large enough
+                    global_free_queue[free_idx] = node_idx;
+                    
+                    // Push children to work queue
+                    let info = node_info[node_idx];
+                    for (var i = 0u; i < info.num_children && i < MAX_CHILDREN; i++) {
+                        let child_idx = get_child_idx(node_idx, i);
+                        if (child_idx != INVALID_INDEX) {
+                            let qidx = atomicAdd(&work_head, 1u);
+                            work_queue[qidx] = child_idx;
+                        }
+                    }
                 }
+                
+                atomicAdd(&work_completed, 1u);
             }
+        } else {
+            // Queue empty. Check termination.
+            let completed = atomicLoad(&work_completed);
+            if (completed == head) {
+                break;
+            }
+            // Spin/wait
         }
-        // Optionally: add node to free list (not shown here)
     }
-
-    // Last thread to decrement pruning_threads_remaining to 0 logs PRUNING_END
-    let threads_left = atomicSub(&pruning_threads_remaining, 1u);
-    if (threads_left == 1u) {
-        var payload: array<u32, 255>;
-        payload[0] = global_id.x;
-        for (var i = 1u; i < 255u; i++) { payload[i] = 0u; }
-        write_urgent_event(URGENT_EVENT_PRUNING_END, &payload);
-    }
-    workgroupBarrier();
-    // Optionally: log RESUME_WORKERS event here if you want to resume MCTS workers after pruning
 }
 // =============================================================================
 // Urgent Event Logging Buffer (Ring Buffer)
@@ -112,11 +160,13 @@ struct UrgentEvent {
 
 const URGENT_EVENT_START: u32 = 1u;
 const URGENT_EVENT_HALT: u32 = 2u;
-const URGENT_EVENT_REROOT_START: u32 = 10u;
-const URGENT_EVENT_REROOT_END: u32 = 11u;
+const URGENT_EVENT_BATCH_START: u32 = 10u;
+const URGENT_EVENT_BATCH_END: u32 = 11u;
 const URGENT_EVENT_PRUNING_START: u32 = 12u;
 const URGENT_EVENT_PRUNING_END: u32 = 13u;
 const URGENT_EVENT_MEMORY_PRESSURE: u32 = 14u;
+const URGENT_EVENT_REROOT_OP_START: u32 = 15u;
+const URGENT_EVENT_REROOT_OP_END: u32 = 16u;
 
 // =============================================================================
 // Helper: Write an urgent event to the ring buffer
@@ -137,39 +187,44 @@ fn write_urgent_event(event_type: u32, payload: ptr<function, array<u32, 255>>) 
 // =============================================================================
 // Main MCTS Kernel Implementation (restored minimal version)
 // =============================================================================
-// Shared atomics for REROOT_START/END coordination
-var<workgroup> reroot_started: atomic<u32>;
-var<workgroup> reroot_threads_remaining: atomic<u32>;
 
-fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32) {
-    // Only one workgroup for now; if multi-workgroup, use global atomics in a buffer
-    if (local_idx == 0u) {
-        atomicStore(&reroot_started, 0u);
-        atomicStore(&reroot_threads_remaining, 64u); // workgroup_size
-    }
-    workgroupBarrier();
+// Global atomics for REROOT_START/END coordination (in storage buffer)
+@group(5) @binding(0) var<storage, read_write> global_reroot_threads_remaining: atomic<u32>;
+@group(5) @binding(1) var<storage, read_write> global_reroot_start_threads_remaining: atomic<u32>;
 
-    // First thread to set reroot_started = 1 logs REROOT_START
-    let was_started = atomicExchange(&reroot_started, 1u);
-    if (was_started == 0u) {
+fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32, num_workgroups: vec3<u32>) {
+    // No workgroup-local initialization needed for global coordination
+    // if (local_idx == 0u) { ... }
+    // workgroupBarrier();
+
+    // REROOT_START Coordination:
+    // We use a global atomic counter initialized to total_threads.
+    // Each thread decrements it. The FIRST thread (which sees the value drop to total_threads - 1)
+    // is responsible for logging the event.
+    // Note: atomicSub returns the ORIGINAL value. So if we decrement and get total_threads,
+    // it means we were the first one.
+    let total_threads = num_workgroups.x * 64u; // Assuming 64 threads per workgroup
+    let prev_start = atomicSub(&global_reroot_start_threads_remaining, 1u);
+    if (prev_start == total_threads) {
         var payload_reroot: array<u32, 255>;
         payload_reroot[0] = global_id.x;
+        // We can also log the total threads count for debugging if needed, but for now just the thread ID
         for (var i = 1u; i < 255u; i++) { payload_reroot[i] = 0u; }
-        write_urgent_event(URGENT_EVENT_REROOT_START, &payload_reroot);
+        write_urgent_event(URGENT_EVENT_BATCH_START, &payload_reroot);
     }
 
     // ...existing code...
-    atomicAdd(&diagnostics._pad0, 1u); // Use _pad0 as "kernel_entries" counter
+    // atomicAdd(&diagnostics._pad0, 1u); // Use _pad0 as "kernel_entries" counter
     let my_workgroup = global_id.x % 256u;
     let thread_id = global_id.x;
     init_rng(thread_id, params.seed);
 
     // --- Log a START event at the beginning of each iteration ---
-    var payload: array<u32, 255>;
-    payload[0] = thread_id;
-    payload[1] = params.root_idx;
-    for (var i = 2u; i < 255u; i++) { payload[i] = 0u; }
-    write_urgent_event(URGENT_EVENT_START, &payload);
+    // var payload: array<u32, 255>;
+    // payload[0] = thread_id;
+    // payload[1] = params.root_idx;
+    // for (var i = 2u; i < 255u; i++) { payload[i] = 0u; }
+    // write_urgent_event(URGENT_EVENT_START, &payload);
 
     // Selection phase: start at root
     var path: array<u32, MAX_PATH_LENGTH>;
@@ -180,12 +235,16 @@ fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32) {
 
     // Traverse down the tree until a leaf or terminal node
     loop {
-        let info = node_info[current];
+        // Fix Read-After-Write Hazard: Check state BEFORE reading info
+        // If we read info first, we might get stale data (num_children=0), then read state=READY,
+        // and incorrectly conclude it's a leaf.
         let state = atomicLoad(&node_state[current]);
         if (state != NODE_STATE_READY) {
             atomicAdd(&diagnostics.selection_terminal, 1u);
             break;
         }
+        
+        let info = node_info[current];
         if (info.num_children == 0u) {
             atomicAdd(&diagnostics.selection_no_children, 1u);
             break;
@@ -241,19 +300,50 @@ fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32) {
         atomicAdd(&node_wins[node_idx], reward);
     }
 
-    // Last thread to decrement reroot_threads_remaining to 0 logs REROOT_END
-    let threads_left = atomicSub(&reroot_threads_remaining, 1u);
-    if (threads_left == 1u) {
+    // ...existing code...
+    workgroupBarrier();
+    // let total_threads = 64u * num_workgroups.x; // Already defined above
+    // Use a global atomic counter to ensure only one thread emits
+    var is_last_thread = false;
+    var prev = 0u;
+    if (total_threads > 0u && global_id.x < total_threads && global_id.y == 0u && global_id.z == 0u) {
+        prev = atomicSub(&global_reroot_threads_remaining, 1u);
+        if (prev == 1u) {
+            is_last_thread = true;
+        }
+    }
+    if (is_last_thread) {
         var payload_reroot_end: array<u32, 255>;
         payload_reroot_end[0] = global_id.x;
-        for (var i = 1u; i < 255u; i++) { payload_reroot_end[i] = 0u; }
-        write_urgent_event(URGENT_EVENT_REROOT_END, &payload_reroot_end);
+        payload_reroot_end[1] = params.turn_number;
+        payload_reroot_end[2] = prev; // DIAG: include prev value
+        payload_reroot_end[3] = total_threads;
+        payload_reroot_end[4] = atomicLoad(&global_reroot_threads_remaining); // Instrument: value after emission
+        for (var i = 5u; i < 255u; i++) { payload_reroot_end[i] = 0u; }
+        write_urgent_event(URGENT_EVENT_BATCH_END, &payload_reroot_end);
     }
-    workgroupBarrier();
 }
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invocation_index) local_idx: u32) {
-    mcts_othello_iteration(global_id, local_idx);
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_index) local_idx: u32,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>
+) {
+    // Global atomic is initialized by host before dispatch
+    
+    // DEBUG: Compute root_board hash on thread 0
+    if (global_id.x == 0u) {
+        // Compute FNV-1a hash of the board (32-bit)
+        var hash: u32 = 0x811c9dc5u;
+        for (var i = 0u; i < 64u; i++) {
+            let val = u32(root_board.cells[i]);
+            hash = hash ^ val;
+            hash = hash * 0x01000193u;
+        }
+        atomicExchange(&diagnostics.root_board_hash, hash);
+    }
+    
+    mcts_othello_iteration(global_id, local_idx, num_workgroups);
 }
 // =============================================================================
 // GPU-Native MCTS for Othello - Clean Implementation
@@ -306,8 +396,8 @@ struct MctsParams {
     board_height: u32,
     game_type: u32,
     temperature: f32,
+    turn_number: u32, // NEW: unique per-turn identifier
     _pad0: u32,
-    _pad1: u32,
 }
 
 struct NodeInfo {
@@ -334,8 +424,9 @@ struct Diagnostics {
     alloc_failures: atomic<u32>,
     recycling_events: atomic<u32>, // NEW: count value-based recycling
     rollouts: atomic<u32>,
-    _pad0: atomic<u32>,
-    _pad1: atomic<u32>,
+    root_board_hash: atomic<u32>, // Replaces _pad0
+    init_nodes_count: atomic<u32>,
+    total_children_gen: atomic<u32>,
 }
 
 // =============================================================================
@@ -362,7 +453,10 @@ struct Diagnostics {
 @group(1) @binding(4) var<storage, read_write> diagnostics: Diagnostics;
 
 // Group 2: Root Board State
-@group(2) @binding(0) var<storage, read> root_board: array<i32>;
+struct Board {
+    cells: array<i32, 64>,
+};
+@group(2) @binding(0) var<storage, read> root_board: Board;
 
 // =============================================================================
 // RNG
@@ -715,6 +809,9 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
     // Fallback: global allocation
     let alloc_idx = atomicAdd(&alloc_counter, 1u);
     if (alloc_idx < params.max_nodes) {
+        // Safety check: never allocate root (0)
+        if (alloc_idx == 0u) { return INVALID_INDEX; }
+        
         // New node: set zero bit, clear deleted and dirty
         atomicStore(&node_info[alloc_idx].flags, (1u << 1)); // zero bit
         return alloc_idx;
@@ -832,7 +929,7 @@ fn reconstruct_board(path: ptr<function, array<u32, 128>>, path_length: u32) -> 
     
     // Copy root board
     for (var i = 0; i < 64; i++) {
-        board[i] = root_board[i];
+        board[i] = root_board.cells[i];
     }
     
     // Apply moves along path (skip root at index 0)
@@ -857,6 +954,20 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
     if (old_state.exchanged == false || old_state.old_value != NODE_STATE_READY) {
         atomicAdd(&diagnostics.expansion_locked, 1u);
         return false;  // Someone else is expanding or already expanded
+    }
+
+    // Double-check: did we race with someone who just finished expansion?
+    // If we read num_children=0 (stale) before acquiring the lock, but now it's > 0,
+    // it means someone else expanded it and set it back to READY.
+    // We just transitioned it to EXPANDING, so we own it.
+    // We should check if it's already expanded.
+    let info_check = node_info[node_idx];
+    if (info_check.num_children > 0u) {
+        // Already expanded!
+        // Release lock (set back to READY).
+        atomicStore(&node_state[node_idx], NODE_STATE_READY);
+        atomicAdd(&diagnostics.exp_lock_retry, 1u); // Log this specific race
+        return false; 
     }
 
     // Minimal expansion: generate all valid moves for the current player
@@ -893,6 +1004,10 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
     }
     // Update parent node info
     node_info[node_idx].num_children = num_children;
+    
+    // DEBUG: Count total children generated to verify expansion is working
+    atomicAdd(&diagnostics.total_children_gen, num_children);
+    
     atomicStore(&node_state[node_idx], NODE_STATE_READY);
     return true;
 }
@@ -959,5 +1074,30 @@ fn prune_unreachable(
         }
         let my_workgroup = workgroup_id.x;
         free_node(node_idx, my_workgroup);
+    }
+}
+
+@compute @workgroup_size(64)
+fn init_allocator(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    // Support 2D dispatch for large node counts (> 65535 workgroups)
+    // We assume the X dimension is filled to 65535 workgroups if Y > 0
+    // Stride = 65535 * 64 = 4194240
+    let node_idx = global_id.x + global_id.y * 4194240u;
+    
+    // Skip node 0 (root) and out of bounds
+    if (node_idx == 0u || node_idx >= params.max_nodes) {
+        return;
+    }
+
+    // Initialize node state
+    atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
+    atomicAdd(&diagnostics.init_nodes_count, 1u);
+    
+    // Add to free list
+    // Distribute nodes round-robin across 256 lists
+    let list_idx = node_idx % 256u;
+    let top = atomicAdd(&free_tops[list_idx], 1u);
+    if (top < 8192u) { // Check capacity of free list
+        free_lists[list_idx][top] = node_idx;
     }
 }
