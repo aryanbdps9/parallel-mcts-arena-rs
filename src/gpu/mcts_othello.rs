@@ -861,6 +861,8 @@ pub struct OthelloNodeInfo {
     pub player_at_node: i32,
     pub flags: u32, // bit 0: deleted, bit 1: zero, bit 2: dirty
     pub _pad: u32,  // for alignment (optional, for 32-byte struct)
+    pub _pad2: u32, // Pad to 32 bytes
+    pub _pad3: u32,
 }
 
 #[repr(C)]
@@ -1084,13 +1086,13 @@ impl GpuOthelloMcts {
         }));
         let children_indices_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ChildrenIndicesBuffer"),
-            size: max_nodes as u64 * 4, // u32 (index of first child)
+            size: max_nodes as u64 * 64 * 4, // u32 (MAX_CHILDREN * u32)
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let children_priors_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ChildrenPriorsBuffer"),
-            size: max_nodes as u64 * 4, // f32
+            size: max_nodes as u64 * 64 * 4, // f32 (MAX_CHILDREN * f32)
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
@@ -1627,6 +1629,8 @@ impl GpuOthelloMcts {
             player_at_node: root_player,
             flags: 0,
             _pad: 0,
+            _pad2: 0,
+            _pad3: 0,
         };
         
         // Write Node 0 Info
@@ -1648,6 +1652,17 @@ impl GpuOthelloMcts {
 
     pub fn advance_root(&self, x: usize, y: usize, new_board: &[i32; 64], new_player: i32, legal_moves: &[(usize, usize)]) -> bool {
         println!("[GPU-Native] advance_root called with x={}, y={}", x, y);
+        
+        // Check if current root has children
+        let current_root_idx = self.inner.lock().unwrap().current_root_idx;
+        let info = self.debug_get_node_info(current_root_idx);
+        
+        if info.num_children == 0 {
+            println!("[GPU-Native] Current root {} has NO children (unexpanded). Cannot prune. Resetting tree.", current_root_idx);
+            self.init_tree(new_board, new_player, legal_moves);
+            return true;
+        }
+
         // 1. Dispatch pruning kernels to clean up the tree on the GPU
         self.dispatch_pruning_kernels(x as u32, y as u32);
         

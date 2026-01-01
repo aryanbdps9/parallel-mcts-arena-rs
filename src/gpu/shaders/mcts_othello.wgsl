@@ -68,25 +68,11 @@ fn identify_garbage() {
     }
 
     if (!found_new_root) {
-        // DEBUG: Return the first child's move_id and num_children to see what we have
-        if (info.num_children > 0u) {
-             let first_child = get_child_idx(current_root, 0u);
-             if (first_child != INVALID_INDEX) {
-                 let first_move = node_info[first_child].move_id;
-                 // Encode num_children and first move into the error code
-                 // 0xE0000000 | (num_children << 8) | first_move
-                 new_root_output = 0xE0000000u | ((info.num_children & 0xFFu) << 8u) | (first_move & 0xFFu);
-             } else {
-                 new_root_output = INVALID_INDEX;
-             }
-        } else {
-             new_root_output = INVALID_INDEX;
-        }
-    } else {
-        // Also mark the old root as garbage
-        let qidx = atomicAdd(&work_head, 1u);
-        work_queue[qidx] = current_root;
+        new_root_output = 0xFFFFFFFFu;
     }
+    // Always mark the old root as garbage
+    let qidx = atomicAdd(&work_head, 1u);
+    work_queue[qidx] = current_root;
 }
 
 @compute @workgroup_size(64)
@@ -167,6 +153,7 @@ const URGENT_EVENT_PRUNING_END: u32 = 13u;
 const URGENT_EVENT_MEMORY_PRESSURE: u32 = 14u;
 const URGENT_EVENT_REROOT_OP_START: u32 = 15u;
 const URGENT_EVENT_REROOT_OP_END: u32 = 16u;
+const URGENT_EVENT_DEBUG: u32 = 99u;
 
 // =============================================================================
 // Helper: Write an urgent event to the ring buffer
@@ -291,7 +278,8 @@ fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32, num_workgroups: 
     for (var i = path_len; i > 0u; i--) {
         let node_idx = path[i - 1u];
         atomicAdd(&node_vl[node_idx], -1);
-        atomicAdd(&node_visits[node_idx], 1);
+        let v = atomicAdd(&node_visits[node_idx], 1);
+        
         let node_player = node_info[node_idx].player_at_node;
         var reward = rollout_result;
         if (node_player != leaf_player) {
@@ -407,6 +395,8 @@ struct NodeInfo {
     player_at_node: i32,
     flags: atomic<u32>, // bit 0: deleted, bit 1: zero, bit 2: dirty
     _pad: u32,          // for alignment (optional, for 32-byte struct)
+    _pad2: u32,
+    _pad3: u32,
 }
 
 struct Diagnostics {
@@ -989,6 +979,8 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
                 node_info[child_idx].player_at_node = -player;
                 atomicStore(&node_info[child_idx].flags, 0u); // not deleted
                 node_info[child_idx]._pad = 0u;
+                node_info[child_idx]._pad2 = 0u;
+                node_info[child_idx]._pad3 = 0u;
                 atomicStore(&node_state[child_idx], NODE_STATE_READY);
                 set_child_idx(node_idx, num_children, child_idx);
                 set_child_prior(node_idx, num_children, 1.0); // Uniform prior for now

@@ -919,6 +919,17 @@ impl<S: GameState> MCTS<S> {
 
     #[cfg(feature = "gpu")]
     fn compute_othello_legal_moves(board: &[i32; 64], player: i32) -> Vec<(usize, usize)> {
+        // DEBUG: Print board state to verify orientation
+        // Only print if it looks like the specific problematic state (Row 3 has pieces)
+        let has_pieces_row_3 = (24..32).any(|i| board[i] != 0);
+        if has_pieces_row_3 {
+             // println!("[GPU-Native HOST DIAG] compute_othello_legal_moves board:");
+             // for r in 0..8 {
+             //    let row = &board[r*8..(r+1)*8];
+             //    println!("  Row {}: {:?}", r, row);
+             // }
+        }
+
         const DIRS: [(i32, i32); 8] = [
             (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1),
         ];
@@ -1373,10 +1384,10 @@ impl<S: GameState> MCTS<S> {
             provided_moves
         } else {
             eprintln!(
-                "[GPU-Native HOST WARN] legal_moves mismatch for advance_root; using computed. provided={:?} computed={:?}",
+                "[GPU-Native HOST WARN] legal_moves mismatch for advance_root; using PROVIDED. provided={:?} computed={:?}",
                 provided_moves, computed_moves
             );
-            computed_moves
+            provided_moves
         };
 
         let guard = self.gpu_native_othello.lock();

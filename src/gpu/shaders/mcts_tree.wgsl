@@ -66,6 +66,10 @@ struct NodeInfo {
     move_id: u32,
     num_children: u32,
     player_at_node: i32,
+    flags: u32,
+    _pad: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
 // Per-iteration work tracking
@@ -232,7 +236,7 @@ fn allocate_node() -> u32 {
 
 // Initialize a node
 fn init_node(idx: u32, parent: u32, move_id: u32, player: i32) {
-    node_info[idx] = NodeInfo(parent, move_id, 0u, player);
+    node_info[idx] = NodeInfo(parent, move_id, 0u, player, 0u, 0u, 0u, 0u);
     atomicStore(&node_visits[idx], 0);
     atomicStore(&node_wins[idx], 0);
     atomicStore(&node_vl[idx], 0);

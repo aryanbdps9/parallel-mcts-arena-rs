@@ -78,6 +78,10 @@ pub struct NodeInfo {
     pub move_id: u32,
     pub num_children: u32,
     pub player_at_node: i32,
+    pub flags: u32,
+    pub _pad: u32,
+    pub _pad2: u32,
+    pub _pad3: u32,
 }
 
 /// Per-iteration work tracking
@@ -1010,6 +1014,10 @@ impl GpuMctsEngine {
             move_id: INVALID_INDEX,
             num_children: children_moves.len() as u32,
             player_at_node: root_player,
+            flags: 0,
+            _pad: 0,
+            _pad2: 0,
+            _pad3: 0,
         };
 
         queue.write_buffer(&self.node_info_buffer, 0, bytemuck::bytes_of(&root_info));
@@ -1040,6 +1048,10 @@ impl GpuMctsEngine {
                 move_id,
                 num_children: 0, // Will be populated on expansion
                 player_at_node: opposite_player,
+                flags: 0,
+                _pad: 0,
+                _pad2: 0,
+                _pad3: 0,
             };
 
             let offset = (child_idx as usize) * std::mem::size_of::<NodeInfo>();
