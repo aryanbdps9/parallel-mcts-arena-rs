@@ -4,6 +4,7 @@ mod tests {
     use mcts::{GpuOthelloMcts, GpuConfig, GpuContext};
     use std::sync::Arc;
     #[test]
+    #[ignore = "REROOT_END event coordination disabled - global_reroot_threads_remaining no longer used"]
     fn test_real_kernel_emission_guard_multi_workgroup() {
         let config = GpuConfig::default();
         let context = Arc::new(GpuContext::new(&config).expect("Failed to create GpuContext"));
@@ -24,7 +25,7 @@ mod tests {
                 device.poll(wgpu::Maintain::Wait);
             }
         }
-        engine.dispatch_mcts_othello_kernel(num_workgroups);
+        engine.dispatch_mcts_othello_kernel(num_workgroups, 1.4, 1.0, 1.0, 42);
         device.poll(wgpu::Maintain::Wait);
         let mut atomic_val = 0u32;
         {

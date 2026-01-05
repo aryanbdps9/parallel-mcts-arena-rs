@@ -51,7 +51,8 @@ fn compute_puct(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let effective_visits_f = f32(effective_visits);
         
         if (visits > 0) {
-            // Q value: win rate from this node's perspective
+            // Q value: win rate for the player who made the move to reach this node
+            // This is from the parent's perspective (since parent made the move)
             q_value = (f32(node.wins) / f32(visits)) / 2.0;
         }
         

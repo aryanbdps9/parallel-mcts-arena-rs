@@ -28,7 +28,7 @@ fn test_reproduce_pruning_failure() {
 
     // Run iterations to expand root
     println!("Running iterations...");
-    mcts.dispatch_mcts_othello_kernel(2048);
+    mcts.dispatch_mcts_othello_kernel(2048, 1.4, 1.0, 1.0, 42);
     let _telemetry = mcts.run_iterations(2048, 0.1, 1.0, 0.06, 42);
 
     // Check Node 0

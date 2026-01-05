@@ -242,7 +242,7 @@ impl AIWorker {
                                     new_mcts
                                 });
                                 
-                                if let Some(((x, y), visits, q, children_stats, total_nodes, telemetry)) = mcts.search_gpu_native_othello(
+                                if let Some(((x, y), _visits, q, children_stats, total_nodes, telemetry)) = mcts.search_gpu_native_othello(
                                     &board,
                                     current_player,
                                     &legal_moves_xy,
@@ -265,10 +265,12 @@ impl AIWorker {
                                     
                                     // Build children_stats HashMap for UI display
                                     let mut stats_map = std::collections::HashMap::new();
+                                    let mut total_visits = 0;
                                     for (cx, cy, cv, _cw, cq) in &children_stats {
                                         // Format as (row, col) to match OthelloMove and CPU debug output
                                         let move_str = format!("({},{})", cy, cx);
                                         stats_map.insert(move_str, (*cq, *cv));
+                                        total_visits += *cv;
                                     }
                                     
                                     // === TSV Logging for GPU-Native ===
@@ -286,11 +288,11 @@ impl AIWorker {
                                         
                                         // Calculate U values (PUCT exploration term)
                                         let prior = 1.0 / sorted_children.len() as f64;
-                                        let best_u = gpu_exploration_constant * prior * (visits as f64).sqrt() / (1.0 + best.2 as f64);
-                                        let second_u = gpu_exploration_constant * prior * (visits as f64).sqrt() / (1.0 + second.2 as f64);
+                                        let best_u = gpu_exploration_constant * prior * (total_visits as f64).sqrt() / (1.0 + best.2 as f64);
+                                        let second_u = gpu_exploration_constant * prior * (total_visits as f64).sqrt() / (1.0 + second.2 as f64);
                                         
                                         let csv_line = format!("GPU-Native (Player {})\t{}\t{:.4}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{:.4}\t{:.4}\n",
-                                            current_player, visits, q, visit_diff,
+                                            current_player, total_visits, q, visit_diff,
                                             best_move_str, best.2, best.4, best_u,
                                             second_move_str, second.2, second.4, second_u
                                         );
@@ -315,8 +317,8 @@ impl AIWorker {
                                     // Create SearchStatistics for UI display
                                     let stats = SearchStatistics {
                                         total_nodes: total_nodes as i32,
-                                        root_visits: visits,
-                                        root_wins: q * visits as f64,
+                                        root_visits: total_visits,
+                                        root_wins: q * total_visits as f64,
                                         root_value: q,
                                         children_stats: stats_map,
                                     };
@@ -438,16 +440,23 @@ impl AIWorker {
                                         );
                                     }
                                     
-                                    // Advance GPU-native tree
-                                    // mv.0 is row, mv.1 is col, but advance_root expects (x, y) = (col, row)
-                                    let reused = mcts.advance_root_gpu_native(
-                                        (mv.1, mv.0), // Convert (row, col) to (x, y)
-                                        &new_board,
-                                        new_player,
-                                        &legal_moves_xy,
-                                    );
-                                    if reused {
-                                        println!("[GPU-Native] Tree reuse successful");
+                                    // Check if game is terminal before advancing root
+                                    // Terminal nodes have no children, so pruning will fail
+                                    if othello_state.is_terminal() {
+                                        println!("[GPU-Native] Game is terminal - skipping advance_root (will reset tree on next search)");
+                                    } else {
+                                        // Advance GPU-native tree
+                                        // mv.0 is row, mv.1 is col, but advance_root expects (x, y) = (col, row)
+                                        let reused = mcts.advance_root_gpu_native(
+                                            (mv.1, mv.0), // Convert (row, col) to (x, y)
+                                            &new_board,
+                                            new_player,
+                                            &legal_moves_xy,
+                                        );
+                                        if !reused {
+                                            eprintln!("[GPU-Native ERROR] Pruning failed - resetting tree on next search");
+                                            eprintln!("[GPU-Native ERROR] This may indicate a bug in the pruning logic or tree corruption");
+                                        }
                                     }
                                 }
                             }

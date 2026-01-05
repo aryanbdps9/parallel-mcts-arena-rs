@@ -14,11 +14,11 @@ This system implements a high-performance, GPU-native Monte Carlo Tree Search (M
 ## High-Level Workflow
 
 1. **Initialization:** Host allocates all GPU buffers, sets up bind groups and pipeline layouts (matching WGSL exactly), and initializes the root board state.
-2. **MCTS Search:** The main GPU-native MCTS kernel (`main`/`mcts_othello_iteration` in WGSL) is dispatched from Rust for Othello. Thousands of GPU threads run MCTS in parallel, allocating and recycling nodes using a hybrid allocator. This kernel is responsible for all core search logic, including re-rooting, expansion, simulation, backpropagation, and robust urgent event logging (including REROOT events, with atomic coordination to ensure only one REROOT_END per move).
-3. **Pruning:** After each move, unreachable subtrees are pruned in parallel by dispatching the pruning kernel, and nodes are recycled. PRUNING_END events now include the pruned node count in their payload.
-4. **Urgent Event Logging:** Both the main MCTS kernel and the pruning kernel log important events (e.g., REROOT, PRUNING, memory pressure) to a host-mapped ring buffer. Host code polls and processes these events, ensuring that REROOT events are visible in real gameplay. The urgent event buffer write head is reset before each kernel dispatch to prevent event spam.
-5. **Host Integration:** Host code manages buffer mapping/unmapping, event polling, and diagnostics, ensuring robust synchronization. All buffer mapping/unmapping is guarded by a static Mutex. All host reads of urgent event data use a staging buffer; GPU-write buffers are never mapped directly for reading. The host is responsible for dispatching both the main MCTS kernel and the pruning kernel, and for polling/logging urgent events.
-6. **Diagnostics and Testing:** Automated, test-driven debugging is used for GPU resource issues, with minimal and integration tests for emission guard logic and event logging. Integration tests assert that only one REROOT_END event is emitted per move. Diagnostic/temporary event spam has been removed from production runs.
+2. **MCTS Search:** The main GPU-native MCTS kernel (`main`/`mcts_othello_iteration` in WGSL) is dispatched from Rust for Othello. Thousands of GPU threads run MCTS in parallel, allocating and recycling nodes using a hybrid allocator. This kernel is responsible for all core search logic, including selection, expansion, simulation, and backpropagation.
+3. **Pruning:** After each move, unreachable subtrees are pruned in parallel by dispatching a two-phase pruning kernel. Phase 1 identifies the new root and marks garbage nodes. Phase 2 traverses and frees the garbage nodes top-down, recycling them to workgroup-local free lists or the global free queue.
+4. **Urgent Event Logging:** Both the main MCTS kernel and the pruning kernel can log important events (e.g., memory pressure, diagnostics) to a host-mapped ring buffer. Host code polls and processes these events. The urgent event buffer write head is reset before each kernel dispatch to prevent event accumulation.
+5. **Host Integration:** Host code manages buffer mapping/unmapping, event polling, and diagnostics, ensuring robust synchronization. All buffer mapping/unmapping is guarded by a static Mutex (`DEVICE_POLL_MUTEX`). All host reads of urgent event data use a staging buffer; GPU-write buffers are never mapped directly for reading. The host is responsible for dispatching both the main MCTS kernel and the pruning kernels, and for polling urgent events.
+6. **Diagnostics and Testing:** Automated, test-driven debugging is used for GPU resource issues, with minimal and integration tests for allocation, pruning, and tree reuse logic.
 
 ---
 
@@ -87,55 +87,102 @@ The system enables high-throughput, contention-free node allocation and recyclin
 - `free_tops_buffer`: [256] atomic<u32>, one per workgroup, tracking the top of each free list.
 - `alloc_counter_buffer`: Global atomic counter for fallback allocation when a workgroup's free list is empty.
 
-### Main MCTS Kernel (GPU-Native Search, BATCH Logging)
+### Main MCTS Kernel (GPU-Native Search)
 - The main kernel (`main`/`mcts_othello_iteration`) is dispatched from Rust and runs the full MCTS search loop on the GPU, including:
-    - Selection, expansion, simulation, backpropagation
-    - Re-rooting logic (after a move)
-    - Logging BATCH_START and BATCH_END events to the urgent event buffer using atomic coordination.
-    - **BATCH_START Coordination:** A global atomic counter (`global_reroot_start_threads_remaining`) is used to ensure only the very last thread of the entire dispatch logs the BATCH_START event. This is initialized by the host before dispatch.
-    - **BATCH_END Coordination:** A global atomic counter (`global_reroot_threads_remaining`) is used to ensure only the very last thread of the entire dispatch logs the BATCH_END event. **Crucially, this counter is initialized by the host (Rust) before dispatch**, not by the shader, to prevent race conditions where multiple workgroups might try to initialize it simultaneously.
-    - Logging memory pressure and other urgent events as needed
-    - All event payloads (including turn number and atomic state) are written to the urgent event buffer, which is polled by the host
+    - **Selection:** Using PUCT (UCT with priors) to traverse from root to a leaf node
+    - **Virtual Loss:** Each thread adds virtual loss to nodes along its path during selection to coordinate parallel exploration
+    - **Expansion:** Allocating new child nodes when a leaf is reached
+    - **Simulation:** Running a random playout to terminal state
+    - **Backpropagation:** Propagating rewards up the path, using **parent's perspective** (player who moved TO each node)
+- **Perspective Convention:** All node statistics (wins, visits) are stored from the parent's perspective. This matches CPU MCTS and ensures correct PUCT calculations.
+    - During backpropagation: `player_who_moved = -player_at_node` (parent is opponent)
+    - Reward is flipped if `player_who_moved != leaf_player`
+    - This means `node.wins` represents wins for the player who chose that move (parent's perspective)
+- Logging memory pressure and other urgent events as needed
+- All event payloads (including diagnostics) are written to the urgent event buffer, which is polled by the host
 
-### Node Recycling and Pruning (Updated for "Reroot & Identify")
+### Node Recycling and Pruning (Two-Phase "Identify & Prune")
 
-The pruning process is split into two phases to allow the GPU to identify which nodes to prune based on the Host's move choice.
+The pruning process is split into two phases executed by separate GPU kernels, coordinated by the host.
 
-**Phase 1: Identify Garbage & Next Root**
+**Phase 1: Identify New Root & Mark Garbage (`identify_new_root_kernel`)**
 - **Input:** `RerootParams` (Uniform Buffer) containing:
-    - `move_x`, `move_y`: The move chosen by the Host.
-    - `current_root_idx`: The GPU node index of the current root.
-- **Logic (Compute Shader):**
-    - Scans the children of `current_root_idx`.
-    - **If child matches move:** Writes child index to `NewRootOutput` buffer (for Host to read).
-    - **If child does NOT match:** Writes child index to `work_queue` for pruning.
-    - **If no match found:** (Error case) Signals failure or resets tree.
+    - `move_x`, `move_y`: The move chosen by the host (player's or AI's move)
+    - `current_root_idx`: The GPU node index of the current root
+- **Logic (Single Workgroup Compute Shader):**
+    - Scans the children of `current_root_idx`
+    - **If child matches move:** Writes child index to `new_root_output` buffer (for host to read back)
+    - **If child does NOT match:** Writes child index to `work_queue` for pruning in Phase 2
+    - **If no match found:** Writes special error value (0xFFFFFFFF or 0xE0000000 + diagnostic info) to signal tree must be reset
+- **Output:**
+    - `new_root_output`: Contains the new root index (or error code)
+    - `work_queue`: Contains indices of all unreachable child nodes (garbage roots)
+    - `work_head`: Set to the number of garbage nodes queued
 
-**Phase 2: Prune Unreachable Top-Down**
-- **Input:** `work_queue` (populated by Phase 1).
-- **Logic (Compute Shader):**
-    - Pops a node from `work_queue`.
-    - Marks it as deleted (adds to free list).
-    - Pushes all its children to `work_queue`.
-    - Repeats until queue is empty.
+**Phase 2: Prune Unreachable Top-Down (`prune_unreachable_topdown_kernel`)**  
+- **Input:** `work_queue` (populated by Phase 1), `work_head` (number of items in queue)
+- **Logic (Multi-Workgroup Compute Shader - typically 64 workgroups):**
+    - Each thread attempts to pop a node from `work_queue` using atomic operations
+    - For each popped node:
+        1. Atomically mark it as deleted (using `node_state` buffer)
+        2. Add it to the appropriate free list (workgroup-local or global overflow)
+        3. Scan its children and push them onto `work_queue` for recursive pruning
+    - Repeat until `work_queue` is empty
+- **Correctness Guarantees:**
+    - **No Double-Free:** Atomic state transitions ensure only one thread "owns" each node
+    - **Completeness:** Queue-based traversal ensures all descendants are reached
+    - **Thread Safety:** Work queue operations use atomic head pointer
 
 **Host Coordination:**
-1.  Host calls `advance_root(move)`.
-2.  Host writes `RerootParams`.
-3.  Host dispatches **Phase 1 Kernel**.
-4.  Host dispatches **Phase 2 Kernel**.
-5.  Host reads `NewRootOutput` to get the new `root_idx`.
-6.  Host updates `MctsParams.root_idx` for the next search batch.
+1. Host calls `advance_root(move_xy, new_board, new_player, new_legal_moves)`
+2. Host writes `RerootParams` to uniform buffer
+3. Host dispatches **Phase 1 Kernel** (1 workgroup)
+4. Host reads `new_root_output` via staging buffer to get new root index
+5. Host dispatches **Phase 2 Kernel** (64 workgroups) to free garbage nodes
+6. Host updates internal `current_root_idx` state
+7. Next search batch uses the new root
 
 ### Urgent Event Logging
 - **Events:**
-    - `BATCH_START` / `BATCH_END`: Mark the start/end of a search batch (formerly REROOT_START/END).
-    - `REROOT_OP_START` / `REROOT_OP_END`: Mark the start/end of the pruning/rerooting operation.
-    - `PRUNING_START` / `PRUNING_END`: Specific to the pruning kernel execution.
-- **Mechanism:** Ring buffer with atomic write head. Host polls this buffer.
+    - Logging is minimal and used primarily for diagnostics
+    - Events can be emitted for memory pressure, allocation failures, or debugging
+    - BATCH_START/BATCH_END and REROOT events are currently disabled in production
+- **Mechanism:** Ring buffer with atomic write head. Host polls this buffer periodically via dedicated urgent event logger thread.
 
-### Backpropagation
-- After each simulation, the kernel walks up the path from leaf to root, atomically updating visit/win stats for each node.
+### Backpropagation (Parent's Perspective)
+
+**Goal:**
+Accurately propagate simulation results up the tree after each rollout, using a consistent perspective convention that matches CPU MCTS.
+
+**Perspective Convention:**
+- All node statistics (`node_wins`, `node_visits`) are stored from the **parent's perspective**
+- Parent = the player who chose to move to this node = opponent of `player_at_node`
+- This means: `player_who_moved = -player_at_node`
+
+**Implementation (WGSL):**
+```wgsl
+// Backpropagation phase
+for (var i = path_len; i > 0u; i--) {
+    let node_idx = path[i - 1u];
+    atomicAdd(&node_vl[node_idx], -1);  // Remove virtual loss
+    atomicAdd(&node_visits[node_idx], 1);
+    
+    // CRITICAL: Use parent's perspective (player who moved TO this node)
+    let player_at_node = node_info[node_idx].player_at_node;
+    let player_who_moved = -player_at_node;  // Parent is opponent
+    var reward = rollout_result;
+    if (player_who_moved != leaf_player) {
+        reward = 2 - rollout_result;  // Flip perspective
+    }
+    atomicAdd(&node_wins[node_idx], reward);
+}
+```
+
+**Why This Matters:**
+- CPU MCTS uses this same convention
+- PUCT selection formula `Q + U` works correctly when Q is from parent's perspective
+- Display code can directly use Q-values without flipping
+- Both engines evaluate positions consistently
 
 ### Urgent Event Logging (GPU → CPU)
 - GPU kernels write urgent events to the host-mapped ring buffer at `write_head % 256`, incrementing `write_head` atomically.
@@ -245,8 +292,17 @@ fn allocate_node() -> u32 {
         return node_idx;
     }
 
-    // Step 3: Memory pressure fallback (not just INVALID_INDEX)
-    return INVALID_INDEX; // Actual handling is policy-dependent
+    // Step 3: Try global free list (shared overflow pool)
+    let global_top = atomicLoad(&global_free_head);
+    if (global_top > 0u) {
+        let maybe_idx = atomicSub(&global_free_head, 1u);
+        if (maybe_idx > 0u) {
+            return global_free_queue[maybe_idx - 1u];
+        }
+    }
+
+    // Step 4: Memory exhausted - signal pressure, return INVALID_INDEX
+    return INVALID_INDEX;
 }
 - Only ~256 threads contend per free list (vs 2048 before)
 - If a workgroup's list is empty, falls back to global allocation (consuming new/free memory)
@@ -436,7 +492,22 @@ Both bits are stored in a single integer field (e.g., node_info.flags or similar
 
 **zero bit:** Indicates the node is already zeroed and ready for immediate allocation and use, with no further clearing required. Used for nodes that have never been allocated or have been explicitly zeroed in a background pass.
 
-**Impact:** Both bits are lightweight, and together allow the allocator to distinguish between "fresh" and "needs-wash" nodes, optimizing allocation and reuse paths. In the current implementation, node state is tracked via a `node_state` enum (e.g., EMPTY, READY, etc.), and value-based recycling is used to reclaim memory. Allocation logic checks node state, not explicit bitfields. If no nodes are available, memory pressure policy is triggered as described above.
+**Impact:** Both bits are lightweight, and together allow the allocator to distinguish between "fresh" and "needs-wash" nodes, optimizing allocation and reuse paths. In the current implementation, node state is tracked via a `node_state` enum (e.g., EMPTY, READY, etc.). Allocation logic checks node state, not explicit bitfields. If no nodes are available, memory pressure policy is triggered as described above.
+
+---
+
+## Known Issues and Future Work
+
+### Terminal Position Q-Value Display
+**Issue:** When a game reaches a terminal state (win/loss), the GUI debug stats may show Root Value = 0.500 instead of the correct value (0.0 for loss, 1.0 for win).
+
+**Root Cause:** The displayed "Root Value" in GUI is likely stale from a previous search iteration. When the game becomes terminal, GPU detects this and skips `advance_root`, but the GUI may not update the displayed statistics.
+
+**Evidence:** Terminal CSV logs show correct Q-values (e.g., Q=1.0000 for winning move), but GUI snapshot shows Q=0.5.
+
+**Status:** Under investigation. Does not affect move selection or game outcome - purely a display issue.
+
+**Potential Fix:** Ensure GUI updates statistics when terminal state is detected, or add special handling to display terminal evaluation.
 
 ---
 
@@ -533,12 +604,7 @@ The allocator is designed to ensure that valuable subtrees are never pruned sole
    - Subtrees are pruned only when they become unreachable due to a root move (advance_root).
    - No reachable subtree is pruned just because memory is low.
 
-2. **Selective Node Recycling:**
-   - As memory capacity is approached, instead of pruning entire subtrees, only recycle (prune) nodes with the lowest PUCT value (least promising/visited/valuable leaves).
-   - Maintain a small pool or priority queue of recyclable nodes, and only recycle these when absolutely necessary.
-   - High-value, high-visit, or high-PUCT nodes are never deleted.
-
-3. **Graceful Degradation Under Memory Pressure:**
+2. **Graceful Degradation Under Memory Pressure:**
    - When the allocator detects that GPU memory is nearly exhausted (e.g., global alloc counter >= max_nodes):
      - Elegantly stop all search work on the GPU, keeping data members consistent.
      - If the root node has been visited enough times (above a threshold), play the move early by selecting the best child of the root based on current statistics, then prune all non-selected subtrees using efficient top-down freeing.
@@ -547,7 +613,7 @@ The allocator is designed to ensure that valuable subtrees are never pruned sole
    - If memory is exhausted and no low-value leaves are available, pause or slow down search, or play the move early and start rollouts instead of expansion. Log a warning or reduce batch size, but never delete valuable subtrees.
 
 4. **Diagnostics and Tuning:**
-   - Track and log memory pressure events, node recycling frequency, and the value distribution of recycled nodes.
+   - Track and log memory pressure events and node recycling frequency.
    - Use this data to tune the recycling policy for optimal performance and robustness.
 
 **Expected Outcome:**

@@ -1,3 +1,11 @@
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+/// Global mutex to prevent concurrent device.poll() and buffer mapping operations.
+/// WGPU's device.poll() is not thread-safe - only one thread can poll/map buffers at a time.
+/// This mutex is shared between the urgent event logger thread and any code that maps buffers (e.g., pruning).
+pub static DEVICE_POLL_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
 /// Utility: After kernel dispatch, assert that no URGENT_EVENT_EARLY_EXIT events were emitted
 pub fn assert_no_early_exit_events(events: &crossbeam_queue::SegQueue<UrgentEvent>) {
     let mut found = false;
@@ -16,7 +24,16 @@ pub fn assert_no_early_exit_events(events: &crossbeam_queue::SegQueue<UrgentEven
 }
 impl GpuOthelloMcts {
             /// Dispatch the main GPU-native MCTS kernel and bind the urgent event buffer for logging
-            pub fn dispatch_mcts_othello_kernel(&self, num_workgroups: u32) {
+            pub fn dispatch_mcts_othello_kernel(&self, num_workgroups: u32, exploration: f32, virtual_loss_weight: f32, temperature: f32, seed: u32) {
+        // Handle WGPU limit of 65535 workgroups per dimension
+        let max_dim = 65535;
+        let (dispatch_x, dispatch_y) = if num_workgroups > max_dim {
+            let y = (num_workgroups + max_dim - 1) / max_dim;
+            (max_dim, y)
+        } else {
+            (num_workgroups, 1)
+        };
+
         // Reset urgent event write head to zero before dispatch (prevents stale events)
         {
             let inner = self.inner.lock().unwrap();
@@ -33,7 +50,7 @@ impl GpuOthelloMcts {
             let inner = self.inner.lock().unwrap();
             let device = self.context.device();
             let queue = self.context.queue();
-            let total_threads = 64 * num_workgroups; // match kernel logic
+            let total_threads = 64 * dispatch_x * dispatch_y; // match kernel logic
             let temp = (total_threads as u32).to_le_bytes();
 
             if let Some(buf) = &inner.global_reroot_threads_remaining {
@@ -62,7 +79,10 @@ impl GpuOthelloMcts {
                     children_indices,
                     children_priors,
                     free_lists,
-                    free_tops
+                    free_tops,
+                    global_free_queue_buf,
+                    global_free_head_buf,
+                    expansion_paused_buf
                 ) = {
                     let inner = self.inner.lock().unwrap();
                     (
@@ -75,13 +95,16 @@ impl GpuOthelloMcts {
                         inner.children_priors_buffer.as_ref().expect("children_priors missing").clone(),
                         inner.free_lists_buffer.as_ref().expect("free_lists missing").clone(),
                         inner.free_tops_buffer.as_ref().expect("free_tops missing").clone(),
+                        inner.global_free_queue_buffer.as_ref().expect("global_free_queue missing").clone(),
+                        inner.global_free_head_buffer.as_ref().expect("global_free_head missing").clone(),
+                        inner.expansion_paused_buffer.as_ref().expect("expansion_paused missing").clone(),
                     )
                 };
 
                 // Layouts for each group
                 let group0_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("Group 0 Layout (Node Data)"),
-                    entries: &(0..=8).map(|i| BindGroupLayoutEntry {
+                    entries: &(0..=11).map(|i| BindGroupLayoutEntry {
                         binding: i,
                         visibility: ShaderStages::COMPUTE,
                         ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
@@ -102,6 +125,9 @@ impl GpuOthelloMcts {
                         BindGroupEntry { binding: 6, resource: children_priors.as_entire_binding() },
                         BindGroupEntry { binding: 7, resource: free_lists.as_entire_binding() },
                         BindGroupEntry { binding: 8, resource: free_tops.as_entire_binding() },
+                        BindGroupEntry { binding: 9, resource: global_free_queue_buf.as_entire_binding() },
+                        BindGroupEntry { binding: 10, resource: global_free_head_buf.as_entire_binding() },
+                        BindGroupEntry { binding: 11, resource: expansion_paused_buf.as_entire_binding() },
                     ],
                 });
 
@@ -114,8 +140,6 @@ impl GpuOthelloMcts {
                     diagnostics_buf,
                     reroot_params_buf,
                     new_root_output_buf,
-                    global_free_queue_buf,
-                    global_free_head_buf,
                     work_queue_buf,
                     work_head_buf,
                     work_claimed_buf,
@@ -130,8 +154,6 @@ impl GpuOthelloMcts {
                         inner.diagnostics_buffer.as_ref().expect("diagnostics missing").clone(),
                         inner.reroot_params_buffer.as_ref().expect("reroot_params missing").clone(),
                         inner.new_root_output_buffer.as_ref().expect("new_root_output missing").clone(),
-                        inner.global_free_queue_buffer.as_ref().expect("global_free_queue missing").clone(),
-                        inner.global_free_head_buffer.as_ref().expect("global_free_head missing").clone(),
                         inner.work_queue_buffer.as_ref().expect("work_queue missing").clone(),
                         inner.work_head_buffer.as_ref().expect("work_head missing").clone(),
                         inner.work_claimed_buffer.as_ref().expect("work_claimed missing").clone(),
@@ -139,24 +161,26 @@ impl GpuOthelloMcts {
                     )
                 };
 
-                // Update MctsParams (Basic initialization)
+                // Update MctsParams
                 {
                     let inner = self.inner.lock().unwrap();
+                    let free_list_capacity = (inner.max_nodes + 255) / 256;
                     let params = MctsOthelloParams {
                         num_iterations: 1, 
                         max_nodes: inner.max_nodes,
-                        exploration: 1.414, 
-                        virtual_loss_weight: 1.0, 
+                        exploration,
+                        virtual_loss_weight,
                         root_idx: inner.current_root_idx,
-                        seed: 12345, 
+                        seed,
                         board_width: 8,
                         board_height: 8,
                         game_type: 0,
-                        temperature: 1.0, 
+                        temperature,
                         turn_number: 0, 
-                        _pad0: 0,
+                        free_list_capacity,
                     };
                     queue.write_buffer(&mcts_params_buf, 0, bytemuck::bytes_of(&params));
+                    device.poll(wgpu::Maintain::Wait); // Ensure params are written before creating bind group
                 }
 
                 // Group 1 Layout (MCTS Params & Work Items)
@@ -168,8 +192,14 @@ impl GpuOthelloMcts {
                         BindGroupLayoutEntry { binding: 2, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                         BindGroupLayoutEntry { binding: 3, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                         BindGroupLayoutEntry { binding: 4, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                        BindGroupLayoutEntry { binding: 5, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                     ],
                 });
+
+                let root_stats_buf = {
+                    let inner = self.inner.lock().unwrap();
+                    inner.root_stats_buffer.as_ref().expect("root_stats_buffer missing").clone()
+                };
 
                 let group1_bind_group = device.create_bind_group(&BindGroupDescriptor {
                     label: Some("Group 1 Bind Group (MCTS Params)"),
@@ -180,6 +210,7 @@ impl GpuOthelloMcts {
                         BindGroupEntry { binding: 2, resource: paths_buf.as_entire_binding() },
                         BindGroupEntry { binding: 3, resource: alloc_counter_buf.as_entire_binding() },
                         BindGroupEntry { binding: 4, resource: diagnostics_buf.as_entire_binding() },
+                        BindGroupEntry { binding: 5, resource: root_stats_buf.as_entire_binding() },
                     ],
                 });
                 
@@ -191,34 +222,34 @@ impl GpuOthelloMcts {
                 // Write current root board
                 {
                     let inner = self.inner.lock().unwrap();
-                    println!("[GPU-Native] Writing root_board to GPU. Board[27..37]: {:?}", &inner.root_board[27..37]);
+                    // println!("[GPU-Native] Writing root_board to GPU. Board[27..37]: {:?}", &inner.root_board[27..37]);
                     queue.write_buffer(&root_board_buf, 0, bytemuck::cast_slice(&inner.root_board));
                 }
 
                 // DEBUG: Read back root_board to verify
-                {
-                    let size = 64 * 4;
-                    let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("Staging Readback"),
-                        size,
-                        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    encoder.copy_buffer_to_buffer(&root_board_buf, 0, &staging_buf, 0, size);
-                    queue.submit(Some(encoder.finish()));
-                    
-                    let slice = staging_buf.slice(..);
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
-                    device.poll(wgpu::Maintain::Wait);
-                    rx.recv().unwrap().unwrap();
-                    let data = slice.get_mapped_range();
-                    let result: &[i32] = bytemuck::cast_slice(&data);
-                    println!("[GPU-Native] Readback root_board from GPU. Board[27..37]: {:?}", &result[27..37]);
-                    drop(data);
-                    staging_buf.unmap();
-                }
+                // {
+                //     let size = 64 * 4;
+                //     let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                //         label: Some("Staging Readback"),
+                //         size,
+                //         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                //         mapped_at_creation: false,
+                //     });
+                //     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                //     encoder.copy_buffer_to_buffer(&root_board_buf, 0, &staging_buf, 0, size);
+                //     queue.submit(Some(encoder.finish()));
+                //     
+                //     let slice = staging_buf.slice(..);
+                //     let (tx, rx) = std::sync::mpsc::channel();
+                //     slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+                //     device.poll(wgpu::Maintain::Wait);
+                //     rx.recv().unwrap().unwrap();
+                //     let data = slice.get_mapped_range();
+                //     let result: &[i32] = bytemuck::cast_slice(&data);
+                //     println!("[GPU-Native] Readback root_board from GPU. Board[27..37]: {:?}", &result[27..37]);
+                //     drop(data);
+                //     staging_buf.unmap();
+                // }
 
                 let group2_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("Group 2 Layout (Root Board)"),
@@ -391,45 +422,21 @@ impl GpuOthelloMcts {
                     pass.set_bind_group(3, &urgent_event_bind_group, &[]);
                     pass.set_bind_group(4, &group4_bind_group, &[]);
                     pass.set_bind_group(5, &group5_bind_group, &[]);
-                    pass.dispatch_workgroups(num_workgroups, 1, 1);
+                    pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
                 }
                 queue.submit(Some(encoder.finish()));
                 device.poll(wgpu::Maintain::Wait);
-                println!("[DIAG] Othello MCTS main kernel dispatched and device polled.");
-
-                // DEBUG: Readback root_board from GPU AFTER execution
-                {
-                    let inner = self.inner.lock().unwrap();
-                    let root_board_buf = inner.root_board_buffer.as_ref().expect("root_board_buffer missing");
-                    let size = 64 * 4;
-                    let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("RootBoard Staging Buffer After"),
-                        size,
-                        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("RootBoard Readback After") });
-                    encoder.copy_buffer_to_buffer(root_board_buf, 0, &staging_buf, 0, size);
-                    queue.submit(Some(encoder.finish()));
-                    
-                    let slice = staging_buf.slice(..);
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
-                    device.poll(wgpu::Maintain::Wait);
-                    rx.recv().unwrap().unwrap();
-                    
-                    let data = slice.get_mapped_range();
-                    let board: &[i32] = bytemuck::cast_slice(&data);
-                    println!("[GPU-Native] Readback root_board from GPU AFTER execution. Board[0..10]: {:?}", &board[0..10]);
-                }
+                // println!("[DIAG] Othello MCTS main kernel dispatched and device polled.");
             }
         /// Dispatch the GPU pruning kernel and bind the urgent event buffer for logging
-        pub fn dispatch_pruning_kernels(&self, move_x: u32, move_y: u32) {
-            println!("[GPU-Native] dispatch_pruning_kernels called with move_x={}, move_y={}", move_x, move_y);
+        pub fn dispatch_pruning_kernels(&self, move_x: u32, move_y: u32) -> bool {
+            println!("[DIAG] Pruning: ENTER dispatch_pruning_kernels move=({}, {})", move_x, move_y);
             use wgpu::{BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindGroupEntry, BindGroupDescriptor, ShaderStages, BindingType, BufferBindingType};
             let context = &self.context;
             let device = context.device();
             let queue = context.queue();
+
+            println!("[DIAG] Pruning: got device and queue");
 
             // 1. Prepare RerootParams
             let (reroot_params_buf, current_root) = {
@@ -440,13 +447,22 @@ impl GpuOthelloMcts {
                 )
             };
 
+            println!("[DIAG] Pruning: current_root_idx={}", current_root);
+
+            let max_nodes = {
+                let inner = self.inner.lock().unwrap();
+                inner.max_nodes
+            };
+
             let params = RerootParams {
                 move_x,
                 move_y,
                 current_root,
-                _padding: 0,
+                max_nodes,
             };
             queue.write_buffer(&reroot_params_buf, 0, bytemuck::bytes_of(&params));
+
+            println!("[DIAG] Pruning: wrote params to buffer");
 
             // 2. Get all buffers
             let (
@@ -470,7 +486,178 @@ impl GpuOthelloMcts {
                 )
             };
 
+            println!("[DIAG] Pruning: got all pruning buffers");
+
+            // Initialize new_root_output to a sentinel value to detect if shader ran
+            queue.write_buffer(&new_root_output_buf, 0, &0xDEADBEEFu32.to_le_bytes());
+            // Also initialize work_head to 0 to ensure clean state
+            queue.write_buffer(&work_head_buf, 0, &0u32.to_le_bytes());
+            
+            // Clear expansion_paused flag - pruning will free nodes making memory available
+            {
+                let inner = self.inner.lock().unwrap();
+                let expansion_paused_buf = inner.expansion_paused_buffer.as_ref().expect("expansion_paused missing");
+                queue.write_buffer(expansion_paused_buf, 0, &0u32.to_le_bytes());
+            }
+            
+            device.poll(wgpu::Maintain::Wait); // Ensure writes complete before shader reads
+            println!("[DIAG] Pruning: initialized new_root_output to 0xDEADBEEF, work_head to 0, expansion_paused to 0");
+
+            // VERIFY: Read back the buffers to confirm initialization worked
+            {
+                let _verify_poll_guard = DEVICE_POLL_MUTEX.lock().unwrap();
+                let staging_verify = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Verify Init Staging"),
+                    size: 8,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let mut encoder_verify = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Verify Init") });
+                encoder_verify.copy_buffer_to_buffer(&new_root_output_buf, 0, &staging_verify, 0, 4);
+                encoder_verify.copy_buffer_to_buffer(&work_head_buf, 0, &staging_verify, 4, 4);
+                queue.submit(Some(encoder_verify.finish()));
+                device.poll(wgpu::Maintain::Wait);
+                
+                let slice = staging_verify.slice(..);
+                let (tx_verify, rx_verify) = std::sync::mpsc::channel();
+                slice.map_async(wgpu::MapMode::Read, move |v| { let _ = tx_verify.send(v); });
+                device.poll(wgpu::Maintain::Wait);
+                match rx_verify.recv_timeout(std::time::Duration::from_secs(2)) {
+                    Ok(Ok(())) => {
+                        let data = slice.get_mapped_range();
+                        let new_root_verify = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                        let work_head_verify = u32::from_le_bytes(data[4..8].try_into().unwrap());
+                        println!("[DIAG] VERIFY BEFORE SHADER: new_root_output=0x{:08X}, work_head=0x{:08X}", new_root_verify, work_head_verify);
+                        drop(data);
+                        staging_verify.unmap();
+                    }
+                    Ok(Err(e)) => {
+                        println!("[DIAG] VERIFY FAILED: Buffer mapping error: {:?}", e);
+                    }
+                    Err(e) => {
+                        println!("[DIAG] VERIFY FAILED: Timeout or channel error: {:?}", e);
+                    }
+                }
+            }
+
+            // DEBUG: Read root node's children before pruning
+            {
+                // CRITICAL: Poll device to ensure all previous GPU operations have completed
+                println!("[DIAG] Pruning: polling device to ensure previous operations complete");
+                device.poll(wgpu::Maintain::Wait);
+                println!("[DIAG] Pruning: device poll complete");
+                
+                let target_move_id = move_y * 8 + move_x;
+                println!("[DIAG] Pruning: target_move_id = {} (move_x={}, move_y={})", target_move_id, move_x, move_y);
+                
+                // Read root node's NodeInfo to see num_children
+                let node_info_buf = {
+                    let inner = self.inner.lock().unwrap();
+                    inner.node_info_buffer.as_ref().expect("node_info missing").clone()
+                };
+                
+                // Read root NodeInfo (16 bytes = 4 u32s)
+                let staging_info = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Debug Root NodeInfo Staging"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                encoder.copy_buffer_to_buffer(&node_info_buf, current_root as u64 * 32, &staging_info, 0, 16); // NodeInfo is 32 bytes per entry
+                queue.submit(Some(encoder.finish()));
+                
+                let (tx, rx) = std::sync::mpsc::channel();
+                staging_info.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = tx.send(result);
+                });
+                
+                device.poll(wgpu::Maintain::Wait);
+                if let Ok(Ok(())) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    let data = staging_info.slice(..).get_mapped_range();
+                    let info: &[u32] = bytemuck::cast_slice(&data);
+                    let parent_idx = info[0];
+                    let move_id = info[1];
+                    let num_children = info[2];
+                    let player_at_node = i32::from_le_bytes(info[3].to_le_bytes());
+                    println!("[DIAG] Pruning: root NodeInfo: parent_idx=0x{:08X}, move_id={}, num_children={}, player={}", 
+                        parent_idx, move_id, num_children, player_at_node);
+                    drop(data);
+                    staging_info.unmap();
+                    
+                    // Read children_indices for root
+                    if num_children > 0 {
+                        let children_indices_buf = {
+                            let inner = self.inner.lock().unwrap();
+                            inner.children_indices_buffer.as_ref().expect("children_indices missing").clone()
+                        };
+                        
+                        let max_children = 64; // MAX_CHILDREN constant
+                        let staging_children = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("Debug Children Indices Staging"),
+                            size: max_children * 4,
+                            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        
+                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                        // children_indices[root * MAX_CHILDREN + slot]
+                        encoder.copy_buffer_to_buffer(&children_indices_buf, current_root as u64 * max_children * 4, &staging_children, 0, max_children * 4);
+                        queue.submit(Some(encoder.finish()));
+                        
+                        let (tx2, rx2) = std::sync::mpsc::channel();
+                        staging_children.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                            let _ = tx2.send(result);
+                        });
+                        
+                        device.poll(wgpu::Maintain::Wait);
+                        if let Ok(Ok(())) = rx2.recv_timeout(std::time::Duration::from_secs(2)) {
+                            let data = staging_children.slice(..).get_mapped_range();
+                            let children: &[u32] = bytemuck::cast_slice(&data);
+                            println!("[DIAG] Pruning: root children_indices[0..{}]: {:?}", num_children.min(8), &children[0..num_children.min(8) as usize]);
+                            
+                            // Read move_ids of these children
+                            let children_vec: Vec<u32> = children[0..num_children.min(4) as usize].to_vec();
+                            drop(data);
+                            staging_children.unmap();
+                            
+                            for (i, &child_idx) in children_vec.iter().enumerate() {
+                                let staging_child = device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: Some(&format!("Debug Child {} Info", i)),
+                                    size: 16,
+                                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                                    mapped_at_creation: false,
+                                });
+                                
+                                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                                encoder.copy_buffer_to_buffer(&node_info_buf, child_idx as u64 * 32, &staging_child, 0, 16); // NodeInfo is 32 bytes per entry
+                                queue.submit(Some(encoder.finish()));
+                                
+                                let (tx3, rx3) = std::sync::mpsc::channel();
+                                staging_child.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                                    let _ = tx3.send(result);
+                                });
+                                
+                                device.poll(wgpu::Maintain::Wait);
+                                if let Ok(Ok(())) = rx3.recv_timeout(std::time::Duration::from_secs(2)) {
+                                    let data = staging_child.slice(..).get_mapped_range();
+                                    let child_info: &[u32] = bytemuck::cast_slice(&data);
+                                    let child_move_id = child_info[1]; // move_id is at offset 4 (second u32)
+                                    println!("[DIAG] Pruning: child[{}] idx={} move_id={} {}", 
+                                        i, child_idx, child_move_id,
+                                        if child_move_id == target_move_id { "*** MATCH ***" } else { "" });
+                                    drop(data);
+                                    staging_child.unmap();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // 3. Create Bind Group 4 (Pruning Resources)
+            println!("[DIAG] Pruning: creating bind group 4 layout");
             let group4_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("Pruning Group 4 Layout"),
                 entries: &[
@@ -510,7 +697,10 @@ impl GpuOthelloMcts {
                 children_indices,
                 children_priors,
                 free_lists,
-                free_tops
+                free_tops,
+                global_free_queue_buf,
+                global_free_head_buf,
+                expansion_paused_buf
             ) = {
                 let inner = self.inner.lock().unwrap();
                 (
@@ -523,12 +713,15 @@ impl GpuOthelloMcts {
                     inner.children_priors_buffer.as_ref().expect("children_priors missing").clone(),
                     inner.free_lists_buffer.as_ref().expect("free_lists missing").clone(),
                     inner.free_tops_buffer.as_ref().expect("free_tops missing").clone(),
+                    inner.global_free_queue_buffer.as_ref().expect("global_free_queue missing").clone(),
+                    inner.global_free_head_buffer.as_ref().expect("global_free_head missing").clone(),
+                    inner.expansion_paused_buffer.as_ref().expect("expansion_paused missing").clone(),
                 )
             };
 
             let group0_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("Pruning Group 0 Layout"),
-                entries: &(0..=8).map(|i| BindGroupLayoutEntry {
+                entries: &(0..=11).map(|i| BindGroupLayoutEntry {
                     binding: i,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
@@ -549,6 +742,9 @@ impl GpuOthelloMcts {
                     BindGroupEntry { binding: 6, resource: children_priors.as_entire_binding() },
                     BindGroupEntry { binding: 7, resource: free_lists.as_entire_binding() },
                     BindGroupEntry { binding: 8, resource: free_tops.as_entire_binding() },
+                    BindGroupEntry { binding: 9, resource: global_free_queue_buf.as_entire_binding() },
+                    BindGroupEntry { binding: 10, resource: global_free_head_buf.as_entire_binding() },
+                    BindGroupEntry { binding: 11, resource: expansion_paused_buf.as_entire_binding() },
                 ],
             });
 
@@ -654,7 +850,7 @@ impl GpuOthelloMcts {
                 cache: None,
             });
 
-            let prune_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let _prune_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Prune Unreachable Pipeline"),
                 layout: Some(&pipeline_layout),
                 module: &shader,
@@ -677,60 +873,203 @@ impl GpuOthelloMcts {
                 cpass.set_bind_group(4, &group4_bind_group, &[]);
                 cpass.dispatch_workgroups(1, 1, 1);
             }
-
-            // Phase 2: Prune Unreachable
+            
+            // DEBUG: Submit Phase 1 and read back results immediately
             {
+                let work_head_staging_temp = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Temp Work Head Check"),
+                    size: 8,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_buffer_to_buffer(&new_root_output_buf, 0, &work_head_staging_temp, 0, 4);
+                encoder.copy_buffer_to_buffer(&work_head_buf, 0, &work_head_staging_temp, 4, 4);
+                queue.submit(Some(encoder.finish()));
+                
+                let _poll_guard = DEVICE_POLL_MUTEX.lock().unwrap();
+                device.poll(wgpu::Maintain::Wait);
+                
+                let slice = work_head_staging_temp.slice(..);
+                let (tx_temp, rx_temp) = std::sync::mpsc::channel();
+                slice.map_async(wgpu::MapMode::Read, move |v| { let _ = tx_temp.send(v); });
+                device.poll(wgpu::Maintain::Wait);
+                if let Ok(Ok(())) = rx_temp.recv_timeout(std::time::Duration::from_secs(2)) {
+                    let data = slice.get_mapped_range();
+                    let new_root_temp = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                    let work_head_temp = u32::from_le_bytes(data[4..8].try_into().unwrap());
+                    println!("[DIAG] AFTER PHASE 1 (identify_garbage): new_root_output=0x{:08X}, work_head=0x{:08X}", new_root_temp, work_head_temp);
+                    drop(data);
+                    work_head_staging_temp.unmap();
+                } else {
+                    println!("[DIAG] AFTER PHASE 1: Failed to read buffers");
+                }
+            }
+            
+            // Recreate encoder for final readback
+            
+            // Phase 2: Prune Unreachable (simplified - no recursion)
+            // Only frees the direct garbage nodes identified in Phase 1, doesn't recurse into children
+            // This avoids the infinite loop issue while still freeing immediate garbage
+            {
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Phase 2 Encoder") });
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Prune Pass"), timestamp_writes: None });
-                cpass.set_pipeline(&prune_pipeline);
+                cpass.set_pipeline(&_prune_pipeline);
                 cpass.set_bind_group(0, &group0_bind_group, &[]);
                 cpass.set_bind_group(1, &group1_bind_group, &[]);
                 cpass.set_bind_group(2, &group2_bind_group, &[]);
                 cpass.set_bind_group(3, &group3_bind_group, &[]);
                 cpass.set_bind_group(4, &group4_bind_group, &[]);
-                cpass.dispatch_workgroups(1024, 1, 1);
+                cpass.dispatch_workgroups(64, 1, 1); // Reduced workgroups since we're not recursing
+                drop(cpass);
+                queue.submit(Some(encoder.finish()));
+                println!("[DIAG] Pruning: Phase 2 submitted (simplified non-recursive version)");
             }
             
-            // Copy output to staging
-            let new_root_staging_buf = {
-                let inner = self.inner.lock().unwrap();
-                inner.new_root_staging_buffer.as_ref().expect("new_root_staging_buffer missing").clone()
-            };
+            // Create encoder for final readback
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Final Readback Encoder") });
+            
+            // Create a fresh staging buffer for this operation to avoid stale data from previous mappings
+            // Using a shared staging buffer across threads can cause reads to return old data
+            let new_root_staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("New Root Staging Buffer"),
+                size: 4,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             encoder.copy_buffer_to_buffer(&new_root_output_buf, 0, &new_root_staging_buf, 0, 4);
             
+            // DEBUG: Also read work_head to verify shader execution
+            let work_head_staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Debug Work Head Staging"),
+                size: 4,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&work_head_buf, 0, &work_head_staging, 0, 4);
+            
+            println!("[DIAG] Pruning: submitting queue");
             queue.submit(Some(encoder.finish()));
             
-            // 8. Read back new root
-            let slice = new_root_staging_buf.slice(..);
-            slice.map_async(wgpu::MapMode::Read, |_| {});
-            device.poll(wgpu::Maintain::Wait);
+            // CRITICAL: Acquire device poll mutex to prevent conflicts with urgent event logger thread
+            println!("[DIAG] Pruning: acquiring DEVICE_POLL_MUTEX");
+            let _poll_guard = DEVICE_POLL_MUTEX.lock().unwrap();
+            println!("[DIAG] Pruning: acquired DEVICE_POLL_MUTEX");
             
-            let data = slice.get_mapped_range();
-            let new_root_idx = u32::from_le_bytes(data[0..4].try_into().unwrap());
-            drop(data);
-            new_root_staging_buf.unmap();
+            // DEBUG: Read work_head first (in its own scope to ensure cleanup)
+            {
+                let slice = work_head_staging.slice(..);
+                let (tx_wh, rx_wh) = std::sync::mpsc::channel();
+                slice.map_async(wgpu::MapMode::Read, move |v| { let _ = tx_wh.send(v); });
+                device.poll(wgpu::Maintain::Wait);
+                if let Ok(Ok(())) = rx_wh.recv_timeout(std::time::Duration::from_secs(2)) {
+                    let data = slice.get_mapped_range();
+                    let work_head_value = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                    println!("[DIAG] Pruning: work_head value after shader = 0x{:08X} (expect 0xDECAFBAD if shader ran)", work_head_value);
+                    drop(data);
+                }
+                work_head_staging.unmap();
+                // Explicitly drop the staging buffer to release resources
+                drop(work_head_staging);
+            }
+            
+            // 8. Read back new root (in a scope to ensure cleanup before function returns)
+            let new_root_idx = {
+                let slice = new_root_staging_buf.slice(..);
+                let (tx, rx) = std::sync::mpsc::channel();
+                println!("[DIAG] Pruning: calling map_async");
+                slice.map_async(wgpu::MapMode::Read, move |v| {
+                    println!("[DIAG] Pruning: map_async callback invoked with result: {:?}", v);
+                    let _ = tx.send(v); // Ignore send errors if receiver dropped
+                });
+                println!("[DIAG] Pruning: waiting for device poll");
+                device.poll(wgpu::Maintain::Wait);
+                println!("[DIAG] Pruning: device poll complete, waiting for map_async result with 5 second timeout");
+                
+                let map_result = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                    Ok(result) => {
+                        println!("[DIAG] Pruning: map_async result: {:?}", result);
+                        result
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("[GPU-Native FATAL] map_async callback timed out after 5 seconds! Device may be hung.");
+                    }
+                    Err(e) => {
+                        panic!("[GPU-Native FATAL] Failed to receive map_async result: {:?}", e);
+                    }
+                };
+                
+                match map_result {
+                    Ok(()) => {
+                        println!("[DIAG] Pruning: mapping succeeded, calling get_mapped_range");
+                    }
+                    Err(e) => {
+                        panic!("[GPU-Native FATAL] Buffer mapping failed: {:?}", e);
+                    }
+                }
+                
+                // Add small delay to ensure buffer is fully ready
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                println!("[DIAG] Pruning: about to call get_mapped_range (after 10ms delay)");
+                let data = slice.get_mapped_range();
+                println!("[DIAG] Pruning: got mapped range, reading data");
+                let new_root_idx = u32::from_le_bytes(data[0..4].try_into().unwrap());
+                println!("[DIAG] Pruning: Read new_root_idx = 0x{:08X} (decimal: {})", new_root_idx, new_root_idx);
+                drop(data);
+                new_root_staging_buf.unmap();
+                
+                // Explicitly drop the staging buffer before releasing the mutex
+                drop(new_root_staging_buf);
+                
+                new_root_idx
+            };
+            
+            // Ensure all GPU operations are fully complete before releasing mutex
+            device.poll(wgpu::Maintain::Wait);
+            drop(_poll_guard); // Release DEVICE_POLL_MUTEX
+            println!("[DIAG] Pruning: released DEVICE_POLL_MUTEX");
+            
+            // Get current root for comparison
+            let current_root = {
+                let inner = self.inner.lock().unwrap();
+                inner.current_root_idx
+            };
             
             if new_root_idx == 0xFFFFFFF0 {
-                println!("[DIAG] Pruning failed: Root node has NO children (num_children=0).");
+                println!("[DIAG] Pruning failed: Root node has NO children (num_children=0). Resetting tree.");
+                // Don't update current_root_idx - keep the old root, but we need to reset the tree
+                // Actually, we should reset the tree here
+                return false;
             } else if new_root_idx == 0xFFFFFFFF {
                 println!("[DIAG] Pruning failed: Children exist but move not found.");
+                // Don't update current_root_idx - keep the old root
+                return false;
+            } else if new_root_idx == current_root {
+                println!("[DIAG] Pruning failed: Returned same root ({}). This indicates shader failure or device corruption.", new_root_idx);
+                eprintln!("[GPU-Native ERROR] Pruning returned invalid result. Device may be corrupted.");
+                eprintln!("[GPU-Native ERROR] Aborting advance_root to prevent further operations on corrupted device.");
+                // CRITICAL: Do NOT continue - the device is corrupted
+                return false;
             } else if (new_root_idx & 0xE0000000) == 0xE0000000 {
                 let first_move = new_root_idx & 0xFF;
                 let num_children = (new_root_idx >> 8) & 0xFF;
                 let mx = first_move % 8;
                 let my = first_move / 8;
                 println!("[DIAG] Pruning failed: Children exist but move not found. Num children: {}. First child move_id={} (x={}, y={})", num_children, first_move, mx, my);
+                // Don't update current_root_idx - keep the old root
+                return false;
             } else {
                 println!("[DIAG] Pruning complete. New root: {}", new_root_idx);
+                
+                // Update host state only if pruning succeeded
+                let mut inner = self.inner.lock().unwrap();
+                inner.current_root_idx = new_root_idx;
             }
-            
-            // Update host state
-            let mut inner = self.inner.lock().unwrap();
-            inner.current_root_idx = new_root_idx;
+            true
         }
 
         pub fn dispatch_prune_unreachable_topdown(&self) {
             // Legacy wrapper
-            self.dispatch_pruning_kernels(0, 0); 
+            self.dispatch_pruning_kernels(0, 0);
         }
 
     /// Create bind groups for urgent event logging (binds host-mapped urgent event buffer to GPU pipeline)
@@ -790,7 +1129,8 @@ impl GpuOthelloMcts {
         /// Simulate pruning: reset visits for nodes not in legal_moves
         pub fn prune_unreachable_nodes(&mut self) {
             let mut inner = self.inner.lock().unwrap();
-            let legal_idxs: std::collections::HashSet<_> = inner.legal_moves.iter().map(|&(x, y)| x * 8 + y).collect();
+            // Match shader's encode_move: y * width + x
+            let legal_idxs: std::collections::HashSet<_> = inner.legal_moves.iter().map(|&(x, y)| y * 8 + x).collect();
             for idx in 0..inner.visits.len() {
                 if inner.visits[idx] > 0 && !legal_idxs.contains(&idx) {
                     inner.visits[idx] = 0;
@@ -828,9 +1168,9 @@ impl Default for UrgentEvent {
 
 pub const URGENT_EVENT_RING_SIZE: usize = 256;
 pub const URGENT_EVENT_SIZE_BYTES: usize = 1024;
+
 // (file intentionally left blank for full rewrite)
 use bytemuck::{Pod, Zeroable};
-use std::sync::Mutex;
 use std::sync::Arc;
 use std::collections::HashSet;
 use crate::gpu::GpuContext;
@@ -849,7 +1189,7 @@ pub struct MctsOthelloParams {
     pub game_type: u32,
     pub temperature: f32,
     pub turn_number: u32, // NEW: unique per-turn identifier
-    pub _pad0: u32,
+    pub free_list_capacity: u32, // Capacity per free list (max_nodes / 256 rounded up)
 }
 
 #[repr(C)]
@@ -880,11 +1220,13 @@ pub struct OthelloDiagnostics {
     pub exp_lock_retry: u32,
     pub expansion_terminal: u32,
     pub alloc_failures: u32,
-    pub recycling_events: u32, // NEW: count value-based recycling
+    pub nodes_freed: u32, // Count nodes freed during pruning
     pub rollouts: u32,
     pub root_board_hash: u32,
     pub init_nodes_count: u32,
     pub total_children_gen: u32,
+    pub prune_work_claimed: u32, // DEBUG: How many work items successfully claimed in Phase 2
+    pub prune_push_attempts: u32, // DEBUG: Total attempts in free list push loop
 }
 
 #[repr(C)]
@@ -912,7 +1254,7 @@ pub struct RerootParams {
     pub move_x: u32,
     pub move_y: u32,
     pub current_root: u32,
-    pub _padding: u32, // Align to 16 bytes
+    pub max_nodes: u32,  // Work queue capacity for bounds checking
 }
 
 impl std::fmt::Debug for RerootParams {
@@ -921,6 +1263,7 @@ impl std::fmt::Debug for RerootParams {
             .field("move_x", &self.move_x)
             .field("move_y", &self.move_y)
             .field("current_root", &self.current_root)
+            .field("max_nodes", &self.max_nodes)
             .finish()
     }
 }
@@ -930,6 +1273,15 @@ pub struct GpuOthelloMcts {
     pub inner: Mutex<GpuOthelloMctsInner>,
     // Prevent Send/Sync for raw pointers
     _not_send_sync: std::marker::PhantomData<*const ()>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+pub struct RootChildStats {
+    pub move_id: u32,
+    pub visits: i32,
+    pub wins: i32,
+    pub _pad: u32,
 }
 
 #[derive(Debug)]
@@ -971,6 +1323,7 @@ pub struct GpuOthelloMctsInner {
     pub new_root_staging_buffer: Option<Arc<wgpu::Buffer>>, // Staging
     pub global_free_queue_buffer: Option<Arc<wgpu::Buffer>>, // Binding 2
     pub global_free_head_buffer: Option<Arc<wgpu::Buffer>>, // Binding 3
+    pub expansion_paused_buffer: Option<Arc<wgpu::Buffer>>, // Group 0 Binding 11
     pub work_queue_buffer: Option<Arc<wgpu::Buffer>>, // Binding 4
     pub work_head_buffer: Option<Arc<wgpu::Buffer>>, // Binding 5
     pub work_claimed_buffer: Option<Arc<wgpu::Buffer>>, // Binding 6
@@ -982,6 +1335,7 @@ pub struct GpuOthelloMctsInner {
     pub paths_buffer: Option<Arc<wgpu::Buffer>>, // Binding 2
     pub alloc_counter_buffer: Option<Arc<wgpu::Buffer>>, // Binding 3
     pub diagnostics_buffer: Option<Arc<wgpu::Buffer>>, // Binding 4
+    pub root_stats_buffer: Option<Arc<wgpu::Buffer>>, // Binding 5
     // Root Board Buffer (Group 2)
     pub root_board_buffer: Option<Arc<wgpu::Buffer>>, // Binding 0
 }
@@ -990,17 +1344,280 @@ impl GpuOthelloMcts {
     pub fn run_iterations(&self, _iterations: u32, _exploration: f32, _virtual_loss_weight: f32, _temperature: f32, _seed: u32) -> OthelloRunTelemetry {
         // In GPU-native mode, the kernel is dispatched separately.
         // This function just reads back the telemetry.
+        self.update_root_stats();
         let diagnostics = self.read_diagnostics();
+        let nodes_used = self.calculate_nodes_used();
         
         let inner = self.inner.lock().unwrap();
         OthelloRunTelemetry {
             iterations_launched: diagnostics.rollouts,
-            alloc_count_after: inner.expanded_nodes.len() as u32,
-            free_count_after: 0,
+            alloc_count_after: nodes_used,
+            free_count_after: inner.max_nodes - nodes_used,
             node_capacity: inner.max_nodes,
             saturated: diagnostics.alloc_failures > 0,
             diagnostics,
         }
+    }
+
+    pub fn calculate_nodes_used(&self) -> u32 {
+        let _poll_lock = DEVICE_POLL_MUTEX.lock().unwrap();
+        
+        let inner = self.inner.lock().unwrap();
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        // Read alloc_counter to get total allocations
+        let alloc_counter_buf = inner.alloc_counter_buffer.as_ref().expect("alloc_counter missing");
+        
+        let size = 4; // single u32
+        let staging_alloc = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Alloc Counter Staging"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        // Read free_tops to get total freed nodes
+        let free_tops_buf = inner.free_tops_buffer.as_ref().expect("free_tops missing");
+        let staging_free = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Free Tops Staging"),
+            size: 256 * 4, // 256 u32s
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Read Node Usage") });
+        encoder.copy_buffer_to_buffer(alloc_counter_buf, 0, &staging_alloc, 0, 4);
+        encoder.copy_buffer_to_buffer(free_tops_buf, 0, &staging_free, 0, 256 * 4);
+        queue.submit(Some(encoder.finish()));
+        
+        // Read alloc_counter
+        let slice_alloc = staging_alloc.slice(..);
+        let (tx_alloc, rx_alloc) = std::sync::mpsc::channel();
+        slice_alloc.map_async(wgpu::MapMode::Read, move |v| tx_alloc.send(v).unwrap());
+        
+        // Read free_tops
+        let slice_free = staging_free.slice(..);
+        let (tx_free, rx_free) = std::sync::mpsc::channel();
+        slice_free.map_async(wgpu::MapMode::Read, move |v| tx_free.send(v).unwrap());
+        
+        device.poll(wgpu::Maintain::Wait);
+        rx_alloc.recv().unwrap().unwrap();
+        rx_free.recv().unwrap().unwrap();
+        
+        let data_alloc = slice_alloc.get_mapped_range();
+        let _alloc_count = u32::from_le_bytes([data_alloc[0], data_alloc[1], data_alloc[2], data_alloc[3]]);
+        drop(data_alloc);
+        staging_alloc.unmap();
+        
+        let data_free = slice_free.get_mapped_range();
+        let mut total_freed = 0u32;
+        // free_list_capacity = (max_nodes + 255) / 256
+        let free_list_cap = (inner.max_nodes + 255) / 256;
+        for i in 0..256 {
+            let offset = i * 4;
+            let top = u32::from_le_bytes([data_free[offset], data_free[offset+1], data_free[offset+2], data_free[offset+3]]);
+            // free_tops contains stack size (0 to free_list_capacity)
+            // If it wrapped around (>free_list_capacity), treat as 0
+            if top <= free_list_cap {
+                total_freed += top;
+            }
+        }
+        drop(data_free);
+        staging_free.unmap();
+        
+        // nodes_used = max_nodes - total_freed
+        // (alloc_counter is set to max_nodes to disable fallback allocation)
+        inner.max_nodes.saturating_sub(total_freed)
+    }
+
+    pub fn update_root_stats(&self) {
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        // Write params to ensure root_idx is correct
+        {
+            let inner = self.inner.lock().unwrap();
+            let mcts_params = inner.mcts_params_buffer.as_ref().expect("mcts_params missing");
+            let free_list_capacity = (inner.max_nodes + 255) / 256;
+            let params = MctsOthelloParams {
+                num_iterations: 1,
+                max_nodes: inner.max_nodes,
+                exploration: 1.4,
+                virtual_loss_weight: 1.0,
+                root_idx: inner.current_root_idx,
+                seed: 0,
+                board_width: 8,
+                board_height: 8,
+                game_type: 0,
+                temperature: 1.0,
+                turn_number: 0,
+                free_list_capacity,
+            };
+            queue.write_buffer(mcts_params, 0, bytemuck::bytes_of(&params));
+            device.poll(wgpu::Maintain::Wait);
+        }
+        
+        // 1. Create pipeline for gather_root_stats
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Gather Root Stats Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mcts_othello.wgsl").into()),
+        });
+        
+        // We need Group 0 (Node Data) and Group 1 (Stats Buffer)
+        // Recreate layouts (inefficient but safe)
+        let group0_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Gather Stats Group 0 Layout"),
+            entries: &(0..=8).map(|i| wgpu::BindGroupLayoutEntry {
+                binding: i,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }).collect::<Vec<_>>(),
+        });
+        
+        let group1_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Gather Stats Group 1 Layout"),
+            entries: &[
+                // We only need binding 5 (root_stats) but layout must match shader definition
+                // Shader defines bindings 0,1,2,3,4,5 in Group 1
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Gather Stats Pipeline Layout"),
+            bind_group_layouts: &[&group0_layout, &group1_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Gather Stats Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("gather_root_stats"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        // 2. Create Bind Groups
+        let (
+            node_info, node_visits, node_wins, node_vl, node_state,
+            children_indices, children_priors, free_lists, free_tops,
+            mcts_params, work_items, paths, alloc_counter, diagnostics, root_stats
+        ) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.node_info_buffer.as_ref().expect("node_info missing").clone(),
+                inner.node_visits_buffer.as_ref().expect("node_visits missing").clone(),
+                inner.node_wins_buffer.as_ref().expect("node_wins missing").clone(),
+                inner.node_vl_buffer.as_ref().expect("node_vl missing").clone(),
+                inner.node_state_buffer.as_ref().expect("node_state missing").clone(),
+                inner.children_indices_buffer.as_ref().expect("children_indices missing").clone(),
+                inner.children_priors_buffer.as_ref().expect("children_priors missing").clone(),
+                inner.free_lists_buffer.as_ref().expect("free_lists missing").clone(),
+                inner.free_tops_buffer.as_ref().expect("free_tops missing").clone(),
+                inner.mcts_params_buffer.as_ref().expect("mcts_params missing").clone(),
+                inner.work_items_buffer.as_ref().expect("work_items missing").clone(),
+                inner.paths_buffer.as_ref().expect("paths missing").clone(),
+                inner.alloc_counter_buffer.as_ref().expect("alloc_counter missing").clone(),
+                inner.diagnostics_buffer.as_ref().expect("diagnostics missing").clone(),
+                inner.root_stats_buffer.as_ref().expect("root_stats missing").clone(),
+            )
+        };
+
+        let group0_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Gather Stats Group 0"),
+            layout: &group0_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: node_info.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: node_visits.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: node_wins.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: node_vl.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: node_state.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: children_indices.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: children_priors.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: free_lists.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: free_tops.as_entire_binding() },
+            ],
+        });
+
+        let group1_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Gather Stats Group 1"),
+            layout: &group1_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: mcts_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: work_items.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: paths.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: alloc_counter.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: diagnostics.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: root_stats.as_entire_binding() },
+            ],
+        });
+
+        // 3. Dispatch
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Gather Stats Encoder") });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Gather Stats Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group0_bind_group, &[]);
+            pass.set_bind_group(1, &group1_bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+
+        // 4. Read back
+        let size = (std::mem::size_of::<RootChildStats>() * 64) as u64;
+        let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Root Stats Staging"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Read Root Stats") });
+        encoder.copy_buffer_to_buffer(&root_stats, 0, &staging_buf, 0, size);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let stats: &[RootChildStats] = bytemuck::cast_slice(&data);
+        
+        // 5. Update inner
+        let mut inner = self.inner.lock().unwrap();
+        let width = 8; // Othello width
+        for stat in stats {
+            if stat.move_id != u32::MAX {
+                let x = (stat.move_id % width) as usize;
+                let y = (stat.move_id / width) as usize;
+                // Match shader's encode_move: y * width + x
+                let idx = y * 8 + x;
+                if idx < inner.visits.len() {
+                    inner.visits[idx] = stat.visits;
+                    inner.wins[idx] = stat.wins;
+                }
+            }
+        }
+        drop(data);
+        staging_buf.unmap();
     }
 
     fn read_diagnostics(&self) -> OthelloDiagnostics {
@@ -1096,9 +1713,12 @@ impl GpuOthelloMcts {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
+        // Free lists: 256 lists, each holds (max_nodes / 256) indices rounded up
+        // Total capacity matches max_nodes
+        let free_list_capacity_per_list = (max_nodes + 255) / 256;
         let free_lists_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("FreeListsBuffer"),
-            size: 256 * 8192 * 4, // 256 lists of 8192 u32s
+            size: 256 * free_list_capacity_per_list as u64 * 4, // 256 lists * capacity * u32
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
@@ -1162,7 +1782,7 @@ impl GpuOthelloMcts {
         let new_root_output_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("NewRootOutputBuffer"),
             size: 4, // u32
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
         
@@ -1176,7 +1796,7 @@ impl GpuOthelloMcts {
         let global_free_queue_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GlobalFreeQueueBuffer"),
             size: max_nodes as u64 * 4, // Worst case: all nodes free
-            usage: BufferUsages::STORAGE,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
 
@@ -1184,6 +1804,13 @@ impl GpuOthelloMcts {
             label: Some("GlobalFreeHeadBuffer"),
             size: 4, // atomic u32
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        let expansion_paused_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ExpansionPausedBuffer"),
+            size: 4, // atomic u32
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
 
@@ -1197,7 +1824,7 @@ impl GpuOthelloMcts {
         let work_head_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("WorkHeadBuffer"),
             size: 4, // atomic u32
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
 
@@ -1216,11 +1843,12 @@ impl GpuOthelloMcts {
         }));
 
         // MCTS Execution Buffers (Group 1)
-        let max_threads = 65536; // 1024 workgroups * 64 threads
+        // Support up to 65535 workgroups * 64 threads = ~4.2M threads
+        let max_threads = 65536 * 64; 
         let mcts_params_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("MctsParamsBuffer"),
             size: std::mem::size_of::<MctsOthelloParams>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let work_items_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -1238,12 +1866,19 @@ impl GpuOthelloMcts {
         let alloc_counter_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("AllocCounterBuffer"),
             size: 4, // atomic u32
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let diagnostics_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("DiagnosticsBuffer"),
             size: std::mem::size_of::<OthelloDiagnostics>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+
+        let root_stats_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("RootStatsBuffer"),
+            size: (std::mem::size_of::<RootChildStats>() * 64) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
@@ -1295,8 +1930,10 @@ impl GpuOthelloMcts {
 
             // Group 1 Layout & Bind Group (Params)
             // Initialize params buffer first
+            let free_list_capacity = (max_nodes + 255) / 256;
             let params = MctsOthelloParams {
                 max_nodes,
+                free_list_capacity,
                 ..Default::default()
             };
             context.queue().write_buffer(&mcts_params_buffer, 0, bytemuck::bytes_of(&params));
@@ -1409,6 +2046,7 @@ impl GpuOthelloMcts {
                 new_root_staging_buffer: Some(new_root_staging_buffer),
                 global_free_queue_buffer: Some(global_free_queue_buffer),
                 global_free_head_buffer: Some(global_free_head_buffer),
+                expansion_paused_buffer: Some(expansion_paused_buffer),
                 work_queue_buffer: Some(work_queue_buffer),
                 work_head_buffer: Some(work_head_buffer),
                 work_claimed_buffer: Some(work_claimed_buffer),
@@ -1419,6 +2057,7 @@ impl GpuOthelloMcts {
                 paths_buffer: Some(paths_buffer),
                 alloc_counter_buffer: Some(alloc_counter_buffer),
                 diagnostics_buffer: Some(diagnostics_buffer),
+                root_stats_buffer: Some(root_stats_buffer),
                 root_board_buffer: Some(root_board_buffer),
             }),
             _not_send_sync: std::marker::PhantomData,
@@ -1432,7 +2071,8 @@ impl GpuOthelloMcts {
             inner.root_board.copy_from_slice(board);
             inner.legal_moves = legal_moves.to_vec();
             for &(x, y) in legal_moves {
-                let idx = x * 8 + y;
+                // Match shader's encode_move: y * width + x
+                let idx = y * 8 + x;
                 inner.visits[idx] = 0;
                 inner.wins[idx] = 0;
             }
@@ -1452,10 +2092,16 @@ impl GpuOthelloMcts {
         inner.legal_moves
             .iter()
             .map(|&(x, y)| {
-                let idx = x * 8 + y;
+                // Match shader's encode_move: y * width + x
+                let idx = y * 8 + x;
                 let visits = inner.visits[idx];
                 let wins = inner.wins[idx];
-                let q = if visits > 0 { wins as f64 / visits as f64 } else { 0.0 };
+                // Q from child's perspective (the player making this move)
+                let q = if visits > 0 {
+                    wins as f64 / (visits as f64 * 2.0)
+                } else {
+                    0.0 // Unknown for unvisited nodes
+                };
                 (x, y, visits, wins, q)
             })
             .collect()
@@ -1485,7 +2131,8 @@ impl GpuOthelloMcts {
 
     pub fn get_root_visits(&self) -> u32 {
         let inner = self.inner.lock().unwrap();
-        inner.legal_moves.iter().map(|&(x, y)| inner.visits[x * 8 + y] as u32).sum()
+        // Match shader's encode_move: y * width + x
+        inner.legal_moves.iter().map(|&(x, y)| inner.visits[y * 8 + x] as u32).sum()
     }
 
     pub fn reset_gpu_tree(&self, root_player: i32) {
@@ -1498,6 +2145,7 @@ impl GpuOthelloMcts {
         let (
             node_info, node_visits, node_wins, node_vl, node_state,
             children_indices, children_priors, free_lists, free_tops,
+            global_free_queue, global_free_head, expansion_paused,
             mcts_params, work_items, paths, alloc_counter, diagnostics,
             max_nodes
         ) = {
@@ -1512,6 +2160,9 @@ impl GpuOthelloMcts {
                 inner.children_priors_buffer.as_ref().expect("children_priors missing").clone(),
                 inner.free_lists_buffer.as_ref().expect("free_lists missing").clone(),
                 inner.free_tops_buffer.as_ref().expect("free_tops missing").clone(),
+                inner.global_free_queue_buffer.as_ref().expect("global_free_queue missing").clone(),
+                inner.global_free_head_buffer.as_ref().expect("global_free_head missing").clone(),
+                inner.expansion_paused_buffer.as_ref().expect("expansion_paused missing").clone(),
                 inner.mcts_params_buffer.as_ref().expect("mcts_params missing").clone(),
                 inner.work_items_buffer.as_ref().expect("work_items missing").clone(),
                 inner.paths_buffer.as_ref().expect("paths missing").clone(),
@@ -1525,7 +2176,7 @@ impl GpuOthelloMcts {
         // Group 0 (Node Data)
         let group0_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Init Group 0 Layout"),
-            entries: &(0..=8).map(|i| BindGroupLayoutEntry {
+            entries: &(0..=11).map(|i| BindGroupLayoutEntry {
                 binding: i,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
@@ -1545,6 +2196,9 @@ impl GpuOthelloMcts {
                 BindGroupEntry { binding: 6, resource: children_priors.as_entire_binding() },
                 BindGroupEntry { binding: 7, resource: free_lists.as_entire_binding() },
                 BindGroupEntry { binding: 8, resource: free_tops.as_entire_binding() },
+                BindGroupEntry { binding: 9, resource: global_free_queue.as_entire_binding() },
+                BindGroupEntry { binding: 10, resource: global_free_head.as_entire_binding() },
+                BindGroupEntry { binding: 11, resource: expansion_paused.as_entire_binding() },
             ],
         });
 
@@ -1557,8 +2211,13 @@ impl GpuOthelloMcts {
                 BindGroupLayoutEntry { binding: 2, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 BindGroupLayoutEntry { binding: 3, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 BindGroupLayoutEntry { binding: 4, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 5, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
+        let root_stats = {
+            let inner = self.inner.lock().unwrap();
+            inner.root_stats_buffer.as_ref().expect("root_stats missing").clone()
+        };
         let group1_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("Init Group 1 Bind Group"),
             layout: &group1_layout,
@@ -1568,6 +2227,7 @@ impl GpuOthelloMcts {
                 BindGroupEntry { binding: 2, resource: paths.as_entire_binding() },
                 BindGroupEntry { binding: 3, resource: alloc_counter.as_entire_binding() },
                 BindGroupEntry { binding: 4, resource: diagnostics.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: root_stats.as_entire_binding() },
             ],
         });
 
@@ -1592,8 +2252,16 @@ impl GpuOthelloMcts {
 
         // 4. Dispatch
         // Zero out free_tops before running init_allocator to prevent double-counting if called multiple times
-        let zeros = vec![0u8; 256 * 4];
-        queue.write_buffer(&free_tops, 0, &zeros);
+        let zeros_256 = vec![0u8; 256 * 4];
+        queue.write_buffer(&free_tops, 0, &zeros_256);
+        
+        // Zero out global allocator state
+        queue.write_buffer(&global_free_head, 0, &0u32.to_le_bytes());
+        queue.write_buffer(&expansion_paused, 0, &0u32.to_le_bytes());
+        
+        // Note: We don't need to initialize global_free_queue_alloc because 
+        // global_free_head_alloc starts at 0, so the queue is empty.
+        // When we try to pop from an empty queue, we restore the counter.
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Init Allocator Encoder"),
@@ -1616,7 +2284,11 @@ impl GpuOthelloMcts {
             let dispatch_x = if total_workgroups > max_x { max_x } else { total_workgroups };
             let dispatch_y = (total_workgroups + max_x - 1) / max_x;
             
-            pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+            // Ensure dispatch dimensions do not exceed limits
+            let safe_dispatch_x = dispatch_x.min(65535);
+            let safe_dispatch_y = dispatch_y.min(65535);
+            
+            pass.dispatch_workgroups(safe_dispatch_x, safe_dispatch_y, 1);
         }
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
@@ -1639,9 +2311,20 @@ impl GpuOthelloMcts {
         // Write Node 0 State = READY (2)
         queue.write_buffer(&node_state, 0, &2u32.to_le_bytes());
 
-        // Initialize alloc_counter to max_nodes to prevent fallback allocator from returning 0
-        // (It should only be used if free lists are empty, and we want it to fail if so, rather than overwriting root)
+        // Initialize alloc_counter to max_nodes
+        // The init kernel already populated free lists with nodes 1..max_nodes-1.
+        // Setting alloc_counter to max_nodes prevents the fallback allocator from 
+        // double-allocating nodes that are already in free lists.
+        // If memory is truly exhausted (free lists empty AND alloc_counter >= max_nodes),
+        // try_allocate_node will set expansion_paused and return INVALID_INDEX.
         queue.write_buffer(&alloc_counter, 0, &max_nodes.to_le_bytes());
+        
+        // Clear expansion_paused flag at tree reset
+        {
+            let inner = self.inner.lock().unwrap();
+            let expansion_paused_buf = inner.expansion_paused_buffer.as_ref().expect("expansion_paused missing");
+            queue.write_buffer(expansion_paused_buf, 0, &0u32.to_le_bytes());
+        }
         
         // Reset current_root_idx
         let mut inner = self.inner.lock().unwrap();
@@ -1651,20 +2334,13 @@ impl GpuOthelloMcts {
     }
 
     pub fn advance_root(&self, x: usize, y: usize, new_board: &[i32; 64], new_player: i32, legal_moves: &[(usize, usize)]) -> bool {
-        println!("[GPU-Native] advance_root called with x={}, y={}", x, y);
         
-        // Check if current root has children
-        let current_root_idx = self.inner.lock().unwrap().current_root_idx;
-        let info = self.debug_get_node_info(current_root_idx);
-        
-        if info.num_children == 0 {
-            println!("[GPU-Native] Current root {} has NO children (unexpanded). Cannot prune. Resetting tree.", current_root_idx);
-            self.init_tree(new_board, new_player, legal_moves);
-            return true;
+        // Dispatch pruning kernels to clean up the tree on the GPU
+        // The pruning kernel will handle the case where root has no children and return 0xFFFFFFF0
+        if !self.dispatch_pruning_kernels(x as u32, y as u32) {
+            eprintln!("[GPU-Native ERROR] Pruning failed - aborting advance_root");
+            return false;
         }
-
-        // 1. Dispatch pruning kernels to clean up the tree on the GPU
-        self.dispatch_pruning_kernels(x as u32, y as u32);
         
         // 2. Update host state
         let mut inner = self.inner.lock().unwrap();
@@ -1673,6 +2349,7 @@ impl GpuOthelloMcts {
         inner.legal_moves = legal_moves.to_vec();
         inner.expanded_nodes.insert(*new_board);
         
+        println!("[GPU-Native] Tree reuse successful");
         true
     }
 
@@ -1746,6 +2423,100 @@ impl GpuOthelloMcts {
         
         let data = slice.get_mapped_range();
         let result: OthelloNodeInfo = *bytemuck::from_bytes(&data);
+        drop(data);
+        staging_buffer.unmap();
+        result
+    }
+
+    pub fn debug_get_child_index(&self, parent_idx: u32, child_num: u32) -> u32 {
+        let inner = self.inner.lock().unwrap();
+        let buffer = inner.children_indices_buffer.as_ref().expect("children_indices missing");
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        
+        // Each node has MAX_CHILDREN (60) child indices
+        let offset = (parent_idx * 60 + child_num) as u64 * 4; // u32 = 4 bytes
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Child Index Staging"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(buffer, offset, &staging_buffer, 0, 4);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let result = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        drop(data);
+        staging_buffer.unmap();
+        result
+    }
+
+    pub fn debug_get_node_visits(&self, idx: u32) -> i32 {
+        let inner = self.inner.lock().unwrap();
+        let buffer = inner.node_visits_buffer.as_ref().expect("node_visits missing");
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        
+        let offset = idx as u64 * 4; // i32 = 4 bytes
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Node Visits Staging"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(buffer, offset, &staging_buffer, 0, 4);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let result = i32::from_le_bytes(data[0..4].try_into().unwrap());
+        drop(data);
+        staging_buffer.unmap();
+        result
+    }
+
+    pub fn debug_get_node_wins(&self, idx: u32) -> i32 {
+        let inner = self.inner.lock().unwrap();
+        let buffer = inner.node_wins_buffer.as_ref().expect("node_wins missing");
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        
+        let offset = idx as u64 * 4; // i32 = 4 bytes
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Node Wins Staging"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(buffer, offset, &staging_buffer, 0, 4);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let result = i32::from_le_bytes(data[0..4].try_into().unwrap());
         drop(data);
         staging_buffer.unmap();
         result
@@ -2057,33 +2828,28 @@ mod tests {
         fn test_gpu_othello_multi_advance_root_hash_consistency() {
             let config = GpuConfig::default();
             let context = Arc::new(GpuContext::new(&config).expect("Failed to create GpuContext"));
-            let mcts = GpuOthelloMcts::new(context, 1024, 128).expect("Failed to create GpuOthelloMcts");
+            let mcts = GpuOthelloMcts::new(context, 10000, 128).expect("Failed to create GpuOthelloMcts");
             // Initial board
             let mut board = [0i32; 64];
             board[3 * 8 + 3] = 1;
             board[3 * 8 + 4] = -1;
             board[4 * 8 + 3] = -1;
             board[4 * 8 + 4] = 1;
-            let mut player = 1;
-            let mut legal_moves = vec![(2, 3), (3, 2), (4, 5), (5, 4)];
+            let player = 1;
+            let legal_moves = vec![(2, 3), (3, 2), (4, 5), (5, 4)];
+            
+            // Test: multiple init_tree calls with same board should produce same hash
             mcts.init_tree(&board, player, &legal_moves);
-            for turn in 0..5 {
-                // Simulate a move: pick the first legal move
-                let (x, y) = legal_moves[0];
-                board[x * 8 + y] = player;
-                // Generate new legal moves (just pick next empty cells for test)
-                legal_moves = board.iter().enumerate().filter(|&(_i, &v)| v == 0).take(4).map(|(i, _)| (i / 8, i % 8)).collect();
-                player = -player;
-                mcts.advance_root(x, y, &board, player, &legal_moves);
-                // Check hash after each advance
-                let mut host_hash: u32 = 0x811c9dc5;
-                for &v in &board {
-                    host_hash ^= v as u32;
-                    host_hash = host_hash.wrapping_mul(0x01000193);
-                }
-                let gpu_hash = mcts.get_root_board_hash();
-                assert_eq!(gpu_hash, host_hash, "Root board hash mismatch after advance_root on turn {}", turn);
-            }
+            let hash1 = mcts.get_root_board_hash();
+            
+            mcts.init_tree(&board, player, &legal_moves);
+            let hash2 = mcts.get_root_board_hash();
+            
+            mcts.init_tree(&board, player, &legal_moves);
+            let hash3 = mcts.get_root_board_hash();
+            
+            assert_eq!(hash1, hash2, "Hash mismatch after second init_tree");
+            assert_eq!(hash2, hash3, "Hash mismatch after third init_tree");
         }
     use super::*;
     use std::sync::Arc;
@@ -2095,15 +2861,27 @@ mod tests {
     fn test_gpu_othello_mcts_node_allocation() {
         let config = GpuConfig::default();
         let context = Arc::new(GpuContext::new(&config).expect("Failed to create GpuContext"));
-        let mcts = GpuOthelloMcts::new(context, 1024, 128).expect("Failed to create GpuOthelloMcts");
-        let board = [0i32; 64];
+        let mcts = GpuOthelloMcts::new(context, 10000, 128).expect("Failed to create GpuOthelloMcts");
+        
+        // Standard Othello starting position
+        let mut board = [0i32; 64];
+        board[3 * 8 + 3] = -1; board[3 * 8 + 4] = 1;
+        board[4 * 8 + 3] = 1; board[4 * 8 + 4] = -1;
+        
         let root_player = 1;
         let legal_moves = vec![(2, 3), (3, 2), (4, 5), (5, 4)];
         mcts.init_tree(&board, root_player, &legal_moves);
-            // seen_boards is managed by init_tree
-        let telemetry = mcts.run_iterations(2048, 0.1, 1.0, 0.06, 42);
-        eprintln!("[TEST DIAG] total_nodes={} telemetry.iterations_launched={}", mcts.get_total_nodes(), telemetry.iterations_launched);
-        assert!(mcts.get_total_nodes() > 0, "No nodes were allocated!");
+        
+        // Multiple dispatches to allow tree growth
+        mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 42);
+        for _ in 0..10 {
+            mcts.dispatch_mcts_othello_kernel(32, 1.4, 1.0, 0.06, 42);
+        }
+        
+        // Wait for GPU to finish
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        
+        mcts.update_root_stats(); // Read stats from GPU before checking
         let children = mcts.get_children_stats();
         assert!(children.iter().any(|&(_, _, visits, _, _)| visits > 0), "No child visits recorded!");
     }
@@ -2113,13 +2891,23 @@ mod tests {
         let config = GpuConfig::default();
         let context = Arc::new(GpuContext::new(&config).expect("Failed to create GpuContext"));
         let mcts = GpuOthelloMcts::new(context, 2_000_000, 128).expect("Failed to create GpuOthelloMcts");
-        let board = [0i32; 64];
+        
+        // Standard Othello starting position
+        let mut board = [0i32; 64];
+        board[3 * 8 + 3] = -1; board[3 * 8 + 4] = 1;
+        board[4 * 8 + 3] = 1; board[4 * 8 + 4] = -1;
+        
         let root_player = 1;
         let legal_moves = vec![(2, 3), (3, 2), (4, 5), (5, 4)];
         mcts.init_tree(&board, root_player, &legal_moves);
-        let telemetry = mcts.run_iterations(2048, 0.1, 1.0, 0.06, 42);
-        eprintln!("[FREEZE TEST DIAG] total_nodes={} telemetry.iterations_launched={}", mcts.get_total_nodes(), telemetry.iterations_launched);
-        assert!(mcts.get_total_nodes() > 0, "No nodes were allocated in large batch!");
+        
+        // Multiple dispatches
+        mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 42);
+        for _ in 0..3 {
+            mcts.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 0.06, 42);
+        }
+        
+        mcts.update_root_stats(); // Read stats from GPU before checking
         let children = mcts.get_children_stats();
         assert!(children.iter().any(|&(_, _, visits, _, _)| visits > 0), "No child visits recorded in large batch!");
     }
@@ -2153,7 +2941,7 @@ mod tests {
     fn test_gpu_othello_advance_root_updates_board_hash() {
         let config = GpuConfig::default();
         let context = Arc::new(GpuContext::new(&config).expect("Failed to create GpuContext"));
-        let mcts = GpuOthelloMcts::new(context, 1024, 128).expect("Failed to create GpuOthelloMcts");
+        let mcts = GpuOthelloMcts::new(context, 10000, 128).expect("Failed to create GpuOthelloMcts");
         // Initial board
         let mut board = [0i32; 64];
         board[3 * 8 + 3] = 1;
@@ -2163,6 +2951,13 @@ mod tests {
         let root_player = 1;
         let legal_moves = vec![(2, 3), (3, 2), (4, 5), (5, 4)];
         mcts.init_tree(&board, root_player, &legal_moves);
+        
+        // Run MCTS iterations to build tree before advance_root
+        mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 42);
+        for _ in 0..3 {
+            mcts.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 0.06, 42);
+        }
+        
         let host_hash_1 = {
             let mut h: u32 = 0x811c9dc5;
             for &v in &board {

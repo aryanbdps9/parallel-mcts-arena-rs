@@ -91,6 +91,21 @@
 				"--all-features"
 			],
 			"group": "build"
+		},
+		{
+			"label": "test advance_root",
+			"type": "shell",
+			"command": "cargo test --test test_gpu_advance_root -- --nocapture --test-threads=1"
+		},
+		{
+			"label": "test advance_root",
+			"type": "shell",
+			"command": "cargo test --test test_gpu_advance_root -- --nocapture --test-threads=1"
+		},
+		{
+			"label": "test advance_root",
+			"type": "shell",
+			"command": "cargo test --test test_gpu_advance_root -- --nocapture --test-threads=1"
 		}
 	]
 }

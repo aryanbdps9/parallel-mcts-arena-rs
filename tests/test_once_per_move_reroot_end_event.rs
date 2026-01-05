@@ -6,11 +6,12 @@ use mcts::gpu::GpuContext;
 use wgpu;
 
 #[test]
+#[ignore] // REROOT_END event emission was disabled in shader - replaced by pruning-based tree reuse
 fn test_once_per_move_reroot_end_event() {
     // Setup GPU context and engine
     let config = mcts::gpu::GpuConfig::default();
     let context = Arc::new(GpuContext::new(&config).expect("Failed to create GpuContext"));
-    let engine = GpuOthelloMcts::new(context.clone(), 1024, 128).expect("Failed to create engine");
+    let engine = GpuOthelloMcts::new(context.clone(), 10000, 128).expect("Failed to create engine");
 
     // Prepare legal moves as (row, col)
     let legal_moves = vec![(2, 3), (3, 2), (4, 5), (5, 4)];
@@ -24,8 +25,11 @@ fn test_once_per_move_reroot_end_event() {
 
     engine.init_tree(&board, 1, &legal_moves);
 
-    // Run the kernel with MANY workgroups to stress test the atomic coordination
-    engine.dispatch_mcts_othello_kernel(128);
+    // Run the kernel with multiple dispatches to build tree
+    engine.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 1.0, 42);
+    for _ in 0..3 {
+        engine.dispatch_mcts_othello_kernel(32, 1.4, 1.0, 1.0, 42);
+    }
 
     // Poll urgent events manually
     let device = context.device();

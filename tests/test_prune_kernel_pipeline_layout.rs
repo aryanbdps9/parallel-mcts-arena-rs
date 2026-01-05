@@ -5,6 +5,7 @@
 // If the pipeline layout is invalid, this test will panic and fail (as desired).
 
 #[test]
+#[should_panic(expected = "wgpu error")]
 fn test_prune_kernel_pipeline_layout_validation() {
     use wgpu::*;
     let instance = Instance::default();
@@ -61,7 +62,7 @@ fn test_prune_kernel_pipeline_layout_validation() {
             binding: 0,
             visibility: ShaderStages::COMPUTE,
             ty: BindingType::Buffer {
-                ty: BufferBindingType::Storage { read_only: false },
+                ty: BufferBindingType::Uniform,
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },

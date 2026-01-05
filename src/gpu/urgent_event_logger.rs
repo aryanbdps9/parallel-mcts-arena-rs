@@ -1,5 +1,4 @@
-use super::mcts_othello::GpuOthelloMcts;
-use std::sync::Mutex;
+use super::mcts_othello::{GpuOthelloMcts, DEVICE_POLL_MUTEX};
 /// Starts the urgent event polling thread for GpuOthelloMcts and prints events every interval.
 
 
@@ -12,17 +11,14 @@ pub fn start_and_log_urgent_events_othello(
     let events_clone = Arc::clone(&events);
     let engine_clone = gpu_engine.clone();
     let stop_flag_clone = Arc::clone(&stop_flag);
-    // Mutex to guard all buffer map/unmap/submit operations for urgent event buffers
-    // This ensures only one thread can access these buffers at a time, preventing mapped buffer validation errors
-    static URGENT_EVENT_BUFFER_MUTEX: once_cell::sync::Lazy<Mutex<()>> = once_cell::sync::Lazy::new(|| Mutex::new(()));
     thread::spawn(move || {
         println!("[URGENT LOGGER] Thread started for GpuOthelloMcts");
         let mut last_seen_write_head: u32 = 0;
         let ring_size = 256u32;
         let mut poll_count = 0;
         while !stop_flag_clone.load(Ordering::Relaxed) {
-            // Lock and get buffer handles
-            let _buffer_guard = URGENT_EVENT_BUFFER_MUTEX.lock().unwrap();
+            // Acquire device poll mutex to prevent conflicts with pruning operations
+            let _poll_guard = DEVICE_POLL_MUTEX.lock().unwrap();
             let (urgent_event_buffer_gpu, urgent_event_write_head_gpu, urgent_event_staging, urgent_event_write_head_staging) = {
                 let inner = engine_clone.inner.lock().unwrap();
                 (
@@ -33,6 +29,7 @@ pub fn start_and_log_urgent_events_othello(
                 )
             };
             if urgent_event_buffer_gpu.is_none() || urgent_event_write_head_gpu.is_none() || urgent_event_staging.is_none() || urgent_event_write_head_staging.is_none() {
+                drop(_poll_guard); // Release lock before sleep
                 if poll_count % 10 == 0 {
                     println!("[URGENT LOGGER] Waiting for buffers to be ready...");
                 }
@@ -142,7 +139,8 @@ pub fn start_and_log_urgent_events_othello(
             drop(buffer_data);
             urgent_event_staging.unmap();
             device.poll(wgpu::Maintain::Wait);
-            // Mutex guard drops here, allowing next access
+            drop(_poll_guard); // Release DEVICE_POLL_MUTEX before sleep
+            // Mutex guard dropped, allowing pruning operations to proceed
 
             last_seen_write_head = current_write_head;
             std::thread::sleep(Duration::from_millis(poll_interval_ms));

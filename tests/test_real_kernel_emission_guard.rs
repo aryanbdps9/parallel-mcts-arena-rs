@@ -6,6 +6,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    #[ignore = "REROOT_END event coordination disabled - global_reroot_threads_remaining no longer used"]
     fn test_real_kernel_emission_guard() {
         // Minimal config: 1 workgroup, 64 threads
         let config = GpuConfig::default();
@@ -33,7 +34,7 @@ mod tests {
         }
 
         // Dispatch the real kernel
-        engine.dispatch_mcts_othello_kernel(num_workgroups);
+        engine.dispatch_mcts_othello_kernel(num_workgroups, 1.4, 1.0, 1.0, 42);
         device.poll(wgpu::Maintain::Wait);
 
         // Read back the atomic after dispatch

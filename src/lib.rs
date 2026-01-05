@@ -1183,10 +1183,16 @@ impl<S: GameState> MCTS<S> {
             }
         }
 
-        // === DISPATCH MAIN GPU KERNEL ONCE PER TURN ===
+        // === DISPATCH MAIN GPU KERNEL MULTIPLE TIMES FOR TREE BUILDING ===
         println!("[HOST] BATCH_START: Dispatching main GPU MCTS kernel");
-        gpu_mcts.dispatch_mcts_othello_kernel(iterations_per_batch);
-        println!("[HOST] BATCH_END: Main GPU MCTS kernel dispatch complete");
+        let seed_init = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u32;
+        
+        // First dispatch with 1 workgroup for initialization (critical for tree building)
+        gpu_mcts.dispatch_mcts_othello_kernel(1, exploration, virtual_loss_weight, temperature, seed_init);
+        println!("[HOST] Initial 1-workgroup dispatch complete");
 
         // Run iterations with timeout enforcement
         let start_time = std::time::Instant::now();
@@ -1195,10 +1201,7 @@ impl<S: GameState> MCTS<S> {
         } else {
             None
         };
-        let mut seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u32;
+        let mut seed = seed_init + 1000;
 
         let mut last_telemetry: Option<gpu::OthelloRunTelemetry> = None;
 
@@ -1213,7 +1216,17 @@ impl<S: GameState> MCTS<S> {
                 // No timeout - use batch count limit
                 break;
             }
-            // If we have exclusive access, unwrap Arc and mutate directly
+            
+            // Dispatch kernel for this batch (not just read telemetry)
+            gpu_mcts.dispatch_mcts_othello_kernel(
+                iterations_per_batch,
+                exploration,
+                virtual_loss_weight,
+                temperature,
+                seed.wrapping_add(batch * 1000),
+            );
+            
+            // Read telemetry after dispatch
             let telemetry = gpu_mcts.run_iterations(
                 iterations_per_batch,
                 exploration,
@@ -1301,7 +1314,7 @@ impl<S: GameState> MCTS<S> {
         // Selection/expansion counters to spot algorithmic early exits
         let d = telemetry.diagnostics;
         eprintln!(
-            "{} diag_counts sel_term={} sel_no_child={} sel_invalid={} sel_path_cap={} exp_attempts={} exp_success={} exp_locked={} exp_term={} alloc_fail={} rollouts={} root_board_hash_GPU={:#x} total_children_gen={} init_nodes_count={}",
+            "{} diag_counts sel_term={} sel_no_child={} sel_invalid={} sel_path_cap={} exp_attempts={} exp_success={} exp_locked={} exp_term={} alloc_fail={} rollouts={} root_board_hash_GPU={:#x} total_children_gen={} init_nodes_count={} heartbeat={} zero_wg={}",
             diag_prefix,
             d.selection_terminal,
             d.selection_no_children,
@@ -1315,7 +1328,9 @@ impl<S: GameState> MCTS<S> {
             d.rollouts,
             d.root_board_hash,
             d.total_children_gen,
-            d.init_nodes_count
+            d.init_nodes_count,
+            d.exp_lock_rollout,
+            d.exp_lock_sibling
         );
 
         let diag_red_flag = d.selection_invalid_child > 0 || d.alloc_failures > 0;
@@ -1325,9 +1340,8 @@ impl<S: GameState> MCTS<S> {
         sorted.sort_by_key(|(_, _, v, _, _)| -(*v));
         eprintln!("[GPU-Native DEBUG] All {} children by visits:", sorted.len());
         for (i, (x, y, visits, wins, q)) in sorted.iter().enumerate() {
-            let win_rate = if *visits > 0 { *wins as f64 / (*visits as f64 * 2.0) } else { 0.0 };
-            eprintln!("  {}. ({},{}) visits={:7} wins={:7} Q={:.4} raw_wr={:.4}", 
-                     i+1, x, y, visits, wins, q, win_rate);
+            eprintln!("  {}. ({},{}) visits={:7} wins={:7} Q={:.4}", 
+                     i+1, x, y, visits, wins, q);
         }
 
         // DEBUG: Check if any child has move_id=0 (x=0, y=0)
