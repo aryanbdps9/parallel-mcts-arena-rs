@@ -1024,16 +1024,9 @@ impl<S: GameState> MCTS<S> {
             return None;
         }
         
-        if legal_moves.len() == 1 {
-            return Some((
-                legal_moves[0],
-                1,
-                0.5,
-                vec![(legal_moves[0].0, legal_moves[0].1, 1, 0, 0.5)],
-                1,
-                gpu::OthelloRunTelemetry::default(),
-            ));
-        }
+        // NOTE: Removed single-move short-circuit - we need to run search to get accurate Q-value
+        // even when there's only one legal move (especially important for terminal/near-terminal positions)
+        // The old code returned hardcoded 0.5 which was incorrect for winning/losing positions
 
         // Use existing GPU-native engine if available (check if max_nodes matches)
         let gpu_mcts_arc = {
