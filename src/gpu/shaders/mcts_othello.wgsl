@@ -1627,6 +1627,10 @@ fn incremental_mcts_step(
         } else {
             // Calculate PUCT scores for all children
             var puct_scores: array<f32, MAX_CHILDREN>;
+            // Initialize to zero to avoid undefined behavior
+            for (var init_i = 0u; init_i < MAX_CHILDREN; init_i++) {
+                puct_scores[init_i] = 0.0;
+            }
             var valid_count = 0u;
             
             let parent_visits = f32(atomicLoad(&node_visits[current]));
@@ -1720,6 +1724,10 @@ fn incremental_mcts_step(
                     
                     var exp_sum = 0.0;
                     var exp_scores: array<f32, MAX_CHILDREN>;
+                    // Initialize to zero to avoid undefined behavior
+                    for (var init_i = 0u; init_i < MAX_CHILDREN; init_i++) {
+                        exp_scores[init_i] = 0.0;
+                    }
                     
                     for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
                         let child_idx = get_child_idx(current, i);

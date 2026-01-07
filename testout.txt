@@ -1,0 +1,170 @@
+   Compiling parallel-mcts-arena v0.1.0 (C:\Users\Zura\Source\Repos\parallel-mcts-arena-rs)
+    Finished `release` profile [optimized] target(s) in 41.87s
+     Running tests\test_endgame_diagnostics.rs (target\release\deps\test_endgame_diagnostics-d126cea09151d271.exe)
+
+running 1 test
+[DIAG] GpuContext::new: before Instance::new
+[DIAG] GpuContext::new: after Instance::new
+[DIAG] GpuContext::new: before request_adapter
+[DIAG] GpuContext::new: after pollster::block_on(request_adapter)
+[DIAG] GpuContext::new: after adapter Some/None check
+[DIAG] GpuContext::new: got adapter_info
+[DIAG] GpuContext::new: before request_device
+[DIAG] GpuContext::new: after request_device (future created)
+[DIAG] GpuContext::new: after pollster::block_on(request_device)
+[DIAG] GpuContext::new: before create_shader_module
+[DIAG] GpuContext::new: after create_shader_module
+[DIAG] GpuContext::new: before create_puct_bind_group_layout
+[DIAG] GpuContext::new: after create_puct_bind_group_layout
+[DIAG] GpuContext::new: after create_eval_bind_group_layout
+[DIAG] GpuContext::new: before create_puct_pipeline
+[DIAG] GpuContext::new: after create_puct_pipeline
+[DIAG] GpuContext::new: before create_game_pipelines
+[DIAG] GpuContext::new: after create_game_pipelines
+
+=== ENDGAME POSITION ===
+  0 1 2 3 4 5 6 7
+0 O O O O O O O . 
+1 . O O O X X . X 
+2 . . O O X O X X 
+3 . X . X X X . X 
+4 . . X O X X . X 
+5 X X O O X O X X 
+6 . X X O . X . X 
+7 . . X . . . X . 
+Piece count: X=26 O=18
+Current player: 1
+Legal moves: 8 moves
+  (0, 1)
+  (6, 1)
+  (1, 2)
+  (2, 3)
+  (6, 3)
+  (4, 6)
+  (6, 6)
+  (3, 7)
+[GPU-Native] init_tree: Initializing GPU tree (resetting allocator and Node 0)
+[GPU-Native] GPU Tree Reset Complete. Root set to 0.
+
+=== RUNNING MCTS ===
+Threads: 1024, Steps: 50
+Exploration: 1.414, VL Weight: 1, Temperature: 0.6
+[INCREMENTAL] Starting incremental MCTS: 1024 threads, 50 max steps
+[INCREMENTAL] Collecting leaf candidates...
+[INCREMENTAL] Sorting candidates...
+[INCREMENTAL] Running 50 steps with 1024 threads...
+[INCREMENTAL] Incremental MCTS complete after 50 steps (2.27s)
+
+=== SEARCH DIAGNOSTICS ===
+Total rollouts: 17352
+Nodes created: 0
+Expansion successes: 58
+
+=== CHILDREN STATISTICS (from root) ===
+Total children: 8
+
+Child #1: Move (6, 1)
+  Visits: 1003
+  Wins: 0
+  Q-value: 0.0000 (wins/visits = 0.0000)
+  --- PUCT Analysis ---
+  Root total visits: 4106
+  Q (parent view): 1.0000
+  Exploration term: 0.0113
+  PUCT score: 1.0113
+  Prior P: 0.1250
+
+Child #2: Move (6, 6)
+  Visits: 983
+  Wins: 2
+  Q-value: 0.0010 (wins/visits = 0.0020)
+  --- PUCT Analysis ---
+  Root total visits: 4106
+  Q (parent view): 0.9990
+  Exploration term: 0.0115
+  PUCT score: 1.0105
+  Prior P: 0.1250
+
+Child #3: Move (6, 3)
+  Visits: 981
+  Wins: 4
+  Q-value: 0.0020 (wins/visits = 0.0041)
+  --- PUCT Analysis ---
+  Root total visits: 4106
+  Q (parent view): 0.9980
+  Exploration term: 0.0115
+  PUCT score: 1.0095
+  Prior P: 0.1250
+
+Child #4: Move (2, 3)
+  Visits: 974
+  Wins: 0
+  Q-value: 0.0000 (wins/visits = 0.0000)
+  --- PUCT Analysis ---
+  Root total visits: 4106
+  Q (parent view): 1.0000
+  Exploration term: 0.0116
+  PUCT score: 1.0116
+  Prior P: 0.1250
+
+Child #5: Move (0, 1)
+  Visits: 85
+  Wins: 64
+  Q-value: 0.3765 (wins/visits = 0.7529)
+  --- PUCT Analysis ---
+  Root total visits: 4106
+  Q (parent view): 0.6235
+  Exploration term: 0.1317
+  PUCT score: 0.7552
+  Prior P: 0.1250
+
+Child #6: Move (3, 7)
+  Visits: 47
+  Wins: 0
+  Q-value: 0.0000 (wins/visits = 0.0000)
+  --- PUCT Analysis ---
+  Root total visits: 4106
+  Q (parent view): 1.0000
+  Exploration term: 0.2360
+  PUCT score: 1.2360
+  Prior P: 0.1250
+
+Child #7: Move (1, 2)
+  Visits: 17
+  Wins: 0
+  Q-value: 0.0000 (wins/visits = 0.0000)
+  --- PUCT Analysis ---
+  Root total visits: 4106
+  Q (parent view): 1.0000
+  Exploration term: 0.6292
+  PUCT score: 1.6292
+  Prior P: 0.1250
+
+Child #8: Move (4, 6)
+  Visits: 16
+  Wins: 0
+  Q-value: 0.0000 (wins/visits = 0.0000)
+  --- PUCT Analysis ---
+  Root total visits: 4106
+  Q (parent view): 1.0000
+  Exploration term: 0.6662
+  PUCT score: 1.6662
+  Prior P: 0.1250
+
+=== GPU BUFFER DIAGNOSTICS ===
+Root node (index 0):
+  Player at node: 1
+  Num children: 8
+  Parent idx: 4294967295
+  Move ID: 0
+  Flags: 0x00000000
+  (Visit/win counts are in position-indexed buffers, not node struct)
+
+=== CONCLUSION ===
+Examine the PUCT scores above.
+High-visit children should have high PUCT scores explaining why they were selected.
+If a low-Q child has high visits, its exploration term must be very large.
+test test_endgame_detailed_diagnostics ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.46s
+
