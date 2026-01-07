@@ -194,7 +194,7 @@ fn test_near_endgame_position() {
         println!("[GPU] Initialized tree from custom position");
         
         // Run initial dispatch (important for tree initialization)
-        engine.dispatch_mcts_othello_kernel(1, exploration as f32, 1.0, 0.06, 42);
+        engine.dispatch_mcts_othello_kernel(1, exploration as f32, 1.0, 0.06, 0.01, 42);
         println!("[GPU] Completed initial 1-workgroup dispatch");
         
         // Run main search
@@ -205,7 +205,7 @@ fn test_near_endgame_position() {
         let start = std::time::Instant::now();
         for batch in 0..num_batches {
             let seed = 42 + batch * 1000;
-            engine.dispatch_mcts_othello_kernel(batch_size, exploration as f32, 1.0, 0.06, seed);
+            engine.dispatch_mcts_othello_kernel(batch_size, exploration as f32, 1.0, 0.06, 0.01, seed);
             
             // Periodic diagnostics
             if batch > 0 && batch % 5 == 0 {
@@ -384,8 +384,8 @@ fn test_shallow_tree_rollout_quality() {
         
         // Run ONLY 1 batch - this should barely expand the tree
         println!("\n[TEST 1] Running 1 batch of 64 iterations (minimal expansion)");
-        engine.dispatch_mcts_othello_kernel(1, 1.414, 1.0, 0.06, 42);
-        engine.dispatch_mcts_othello_kernel(64, 1.414, 1.0, 0.06, 100);
+        engine.dispatch_mcts_othello_kernel(1, 1.414, 1.0, 0.06, 0.01, 42);
+        engine.dispatch_mcts_othello_kernel(64, 1.414, 1.0, 0.06, 0.01, 100);
         
         engine.flush_and_wait();
         engine.update_root_stats();
@@ -413,11 +413,11 @@ fn test_shallow_tree_rollout_quality() {
         
         // Reset and run with a bit more expansion
         engine.init_tree(&board, current_player, &legal_moves);
-        engine.dispatch_mcts_othello_kernel(1, 1.414, 1.0, 0.06, 42);
+        engine.dispatch_mcts_othello_kernel(1, 1.414, 1.0, 0.06, 0.01, 42);
         
         println!("\n[TEST 2] Running 5 batches (depth ~2-3)");
         for batch in 0..5 {
-            engine.dispatch_mcts_othello_kernel(64, 1.414, 1.0, 0.06, 100 + batch * 1000);
+            engine.dispatch_mcts_othello_kernel(64, 1.414, 1.0, 0.06, 0.01, 100 + batch * 1000);
         }
         
         engine.flush_and_wait();
@@ -446,11 +446,11 @@ fn test_shallow_tree_rollout_quality() {
         
         // Reset and run with more expansion
         engine.init_tree(&board, current_player, &legal_moves);
-        engine.dispatch_mcts_othello_kernel(1, 1.414, 1.0, 0.06, 42);
+        engine.dispatch_mcts_othello_kernel(1, 1.414, 1.0, 0.06, 0.01, 42);
         
         println!("\n[TEST 3] Running 50 batches (deeper tree)");
         for batch in 0..50 {
-            engine.dispatch_mcts_othello_kernel(64, 1.414, 1.0, 0.06, 100 + batch * 1000);
+            engine.dispatch_mcts_othello_kernel(64, 1.414, 1.0, 0.06, 0.01, 100 + batch * 1000);
         }
         
         engine.flush_and_wait();
@@ -588,11 +588,11 @@ fn test_forced_win_position() {
         ).expect("Failed to create GPU engine"));
         
         engine.init_tree(&board, current_player, &legal_moves);
-        engine.dispatch_mcts_othello_kernel(1, 1.414, 1.0, 0.06, 42);
+        engine.dispatch_mcts_othello_kernel(1, 1.414, 1.0, 0.06, 0.01, 42);
         
         // Run for a bit
         for batch in 0..5 {
-            engine.dispatch_mcts_othello_kernel(8192, 1.414, 1.0, 0.06, 42 + batch * 1000);
+            engine.dispatch_mcts_othello_kernel(8192, 1.414, 1.0, 0.06, 0.01, 42 + batch * 1000);
         }
         
         engine.flush_and_wait();

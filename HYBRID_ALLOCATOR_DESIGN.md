@@ -622,6 +622,771 @@ The allocator is designed to ensure that valuable subtrees are never pruned sole
 
 ---
 
+## Pre-Computation + Incremental Execution Optimization
+
+### Problem Statement
+GPU MCTS parallelism faces fundamental contention during expansion:
+- **Wave analogy:** Each dispatch is like a wave of 16,384 threads crashing onto the tree frontier
+- Early waves (dispatch 1-5) have very few expandable leaves (4 → 16 → 256)
+- 16,384 threads compete for ~100 leaves via atomic locks
+- Result: 95-99% contention in early dispatches (only 1-5% of threads successfully expand)
+- Threads that acquire locks spend significant time computing legal moves while holding the lock
+- This serializes expansion even further, reducing throughput
+
+### Root Cause: Coarse-Grained Execution Model
+Current design: **One thread completes entire MCTS iteration (selection → expansion → rollout → backprop) in one dispatch.**
+
+Problems:
+1. **Bursty contention:** All threads try to expand simultaneously
+2. **Wasted work:** 99% of threads fail to expand, but still do rollouts (useful but not optimal)
+3. **Lock serialization:** Threads hold expansion locks while computing legal moves (~40-60% of lock time)
+
+### Solution: Pre-Computation + Stateful Incremental Execution
+
+**Architecture: Two-Tier Optimization**
+
+**Tier 1: Pre-Computation (Reduce Lock Duration)**
+- Cache legal moves for high-probability leaves BEFORE main kernel dispatch
+- Threads that acquire locks can lookup cached moves instead of computing
+- Reduces lock hold time by 40-60%
+
+**Tier 2: Incremental Execution (Eliminate Contention Bursts)**  
+- Each thread does ONE step per dispatch (traverse one node, save state, die)
+- Next dispatch resumes from saved state
+- Spreads expansion attempts across many dispatches instead of concentrating in one
+- Eliminates "wave crashing" behavior
+
+### Combined Flow
+
+**Host Loop:**
+```rust
+loop {
+    // 1. Pre-compute legal moves for likely leaves
+    dispatch_collect_candidates(max_threads);
+    dispatch_sort_candidates();
+    dispatch_precompute_moves(budget);
+    
+    // 2. Incremental MCTS step (selection/expansion/backprop only)
+    dispatch_incremental_mcts_step(num_threads);
+    
+    // 3. Rollout chunks (separate kernel, doesn't block fast phases)
+    // Processes only threads in ROLLOUT_ACTIVE phase, advances 5-10 moves per dispatch
+    dispatch_rollout_chunk(num_threads, moves_per_chunk: 8);
+    
+    // 4. Check if search complete
+    if all_threads_finished() { break; }
+}
+```
+
+**Thread State (Persistent GPU Buffer):**
+```wgsl
+struct ThreadState {
+    phase: u32,                  // SELECTION/EXPANSION/ROLLOUT_ACTIVE/BACKPROP/FINISHED
+    current_node: u32,           // Which node we're at
+    path: array<u32, 128>,       // Path taken so far
+    path_len: u32,               // How many nodes in path
+    // NOTE: rng_seed removed - now using global atomic counter (see RNG Architecture section)
+    leaf_player: i32,            // Player at leaf (for backprop perspective)
+    rollout_result: u32,         // Result of rollout (for backprop)
+    backprop_index: u32,         // Which node we're backpropping (counts down)
+    
+    // Rollout state (for chunked rollout execution)
+    rollout_board: array<i32, 64>,  // Current board state during rollout
+    rollout_player: i32,            // Current player during rollout
+    rollout_moves_remaining: u32,   // Moves until terminal (or chunk limit)
+}
+```
+
+**Incremental Kernel (Fast Phases: Selection/Expansion/Backprop):**
+```wgsl
+@compute @workgroup_size(64)
+fn incremental_mcts_step() {
+    let thread_id = global_invocation_id.x;
+    var state = thread_states[thread_id];
+    
+    // Skip if finished or in rollout (handled by separate kernel)
+    if (state.phase == PHASE_FINISHED || state.phase == PHASE_ROLLOUT_ACTIVE) { 
+        return; 
+    }
+    
+    // Execute ONE step based on current phase
+    switch (state.phase) {
+        case PHASE_SELECTION: {
+            // Traverse ONE node down the tree using softmax sampling
+            // Calculate PUCT scores for all children
+            var puct_scores: array<f32, MAX_CHILDREN>;
+            for each child:
+                let q = wins / (visits + virtual_loss);
+                let u = exploration * prior * sqrt(parent_visits) / (1 + visits + vl);
+                puct_scores[i] = q + u;
+            
+            // Apply softmax with temperature for exploration diversity
+            var exp_sum = 0.0;
+            var exp_scores: array<f32, MAX_CHILDREN>;
+            for each child:
+                exp_scores[i] = exp(puct_scores[i] / temperature);
+                exp_sum += exp_scores[i];
+            
+            // Sample from probability distribution using global RNG counter
+            let rng_val = pcg_hash(atomicAdd(&diagnostics.global_rollout_counter, 1u));
+            let rand_val = rng_val & 1048575u;  // Mask to 2^20 for precision
+            let sample = f32(rand_val) / 1048576.0;
+            
+            var cumulative = 0.0;
+            var child = INVALID_INDEX;
+            for each child:
+                cumulative += exp_scores[i] / exp_sum;
+                if (sample <= cumulative) {
+                    child = get_child_idx(current_node, i);
+                    break;
+                }
+            
+            atomicAdd(&node_vl[child], 1);  // Add VL
+            state.path[state.path_len] = child;
+            state.path_len++;
+            state.current_node = child;
+            
+            // Check if we reached a leaf
+            if (is_leaf(child)) {
+                state.phase = PHASE_EXPANSION;
+                state.leaf_player = node_info[child].player_at_node;
+            }
+        }
+        case PHASE_EXPANSION: {
+            // Try to expand (with pre-computed moves if available)
+            let locked = try_lock_for_expansion(state.current_node);
+            if (locked) {
+                // Check cache first (pre-computation tier)
+                let moves = lookup_precomputed_moves(state.current_node);
+                if (!moves.valid) {
+                    // Fallback: compute on-the-fly
+                    var path_copy = state.path;
+                    let board = reconstruct_board(&path_copy, state.path_len);
+                    moves = compute_legal_moves(&board, state.leaf_player);
+                }
+                
+                allocate_and_init_children(state.current_node, moves);
+                unlock(state.current_node);
+            }
+            
+            // Remove VL before starting rollout (so other threads aren't blocked)
+            for (var i = 0u; i < state.path_len; i++) {
+                atomicAdd(&node_vl[state.path[i]], -1);
+            }
+            
+            // Initialize rollout state
+            var path_copy = state.path;
+            state.rollout_board = reconstruct_board(&path_copy, state.path_len);
+            state.rollout_player = state.leaf_player;
+            state.rollout_moves_remaining = 60;  // Max Othello game length
+            state.phase = PHASE_ROLLOUT_ACTIVE;
+        }
+        case PHASE_BACKPROP: {
+            // Backprop ONE node per dispatch
+            if (state.backprop_index > 0) {
+                let node_idx = state.path[state.backprop_index - 1];
+                atomicAdd(&node_visits[node_idx], 1);
+                
+                let player_at_node = node_info[node_idx].player_at_node;
+                let player_who_moved = -player_at_node;
+                var reward = state.rollout_result;
+                if (player_who_moved != state.leaf_player) {
+                    reward = 2 - reward;
+                }
+                atomicAdd(&node_wins[node_idx], reward);
+                
+                state.backprop_index--;
+            } else {
+                // Backprop complete, start new iteration
+                state.phase = PHASE_SELECTION;
+                state.current_node = root_idx;
+                state.path_len = 1;
+                state.path[0] = root_idx;
+            }
+        }
+    }
+    
+    // Save state for next dispatch
+    thread_states[thread_id] = state;
+}
+
+// Separate rollout kernel (chunked, doesn't block fast phases)
+@compute @workgroup_size(64)
+fn rollout_chunk_kernel() {
+    let thread_id = global_invocation_id.x;
+    var state = thread_states[thread_id];
+    
+    // Only process threads in rollout phase
+    if (state.phase != PHASE_ROLLOUT_ACTIVE) { return; }
+    
+    const MOVES_PER_CHUNK: u32 = 8u;  // Tunable: balance overhead vs sync
+    
+    // Simulate up to MOVES_PER_CHUNK moves (or until terminal)
+    for (var i = 0u; i < MOVES_PER_CHUNK; i++) {
+        if (is_terminal(&state.rollout_board)) {
+            // Game over, determine winner
+            state.rollout_result = evaluate_terminal(&state.rollout_board, state.leaf_player);
+            state.phase = PHASE_BACKPROP;
+            state.backprop_index = state.path_len;
+            break;
+        }
+        
+        // Select random move using global RNG counter
+        let move = select_random_move(&state.rollout_board, state.rollout_player);
+        apply_move(&state.rollout_board, move, state.rollout_player);
+        state.rollout_player = -state.rollout_player;
+        state.rollout_moves_remaining--;
+        
+        if (state.rollout_moves_remaining == 0u) {
+            // Safety limit reached
+            state.rollout_result = evaluate_terminal(&state.rollout_board, state.leaf_player);
+            state.phase = PHASE_BACKPROP;
+            state.backprop_index = state.path_len;
+            break;
+        }
+    }
+    
+    // Save state (still ROLLOUT_ACTIVE if not terminal, or BACKPROP if done)
+    thread_states[thread_id] = state;
+}
+```
+
+---
+
+## Random Number Generation (RNG) Architecture
+
+### Design Evolution: From Thread-Local to Global Counter
+
+**Problem Identified:**
+The original RNG implementation used thread-local state (`thread_states[thread_id].rng_seed`) that was modified during the selection phase. This created systematic bias in rollouts because:
+- Selection phase advanced RNG state variable numbers of times (tie-breaking, softmax sampling)
+- Rollout phase inherited this modified state
+- Different threads experienced different amounts of RNG advancement based on tree path
+- Result: 36.83% win rate in liar rollouts instead of expected 49.23%
+
+**Root Cause:**
+Correlation between tree structure exploration (selection phase) and random outcome generation (rollout phase) through shared RNG state.
+
+**Solution: Independent Global Counter RNG**
+Replace all thread-local stateful RNG with a global atomic counter that provides independent random values:
+
+```wgsl
+// OLD (Biased):
+fn rand_u32() -> u32 {
+    rng_state = pcg_hash(rng_state);  // Stateful, creates correlation
+    return rng_state;
+}
+
+// NEW (Unbiased):
+fn rand_u32() -> u32 {
+    let rng_val = atomicAdd(&diagnostics.global_rollout_counter, 1u);
+    return pcg_hash(rng_val);  // Independent value each call
+}
+```
+
+**Key Changes:**
+1. **Global Counter**: Added `global_rollout_counter: atomic<u32>` to diagnostics buffer
+2. **Independent Seeding**: Each random value request increments counter and hashes the result
+3. **No Thread State**: Removed RNG state from thread-local storage
+4. **Universal Application**: Applied to all RNG usage points:
+   - Argmax tie-breaking in selection
+   - Softmax sampling in selection
+   - Move selection in rollouts
+   - Any helper functions using `rand_u32()` or `rand_f32()`
+
+**Implementation:**
+
+```wgsl
+// Diagnostics buffer includes global RNG counter
+struct Diagnostics {
+    // ... other fields ...
+    global_rollout_counter: atomic<u32>, // Global counter for independent RNG seeding
+}
+
+// Base RNG function using PCG hash
+fn pcg_hash(input: u32) -> u32 {
+    var state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// Random u32 using independent global counter
+fn rand_u32() -> u32 {
+    let rng_val = atomicAdd(&diagnostics.global_rollout_counter, 1u);
+    return pcg_hash(rng_val);
+}
+
+// Random f32 in [0, 1)
+fn rand_f32() -> f32 {
+    return f32(rand_u32()) / 4294967296.0;
+}
+
+// Example usage in selection (argmax tie-breaking)
+if (max_count > 0u) {
+    let rng_val = pcg_hash(atomicAdd(&diagnostics.global_rollout_counter, 1u));
+    let rand_idx = ((rng_val >> 24u) * max_count) >> 8u;
+    selected_idx = max_children[rand_idx];
+}
+
+// Example usage in rollout (move selection)
+let rollout_id = atomicAdd(&diagnostics.global_rollout_counter, 1u);
+rng_state = pcg_hash(rollout_id);
+rng_state = pcg_hash(rng_state);
+let p1_score = rng_state % 65u;
+```
+
+**Performance Characteristics:**
+- **Contention**: Single global atomic counter has potential contention, but acceptable because:
+  - Counter increment is extremely fast (few nanoseconds)
+  - Only happens when random values needed (not every operation)
+  - Modern GPUs handle atomic operations efficiently
+- **Quality**: PCG hash provides excellent statistical properties
+- **Determinism**: Given same seed, produces same sequence (debuggable, testable)
+
+**Validation Results:**
+- **Liar Rollout Test** (before fix): 36.83% wins, avg score 29.54 (BIASED)
+- **Liar Rollout Test** (after fix): 49.19% wins, avg score 31.99 (PERFECT)
+- **Honest Rollout Test**: Q-values correctly reflect position quality (~0.47-0.48 for opening)
+
+**Benefits:**
+1. **Eliminates Bias**: No correlation between tree exploration and random outcomes
+2. **Simplicity**: No thread-local RNG state to manage
+3. **Independence**: Each random call gets fresh independent value
+4. **Correctness**: Proven unbiased through extensive testing
+
+**Trade-offs:**
+- Atomic contention on global counter (acceptable performance impact)
+- Cannot easily reproduce specific thread's random sequence (less important than correctness)
+
+### Current VL Handling (Verified Correct)
+**Important:** Threads that fail to acquire expansion locks do NOT leak virtual loss.
+- When `expand_node()` returns `false` (lock failed), the thread continues with:
+  1. Rollout (simulation to terminal state)
+  2. Backpropagation (updates visits/wins, removes VL)
+- Test `test_virtual_loss_leak` confirms total VL = 0 after each dispatch completes
+- This means failed threads still contribute search information (rollouts) and properly clean up VL
+- Pre-computation optimization does not need to handle VL cleanup - it's already correct
+
+### Observation: Legal Move Computation is Stateless
+Legal move generation only requires:
+- `node.board` (64 i32s representing board state)
+- `node.current_player` (which player's turn)
+- **No path history, no parent context needed**
+
+This makes it ideal for pre-computation: we can compute legal moves for leaves BEFORE threads try to expand them.
+
+### Solution: Pre-Computation Kernel with Parent-Visit Heuristic
+
+**Architecture:**
+```rust
+// After each main MCTS dispatch, run pre-computation
+dispatch_mcts_kernel(256 workgroups);     // Main wave crashes, creates some expansions
+dispatch_precompute_kernel(64 workgroups); // Prepare moves for next wave's likely targets
+```
+
+**Pre-Computation Flow:**
+
+1. **Candidate Collection (GPU Kernel):**
+```wgsl
+@compute @workgroup_size(64)
+fn collect_leaf_candidates() {
+    let node_id = global_invocation_id.x;
+    
+    // Is this a leaf?
+    if (nodes[node_id].num_children == 0 && nodes[node_id].visits > 0) {
+        // Score by parent's visit count (predictive heuristic)
+        let parent_visits = nodes[nodes[node_id].parent_id].visits;
+        
+        // Add to candidate list
+        let idx = atomicAdd(&candidate_count, 1);
+        candidates[idx] = LeafCandidate {
+            leaf_id: node_id,
+            score: parent_visits,
+        };
+    }
+}
+```
+
+2. **Top-K Selection (GPU Sort):**
+```rust
+// GPU-side parallel radix sort or bitonic sort
+sort_candidates_by_score_descending();
+
+// Budget: 2× number of threads per dispatch
+let budget = 16384 * 2;  // 32,768 leaves
+let top_k = candidates[0..budget];
+```
+
+3. **Move Pre-Computation (GPU Kernel):**
+```wgsl
+@compute @workgroup_size(64)
+fn precompute_moves() {
+    let i = global_invocation_id.x;
+    if (i >= top_k_count) { return; }
+    
+    let leaf_id = top_k[i].leaf_id;
+    
+    // Reconstruct board for this leaf (same as main kernel does)
+    var path: array<u32, 128>;
+    var path_len = 0u;
+    
+    // Walk backwards from leaf to root
+    var current = leaf_id;
+    while (current != INVALID_INDEX && path_len < 128) {
+        path[path_len] = current;
+        path_len++;
+        current = node_info[current].parent_idx;
+    }
+    
+    // Reverse path (now goes root → leaf)
+    for (var j = 0u; j < path_len / 2; j++) {
+        let temp = path[j];
+        path[j] = path[path_len - 1 - j];
+        path[path_len - 1 - j] = temp;
+    }
+    
+    // Reconstruct board by replaying moves
+    let board = reconstruct_board(&path, path_len);
+    let player = node_info[leaf_id].player_at_node;
+    
+    // Compute legal moves
+    let moves = compute_legal_moves(&board, player);
+    
+    // Store in sparse cache
+    precomputed_cache[i] = PrecomputedMoves {
+        leaf_id: leaf_id,
+        moves: moves,
+        num_moves: moves.len(),
+    };
+}
+```
+
+**Note:** Board reconstruction reuses existing `reconstruct_board()` logic. Nodes don't store board state (only `parent_idx` + `move_id`), so boards are built on-demand by replaying move sequences from root. This keeps memory overhead low.
+
+4. **Main Kernel Integration:**
+```wgsl
+// In expansion phase of main MCTS kernel
+lock(leaf_id)
+
+// Try cache lookup (sparse)
+let moves = lookup_precomputed_moves(leaf_id);
+if (!moves.valid) {
+    // FALLBACK: Compute on-the-fly for cache misses
+    moves = compute_legal_moves(nodes[leaf_id].board, nodes[leaf_id].player);
+}
+
+allocate_children(moves);
+unlock(leaf_id)
+```
+
+### Design Decisions
+
+**Budget Sizing:** `threads_per_dispatch × 2`
+- Rationale: Most threads will target high-parent-visit leaves; 2× coverage gives good cache hit rate
+- Example: 16,384 threads → pre-compute 32,768 leaves
+- Adaptive: If tree has <32,768 leaves, pre-compute all
+
+**Heuristic:** Parent visit count
+- Logic: If parent has 1000 visits, child leaves are frequently traversed via PUCT
+- Alternatives considered: leaf's own visits, depth-based (rejected - less predictive)
+
+**Storage:** Sparse cache
+- Structure: Array of 32,768 `PrecomputedMoves` entries
+- Lookup: Linear scan or GPU-friendly hash (implementation detail)
+- Memory: 32,768 × 480 bytes ≈ 15 MB (acceptable)
+
+**Sorting:** GPU-based
+- Algorithm: Parallel radix sort or bitonic sort (TBD during implementation)
+- Why not CPU: Minimize GPU→CPU→GPU transfers; keep data on device
+
+**Fallback:** Mandatory on-the-fly computation
+- Handles: Cache misses, stale entries (leaf already expanded), first dispatch
+
+### Decoupled Rollout Architecture (In Progress)
+
+**Goal:** Eliminate blocking between tree operations and rollouts to maximize GPU utilization.
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────┐
+│     UNIFIED KERNEL (Single Dispatch)│
+│  (Both Tree & Rollout Workers)      │
+└─────────────────────────────────────┘
+         │
+    Threads choose role dynamically
+         │
+    ┌────┴────┐
+    │         │
+┌───▼──┐  ┌──▼────┐
+│ Tree │  │Rollout│
+│Worker│  │Worker │
+└───┬──┘  └──┬────┘
+    │        │
+    │   Queue rollout
+    │        │
+    ▼        ▼
+┌─────────────────┐
+│ rollout_queue   │
+│ ┌─────────────┐ │
+│ │position     │ │
+│ │leaf_node_idx│ │
+│ │leaf_player  │ │
+│ └─────────────┘ │
+└─────────────────┘
+         │
+    Rollout worker
+    processes
+         │
+         ▼
+┌─────────────────┐
+│ backprop_queue  │
+│ ┌─────────────┐ │
+│ │leaf_node_idx│ │
+│ │result (0-2) │ │
+│ │leaf_player  │ │
+│ └─────────────┘ │
+└─────────────────┘
+         │
+    Tree worker
+    processes
+         │
+         ▼
+    Parent pointer
+    backprop
+```
+
+**Key Components:**
+
+1. **Rollout Queue** (Storage Buffer):
+```wgsl
+struct RolloutJob {
+    position: array<i32, 64>,  // Board state
+    leaf_node_idx: u32,        // Which node to associate with
+    leaf_player: i32,          // Player at leaf
+}
+// Queue: array<RolloutJob, MAX_QUEUE_SIZE>
+// Head: atomic<u32> (for enqueue/dequeue)
+```
+
+2. **Backprop Queue** (Storage Buffer):
+```wgsl
+struct BackpropJob {
+    leaf_node_idx: u32,  // Start backprop here
+    result: u32,         // 0=loss, 1=draw, 2=win
+    leaf_player: i32,    // For perspective calculation
+}
+// Queue: array<BackpropJob, MAX_QUEUE_SIZE>
+// Head: atomic<u32>
+```
+
+3. **Thread State** (No Path Array Needed):
+```wgsl
+struct ThreadState {
+    phase: u32,                  // SELECTION/EXPANSION/IDLE/ROLLOUT_ACTIVE/BACKPROP
+    current_node: u32,
+    // NOTE: rng_seed removed - using global atomic counter (see RNG Architecture)
+    
+    // For backprop (parent pointer walk)
+    backprop_current_node: u32,  // Walk up from here
+    backprop_result: u32,
+    backprop_leaf_player: i32,
+    
+    // For rollout
+    rollout_board: array<i32, 64>,
+    rollout_player: i32,
+    rollout_moves_remaining: u32,
+}
+```
+
+**Execution Flow:**
+
+```wgsl
+fn unified_worker() {
+    // Dynamic role selection
+    if (should_be_rollout_worker()) {
+        rollout_worker_logic();
+    } else {
+        tree_worker_logic();
+    }
+}
+
+fn tree_worker_logic() {
+    if (state.phase == SELECTION) {
+        select_one_child();
+        if (reached_leaf) { state.phase = EXPANSION; }
+    }
+    else if (state.phase == EXPANSION) {
+        if (try_expand()) {
+            // Queue rollout (don't wait!)
+            enqueue_rollout(position, leaf_node_idx, leaf_player);
+        }
+        state.phase = IDLE;  // Immediately available for other work
+    }
+    else if (state.phase == BACKPROP) {
+        // One step: backprop current node, move to parent
+        backprop_one_node_via_parent_pointer();
+    }
+    else if (state.phase == IDLE) {
+        // Look for work
+        if (backprop_queue_has_work()) {
+            job = dequeue_backprop();
+            state.backprop_current_node = job.leaf_node_idx;
+            state.backprop_result = job.result;
+            state.phase = BACKPROP;
+        } else {
+            // Start new MCTS cycle
+            state.phase = SELECTION;
+            state.current_node = root;
+        }
+    }
+}
+
+fn rollout_worker_logic() {
+    if (state.phase == ROLLOUT_ACTIVE) {
+        do_rollout_chunk();
+        if (terminal) {
+            enqueue_backprop(leaf_node_idx, result, leaf_player);
+            state.phase = IDLE;
+        }
+    }
+    else if (rollout_queue_has_work()) {
+        job = dequeue_rollout();
+        state.rollout_board = job.position;
+        state.leaf_node_idx = job.leaf_node_idx;
+        state.phase = ROLLOUT_ACTIVE;
+    }
+}
+```
+
+**Benefits:**
+- ✅ Tree workers never block on rollouts
+- ✅ Rollouts happen asynchronously in background
+- ✅ Better GPU utilization (all threads productive)
+- ✅ Smaller queue entries (no path array)
+- ✅ Natural load balancing via queue sizes
+
+**Testing:** See `tests/test_decoupled_rollout_architecture.rs`
+
+**Test Results (Baseline - Current Blocking Architecture):**
+```
+Test: test_queue_based_execution (256 threads, 50 steps)
+- Rollouts started: 8,166
+- Expansions: 16
+- Root visits: 518 (6.3% completion rate)
+
+Issue: Only 6.3% of rollouts complete backprop to root within 50 steps
+```
+
+**Implementation Plan (TDD):**
+
+Phase 1: Add Queue Buffers
+- [ ] Add rollout_queue and backprop_queue buffers to WGSL
+- [ ] Add queue enqueue/dequeue functions
+- [ ] Test: Verify queues can be written/read
+
+Phase 2: Modify Tree Workers
+- [ ] After expansion, enqueue rollout instead of blocking
+- [ ] Make IDLE phase check backprop_queue
+- [ ] Test: Verify expansions enqueue rollouts
+
+Phase 3: Modify Rollout Workers  
+- [ ] Make rollout workers dequeue from rollout_queue
+- [ ] After completion, enqueue to backprop_queue
+- [ ] Test: Verify rollouts complete and enqueue backprop
+
+Phase 4: Parent Pointer Backprop
+- [ ] Modify BACKPROP phase to walk parent pointers
+- [ ] Remove path array dependency
+- [ ] Test: Verify visit counts accumulate correctly
+
+Phase 5: Dynamic Load Balancing
+- [ ] Add should_be_rollout_worker() logic
+- [ ] Test: Verify threads switch roles based on queue sizes
+
+**Success Metrics:**
+- Root visit completion rate > 80% (vs current 6.3%)
+- Tree expansion rate increase > 2x
+- GPU utilization > 90%
+
+### Implementation Status: ✅ INTEGRATED INTO GAME
+
+The incremental execution system is **now the default execution path** for GPU MCTS in the game:
+
+**Integration Points:**
+- `search_gpu_native_othello()` in [src/lib.rs](src/lib.rs) now calls `run_incremental_mcts()` instead of batched `dispatch_mcts_othello_kernel()` loop
+- **GPU Warmup:** Engine initialization includes a warmup run (256 threads, 10 steps) to trigger all lazy GPU resource initialization (shader compilation, buffer allocation) before the game starts. This prevents the first move from paying initialization costs during its timeout.
+- All buffer allocations happen on-demand during dispatch (no changes needed to initialization)
+- Thread count automatically capped at 16,384 for reasonable GPU utilization
+- Max steps calculated from total iterations / num_threads (minimum 100 steps per thread)
+- Timeout still enforced, but now checked after full incremental search completes
+- **Softmax Sampling:** Selection phase uses temperature-based softmax sampling over PUCT scores instead of deterministic max selection, providing exploration diversity across threads
+
+**Benefits Realized:**
+- Eliminates "wave crashing" behavior of old batched approach
+- Each thread progresses independently through MCTS phases
+- Rollout kernel separated - doesn't block fast phases (selection/expansion/backprop)
+- Better GPU occupancy through chunked rollout execution (8 moves per chunk)
+
+**Configuration:**
+- Incremental system automatically used when `search_gpu_native_othello()` is called
+- No manual switches needed - it's the production code path
+- Old batched approach still exists in `dispatch_mcts_othello_kernel()` but not used by game
+
+### Expected Impact
+
+**Separate Rollout Kernel Benefits:**
+- **No blocking:** Selection/expansion/backprop phases (fast, <10μs) don't wait for rollouts (slow, 200-500μs)
+- **Natural load balancing:** Threads in different kernels execute independently
+- **Optimal workgroup sizing:** Can tune rollout kernel separately (e.g., fewer threads but more registers)
+
+**Chunked Rollout Benefits:**
+- **Reduced overhead:** 8 moves/chunk = ~4-8 dispatches for typical 30-move game (vs 30 for 1-move chunks)
+- **Better GPU occupancy:** More work per dispatch = better amortization of launch overhead
+- **Tunable:** Can adjust MOVES_PER_CHUNK based on profiling (4-16 moves)
+
+**Example Timeline (One Thread):**
+```
+Dispatch 1: SELECTION (traverse 5 nodes to leaf) → 8μs
+Dispatch 2: EXPANSION (lock, cache hit, allocate) → 12μs
+Dispatch 3-6: ROLLOUT_ACTIVE (8 moves × 4 chunks = 32 moves) → 60μs each
+Dispatch 7-11: BACKPROP (5 nodes × 1 per dispatch) → 6μs each
+Total: 282μs for one iteration
+
+Meanwhile other threads can be in SELECTION while this thread rolls out!
+```
+
+**Lock Duration Reduction:**
+- Current: Lock held for `t_compute + t_allocate` microseconds
+- With pre-computation: Lock held for `t_allocate` only (cache hit)
+- Estimate: ~40-60% reduction in lock duration (depends on move generation cost)
+
+**Throughput Improvement:**
+- Shorter lock duration → more leaves available per unit time
+- More available leaves → better efficiency in subsequent waves
+- Expected: 15-30% improvement in early-wave expansion success rate
+
+**Memory Overhead:**
+- Candidate buffer: 200,000 × 8 bytes = 1.6 MB (max nodes)
+- Pre-computed cache: 32,768 × 480 bytes = 15 MB
+- Total: ~17 MB additional GPU memory (small relative to tree size)
+
+### Testing Strategy
+
+1. **Cache Hit Rate Test:** Measure % of expansions using pre-computed moves
+2. **Contention Reduction Test:** Compare exp_locked% with/without pre-computation
+3. **Lock Duration Profiling:** Measure time between lock acquisition and release
+4. **Performance Regression:** Ensure no slowdown from cache lookup overhead
+
+### Future Optimizations
+
+- **Adaptive budget:** Scale with tree size (more leaves → larger budget)
+- **Multi-level cache:** Keep previous wave's cache valid for 2-3 waves
+- **Priority queue:** Continuously update top-K as tree evolves
+- **Board state hashing:** Avoid recomputing moves for transposed positions (if DAG structure added)
+
+---
+
 ## GPU Dispatch Grid and Thread Coordination
 
 - **Dispatch Grid Sizing:**

@@ -70,7 +70,7 @@ fn test_gpu_advance_root() {
         let start = std::time::Instant::now();
         
         for batch in 0..target_batches {
-            engine.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 1.0, 42); // 256 workgroups * 64 = 16384 iterations (use all free lists!)
+            engine.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 1.0, 0.01, 42); // 256 workgroups * 64 = 16384 iterations (use all free lists!)
             
             if batch % 100 == 0 && batch > 0 {
                 let stats = engine.get_children_stats();
@@ -155,7 +155,7 @@ fn test_gpu_advance_root() {
             println!("[TEST] Running MCTS to expand new root (50 batches to verify no saturation)");
             let batch_start = std::time::Instant::now();
             for batch in 0..50 {
-                engine.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 1.0, 42);
+                engine.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 1.0, 0.01, 42);
                 
                 // Check periodically that we're not saturated
                 if batch % 10 == 9 {

@@ -9,6 +9,162 @@ struct RerootParams {
     max_nodes: u32,  // Work queue capacity
 };
 
+// =============================================================================
+// Pre-Computation Optimization Structures (Group 6)
+// =============================================================================
+
+struct LeafCandidate {
+    node_id: u32,      // Index of the leaf node
+    score: u32,         // Parent's visit count (heuristic for selection probability)
+};
+
+struct PrecomputedMoves {
+    leaf_id: u32,       // Which leaf this cache entry is for
+    num_moves: u32,     // How many legal moves
+    moves: array<i32, 60>,  // Pre-computed legal moves (max 60 for Othello)
+};
+
+struct PrecomputeDiagnostics {
+    candidates_found: atomic<u32>,    // Total leaves discovered
+    cache_entries_created: atomic<u32>, // How many we pre-computed
+    cache_hits: atomic<u32>,          // Expansions that used cache
+    cache_misses: atomic<u32>,        // Expansions that computed on-the-fly
+};
+
+@group(6) @binding(0) var<storage, read_write> leaf_candidates: array<LeafCandidate>;
+@group(6) @binding(1) var<storage, read_write> candidate_count: atomic<u32>;
+@group(6) @binding(2) var<storage, read_write> precomputed_cache: array<PrecomputedMoves>;
+@group(6) @binding(3) var<storage, read_write> cache_size: u32;
+@group(6) @binding(4) var<storage, read_write> precompute_diag: PrecomputeDiagnostics;
+
+// =============================================================================
+// Incremental Execution Thread State (Group 7)
+// =============================================================================
+
+// Phase constants
+const PHASE_SELECTION: u32 = 0u;
+const PHASE_EXPANSION: u32 = 1u;
+const PHASE_ROLLOUT_ACTIVE: u32 = 2u;
+const PHASE_BACKPROP: u32 = 3u;
+const PHASE_FINISHED: u32 = 4u;
+const PHASE_IDLE: u32 = 5u;
+
+struct ThreadState {
+    phase: u32,                         // Current MCTS phase (SELECTION/EXPANSION/ROLLOUT_ACTIVE/BACKPROP/FINISHED)
+    current_node: u32,                  // Node we're currently at (during selection)
+    path: array<u32, 128>,              // Path from root to current position
+    path_len: u32,                      // Number of nodes in path
+    rng_seed: u32,                      // Random seed for this thread
+    leaf_player: i32,                   // Player at leaf (for backprop perspective)
+    rollout_result: u32,                // Rollout outcome (0=loss, 1=draw, 2=win for leaf_player)
+    backprop_index: u32,                // Which node we're backpropping (counts down from path_len)
+    
+    // Rollout state (for chunked rollout execution in separate kernel)
+    rollout_board: array<i32, 64>,      // Current board state during rollout
+    rollout_player: i32,                // Current player during rollout
+    rollout_moves_remaining: u32,       // Moves until terminal (or chunk limit, max 60)
+    
+    _pad0: u32,                         // Padding for alignment
+};
+
+@group(7) @binding(0) var<storage, read_write> thread_states: array<ThreadState>;
+
+// =============================================================================
+// Decoupled Rollout Queue Structures (Group 7 - Additional Bindings)
+// =============================================================================
+
+// Rollout job: tree workers queue these after expansion
+struct RolloutJob {
+    position: array<i32, 64>,  // Board state at leaf
+    leaf_node_idx: u32,        // Which node this rollout is for
+    leaf_player: i32,          // Player at leaf (for backprop perspective)
+    _pad0: u32,                // Padding for alignment (total: 68*4 = 272 bytes)
+};
+
+// Backprop job: rollout workers queue these after completing rollouts
+struct BackpropJob {
+    leaf_node_idx: u32,  // Start backprop from this node
+    result: u32,         // Rollout outcome (0=loss, 1=draw, 2=win for leaf_player)
+    leaf_player: i32,    // Player at leaf (for perspective calculation)
+    _pad0: u32,          // Padding for alignment (total: 16 bytes)
+};
+
+@group(7) @binding(1) var<storage, read_write> rollout_queue: array<RolloutJob>;
+@group(7) @binding(2) var<storage, read_write> rollout_head: atomic<u32>;
+@group(7) @binding(3) var<storage, read_write> backprop_queue: array<BackpropJob>;
+@group(7) @binding(4) var<storage, read_write> backprop_head: atomic<u32>;
+
+// Queue helper functions
+fn enqueue_rollout(position: array<i32, 64>, leaf_idx: u32, leaf_player: i32) -> bool {
+    let idx = atomicAdd(&rollout_head, 1u);
+    // Check for overflow (queue size is max_threads * 2)
+    if (idx >= arrayLength(&rollout_queue)) {
+        // Queue full - decrement and fail
+        atomicSub(&rollout_head, 1u);
+        return false;
+    }
+    
+    rollout_queue[idx].position = position;
+    rollout_queue[idx].leaf_node_idx = leaf_idx;
+    rollout_queue[idx].leaf_player = leaf_player;
+    return true;
+}
+
+fn dequeue_rollout() -> RolloutJob {
+    let idx = atomicSub(&rollout_head, 1u);
+    // Check for underflow
+    if (idx == 0u || idx > arrayLength(&rollout_queue)) {
+        // Queue empty - restore and return invalid job
+        atomicAdd(&rollout_head, 1u);
+        var invalid: RolloutJob;
+        invalid.leaf_node_idx = 0xFFFFFFFFu;  // INVALID_INDEX marker
+        return invalid;
+    }
+    
+    return rollout_queue[idx - 1u];
+}
+
+fn enqueue_backprop(leaf_idx: u32, result: u32, leaf_player: i32) -> bool {
+    let idx = atomicAdd(&backprop_head, 1u);
+    if (idx >= arrayLength(&backprop_queue)) {
+        atomicSub(&backprop_head, 1u);
+        return false;
+    }
+    
+    backprop_queue[idx].leaf_node_idx = leaf_idx;
+    backprop_queue[idx].result = result;
+    backprop_queue[idx].leaf_player = leaf_player;
+    return true;
+}
+
+fn dequeue_backprop() -> BackpropJob {
+    let idx = atomicSub(&backprop_head, 1u);
+    if (idx == 0u || idx > arrayLength(&backprop_queue)) {
+        atomicAdd(&backprop_head, 1u);
+        var invalid: BackpropJob;
+        invalid.leaf_node_idx = 0xFFFFFFFFu;
+        return invalid;
+    }
+    
+    return backprop_queue[idx - 1u];
+}
+
+/// Phase 5: Dynamic Load Balancing
+/// Decide if thread should become a rollout worker based on queue pressure.
+/// Returns true if rollout_queue is fuller than backprop_queue (needs rollout workers).
+fn should_be_rollout_worker() -> bool {
+    let rollout_size = atomicLoad(&rollout_head);
+    let backprop_size = atomicLoad(&backprop_head);
+    
+    // If rollout queue has work and backprop queue is not overwhelming, do rollouts
+    // Threshold: if rollout_queue >= backprop_queue, prioritize rollouts
+    return rollout_size >= backprop_size;
+}
+
+// =============================================================================
+// Pruning Structures (Group 4)
+// =============================================================================
+
 @group(4) @binding(0) var<uniform> reroot_params: RerootParams;
 @group(4) @binding(1) var<storage, read_write> new_root_output: u32;
 @group(4) @binding(2) var<storage, read_write> global_free_queue: array<u32>;
@@ -352,11 +508,50 @@ fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32, workgroup_id: ve
         }
     }
 
-    // Rollout phase
+    // Rollout/Evaluation phase
     atomicAdd(&diagnostics.rollouts, 1u);
     var rollout_board = reconstruct_board(&path, path_len);
     let leaf_player = node_info[current].player_at_node;
-    let rollout_result = simulate_game(&rollout_board, leaf_player);
+    
+    // Check if current position is terminal:
+    // After expansion, if current node has 0 children, current player has no moves.
+    // We need to check if opponent also has no moves to determine if game is over.
+    let current_has_moves = atomicLoad(&node_info[current].num_children) > 0u;
+    var is_terminal = false;
+    if (!current_has_moves) {
+        // Current player has no moves. Check if opponent has moves.
+        let opponent_moves = count_valid_moves(&rollout_board, -leaf_player);
+        if (opponent_moves == 0) {
+            // Both players have no moves - game is terminal
+            is_terminal = true;
+            atomicAdd(&diagnostics.expansion_terminal, 1u);
+        }
+    }
+    
+    // Determine game winner (actual player who won: 1, -1, or 0 for draw)
+    var winner: i32;
+    if (is_terminal) {
+        // Terminal position - evaluate directly by counting pieces
+        var p1_count = 0;
+        var p2_count = 0;
+        for (var i = 0; i < 64; i++) {
+            if (rollout_board[i] == 1) {
+                p1_count++;
+            } else if (rollout_board[i] == -1) {
+                p2_count++;
+            }
+        }
+        if (p1_count > p2_count) {
+            winner = 1;  // Player 1 wins
+        } else if (p1_count < p2_count) {
+            winner = -1;  // Player -1 wins
+        } else {
+            winner = 0;  // Draw
+        }
+    } else {
+        // Non-terminal - simulate game to completion
+        winner = simulate_game(&rollout_board, leaf_player);
+    }
 
     // Backpropagation phase
     for (var i = path_len; i > 0u; i--) {
@@ -364,14 +559,31 @@ fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32, workgroup_id: ve
         atomicAdd(&node_vl[node_idx], -1);
         let v = atomicAdd(&node_visits[node_idx], 1);
         
-        // CRITICAL: Node stats use PARENT'S perspective (player who moved TO this node)
-        // This matches CPU MCTS convention where wins[node] = wins from parent's POV
-        // parent = the player who chose this node (i.e., opponent of player_at_node)
+        // CRITICAL: Reward calculation must match CPU MCTS convention
         let player_at_node = node_info[node_idx].player_at_node;
-        let player_who_moved = -player_at_node;  // Parent is opponent
-        var reward = rollout_result;
-        if (player_who_moved != leaf_player) {
-            reward = 2 - rollout_result;
+        var reward: i32;
+        
+        // Special case: Root node (has no parent)
+        // CPU stores root stats from perspective of player whose turn it is at root
+        if (node_idx == params.root_idx) {
+            if (winner == player_at_node) {
+                reward = 2;  // Win for player at root
+            } else if (winner == 0) {
+                reward = 1;  // Draw
+            } else {
+                reward = 0;  // Loss
+            }
+        } else {
+            // Non-root nodes: use parent's perspective
+            // player_who_moved = opponent of player_at_node
+            let player_who_moved = -player_at_node;
+            if (winner == player_who_moved) {
+                reward = 2;  // Win for player_who_moved
+            } else if (winner == 0) {
+                reward = 1;  // Draw
+            } else {
+                reward = 0;  // Loss
+            }
         }
         atomicAdd(&node_wins[node_idx], reward);
     }
@@ -450,11 +662,12 @@ fn main(
 const MAX_CHILDREN: u32 = 64u;
 const MAX_PATH_LENGTH: u32 = 128u;
 const INVALID_INDEX: u32 = 0xFFFFFFFFu;
+const PASS_MOVE_ID: u32 = 0xFFFFFFFEu;  // Special ID for pass moves
 
 // Explicit error codes for select_best_child
-const SELECT_BEST_CHILD_NO_CHILDREN: u32 = 0xFFFFFFFEu;
-const SELECT_BEST_CHILD_NO_VALID: u32 = 0xFFFFFFFDu;
-const SELECT_BEST_CHILD_SOFTMAX_PANIC: u32 = 0xFFFFFFFCu;
+const SELECT_BEST_CHILD_NO_CHILDREN: u32 = 0xFFFFFFFDu;
+const SELECT_BEST_CHILD_NO_VALID: u32 = 0xFFFFFFFCu;
+const SELECT_BEST_CHILD_SOFTMAX_PANIC: u32 = 0xFFFFFFFBu;
 
 const NODE_STATE_EMPTY: u32 = 0u;
 const NODE_STATE_EXPANDING: u32 = 1u;
@@ -484,6 +697,11 @@ struct MctsParams {
     temperature: f32,
     turn_number: u32, // NEW: unique per-turn identifier
     free_list_capacity: u32, // Capacity per free list (max_nodes / 256 rounded up)
+    vl_temp_scale: f32, // Scaling factor for VL-based temperature boost
+    num_threads: u32, // NEW: Number of threads for incremental execution
+    root_node: u32, // NEW: Current root node index for incremental execution
+    use_vl_preincrement: u32, // 1 = use pre-increment VL, 0 = increment only selected child
+    use_random_rollouts: u32, // 1 = use random test rollouts, 0 = real game simulation
 }
 
 struct NodeInfo {
@@ -517,6 +735,18 @@ struct Diagnostics {
     total_children_gen: atomic<u32>,
     prune_work_claimed: atomic<u32>, // DEBUG: How many work items successfully claimed
     prune_push_attempts: atomic<u32>, // DEBUG: Total attempts in free list push loop
+    max_temp_boost: atomic<u32>, // Maximum temperature boost observed (stored as u32, divide by 1000 for f32)
+    random_rollout_wins: atomic<u32>, // Count of result=2 (win) from random rollouts (from p1 perspective)
+    random_rollout_draws: atomic<u32>, // Count of result=1 (draw) from random rollouts
+    random_rollout_losses: atomic<u32>, // Count of result=0 (loss) from random rollouts (from p1 perspective)
+    random_rollout_from_p1: atomic<u32>, // Count of rollouts where leaf_player == 1
+    random_rollout_from_p2: atomic<u32>, // Count of rollouts where leaf_player == -1
+    random_rollout_p1_wins_raw: atomic<u32>, // Count where p1_score > 32 in game simulation
+    random_rollout_p1_losses_raw: atomic<u32>, // Count where p1_score < 32 in game simulation
+    random_rollout_p1_score_sum: atomic<u32>, // Sum of all p1_score values for distribution checking
+    random_rollout_min_tid: atomic<u32>, // Minimum thread ID that did a rollout (initialized to 0xFFFFFFFF)
+    random_rollout_max_tid: atomic<u32>, // Maximum thread ID that did a rollout
+    global_rollout_counter: atomic<u32>, // Global counter for independent RNG seeding
 }
 
 // =============================================================================
@@ -534,9 +764,10 @@ struct Diagnostics {
 // Per-workgroup free lists (runtime-sized inner array)
 @group(0) @binding(7) var<storage, read_write> free_lists_flat: array<u32>;
 @group(0) @binding(8) var<storage, read_write> free_tops: array<atomic<u32>, 256>;
-@group(0) @binding(9) var<storage, read_write> global_free_queue_alloc: array<u32>;
-@group(0) @binding(10) var<storage, read_write> global_free_head_alloc: atomic<u32>;
-@group(0) @binding(11) var<storage, read_write> expansion_paused: atomic<u32>;
+@group(0) @binding(9) var<storage, read_write> free_list_ownership: array<atomic<u32>, 256>;  // Which workgroup owns each free list (0-255 or 0xFFFF=unowned)
+@group(0) @binding(10) var<storage, read_write> global_free_queue_alloc: array<u32>;
+@group(0) @binding(11) var<storage, read_write> global_free_head_alloc: atomic<u32>;
+@group(0) @binding(12) var<storage, read_write> expansion_paused: atomic<u32>;
 
 // Group 1: Execution State
 @group(1) @binding(0) var<uniform> params: MctsParams;
@@ -572,8 +803,8 @@ fn pcg_hash(input: u32) -> u32 {
 }
 
 fn rand_u32() -> u32 {
-    rng_state = pcg_hash(rng_state);
-    return rng_state;
+    let rng_val = atomicAdd(&diagnostics.global_rollout_counter, 1u);
+    return pcg_hash(rng_val);
 }
 
 fn rand_f32() -> f32 {
@@ -746,23 +977,24 @@ fn simulate_game(board: ptr<function, array<i32, 64>>, start_player: i32) -> i32
         current_player = -current_player;
     }
     
-    // Count pieces
-    var player_count = 0;
-    var opponent_count = 0;
+    // Count pieces to determine actual winner
+    var p1_count = 0;
+    var p2_count = 0;
     for (var i = 0; i < 64; i++) {
-        if ((*board)[i] == start_player) {
-            player_count++;
-        } else if ((*board)[i] == -start_player) {
-            opponent_count++;
+        if ((*board)[i] == 1) {
+            p1_count++;
+        } else if ((*board)[i] == -1) {
+            p2_count++;
         }
     }
     
-    if (player_count > opponent_count) {
-        return 2;
-    } else if (player_count < opponent_count) {
-        return 0;
-    } else {
+    // Return actual winner: 1, -1, or 0 (draw)
+    if (p1_count > p2_count) {
         return 1;
+    } else if (p1_count < p2_count) {
+        return -1;
+    } else {
+        return 0;
     }
 }
 
@@ -863,9 +1095,17 @@ fn select_best_child(parent_idx: u32) -> u32 {
     // (We can't actually print from shader, but we can write to diagnostics or check values)
     
     // Convert to probabilities using softmax with temperature (subtract max for numerical stability)
+    // Higher virtual loss at parent -> higher effective temperature to spread out threads more
     var probs: array<f32, 64>;
     var sum_exp = 0.0;
-    let temp = max(params.temperature, 0.00001);
+    let parent_vl = atomicLoad(&node_vl[parent_idx]);
+    let vl_boost = 1.0 + f32(parent_vl) * params.virtual_loss_weight * params.vl_temp_scale;
+    let temp = max(params.temperature * vl_boost, 0.00001);
+    
+    // Track maximum temperature boost for diagnostics
+    let boost_as_u32 = u32(vl_boost * 1000.0);
+    atomicMax(&diagnostics.max_temp_boost, boost_as_u32);
+    
     for (var j = 0u; j < valid_count; j++) {
         let exponent = (scores[j] - max_score) / temp;
         probs[j] = exp(exponent);
@@ -899,55 +1139,82 @@ fn select_best_child(parent_idx: u32) -> u32 {
 
 // Try to allocate a new node
 fn try_allocate_node(my_workgroup: u32) -> u32 {
-    // Try per-workgroup free list first
-    let local_top = atomicSub(&free_tops[my_workgroup], 1u);
-    if (local_top > 0u && local_top <= params.free_list_capacity) {
-        let flat_idx = my_workgroup * params.free_list_capacity + (local_top - 1u);
-        let idx = free_lists_flat[flat_idx];
-        if (idx != INVALID_INDEX) {
-            // Clear deleted and dirty bits, set zero bit if node is zeroed
-            atomicAnd(&node_info[idx].flags, ~1u); // clear deleted
-            atomicAnd(&node_info[idx].flags, ~(1u << 2)); // clear dirty
-            // zero bit is set if node is zeroed, otherwise must be cleared by user
-            return idx;
+    const UNOWNED: u32 = 0xFFFFu;
+    
+    // Try all free lists owned by my workgroup
+    for (var list_idx = 0u; list_idx < 256u; list_idx++) {
+        let owner = atomicLoad(&free_list_ownership[list_idx]);
+        if (owner == my_workgroup) {
+            // This list is owned by my workgroup, try to pop from it
+            let local_top = atomicSub(&free_tops[list_idx], 1u);
+            if (local_top > 0u && local_top <= params.free_list_capacity) {
+                let flat_idx = list_idx * params.free_list_capacity + (local_top - 1u);
+                let idx = free_lists_flat[flat_idx];
+                if (idx != INVALID_INDEX) {
+                    atomicAnd(&node_info[idx].flags, ~1u); // clear deleted
+                    atomicAnd(&node_info[idx].flags, ~(1u << 2)); // clear dirty
+                    return idx;
+                }
+            } else {
+                // List is empty - restore counter and release ownership
+                atomicAdd(&free_tops[list_idx], 1u);
+                atomicStore(&free_list_ownership[list_idx], UNOWNED);
+            }
         }
-    } else {
-        // Restore counter if we failed to pop (empty or underflow)
-        atomicAdd(&free_tops[my_workgroup], 1u);
+    }
+
+    // No owned free lists have nodes - try to claim an unowned free list
+    for (var list_idx = 0u; list_idx < 256u; list_idx++) {
+        let old_owner = atomicCompareExchangeWeak(&free_list_ownership[list_idx], UNOWNED, my_workgroup);
+        if (old_owner.exchanged) {
+            // Successfully claimed this free list! Try to pop from it
+            let local_top = atomicSub(&free_tops[list_idx], 1u);
+            if (local_top > 0u && local_top <= params.free_list_capacity) {
+                let flat_idx = list_idx * params.free_list_capacity + (local_top - 1u);
+                let idx = free_lists_flat[flat_idx];
+                if (idx != INVALID_INDEX) {
+                    atomicAnd(&node_info[idx].flags, ~1u); // clear deleted
+                    atomicAnd(&node_info[idx].flags, ~(1u << 2)); // clear dirty
+                    return idx;
+                }
+            } else {
+                // Claimed an empty list - restore counter and release ownership
+                atomicAdd(&free_tops[list_idx], 1u);
+                atomicStore(&free_list_ownership[list_idx], UNOWNED);
+            }
+        }
     }
 
     // Try global free list
     let global_top = atomicLoad(&global_free_head_alloc);
     if (global_top > 0u) {
-        // Try to claim a slot via compare-exchange to avoid underflow races
         let claimed = atomicSub(&global_free_head_alloc, 1u);
         if (claimed > 0u) {
-            // Successfully claimed a node from the global free list
             let idx = global_free_queue_alloc[claimed - 1u];
-            if (idx != INVALID_INDEX && idx != 0u) { // Extra safety: never return node 0
+            if (idx != INVALID_INDEX && idx != 0u) {
                  atomicAnd(&node_info[idx].flags, ~1u); // clear deleted
                  atomicAnd(&node_info[idx].flags, ~(1u << 2)); // clear dirty
                  return idx;
             }
-            // Invalid node in queue, try again (fall through to allocator)
         } else {
-            // Another thread claimed the last slot, restore counter
             atomicAdd(&global_free_head_alloc, 1u);
         }
     }
 
     // Fallback: global allocation
-    let alloc_idx = atomicAdd(&alloc_counter, 1u);
-    if (alloc_idx < params.max_nodes) {
-        // Safety check: never allocate root (0)
-        if (alloc_idx == 0u) { return INVALID_INDEX; }
-        
-        // New node: set zero bit, clear deleted and dirty
-        atomicStore(&node_info[alloc_idx].flags, (1u << 1)); // zero bit
-        return alloc_idx;
+    // Only use alloc_counter during initial tree creation (when it's < max_nodes/2)
+    // After that, rely solely on free lists to prevent alloc_counter overflow
+    let current_alloc = atomicLoad(&alloc_counter);
+    if (current_alloc < params.max_nodes / 2u) {
+        let alloc_idx = atomicAdd(&alloc_counter, 1u);
+        if (alloc_idx < params.max_nodes) {
+            if (alloc_idx == 0u) { return INVALID_INDEX; }
+            atomicStore(&node_info[alloc_idx].flags, (1u << 1)); // zero bit
+            return alloc_idx;
+        }
     }
 
-    // All allocation sources exhausted - set expansion pause flag
+    // All allocation sources exhausted
     atomicStore(&expansion_paused, 1u);
     return INVALID_INDEX;
 }
@@ -1031,10 +1298,13 @@ fn reconstruct_board(path: ptr<function, array<u32, 128>>, path_length: u32) -> 
         let info = node_info[node_idx];
         let move_id = info.move_id;
         
-        if (move_id != INVALID_INDEX) {
+        if (move_id != INVALID_INDEX && move_id != PASS_MOVE_ID) {
+            // Regular move: apply it to the board
             let pos = decode_move(move_id);
             apply_move(&board, pos.x, pos.y, -info.player_at_node);
         }
+        // Pass moves (PASS_MOVE_ID): don't modify board, just switches player
+        // Player switch is already handled by player_at_node in the tree
     }
     
     return board;
@@ -1102,6 +1372,35 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
         if (num_children >= MAX_CHILDREN) {
             break;
         }
+    }
+    
+    // PASS MOVE HANDLING: If no regular moves found, check if opponent has moves
+    // If opponent has moves, this is a pass situation (not terminal)
+    if (num_children == 0u) {
+        let opponent_moves = count_valid_moves(board, -player);
+        if (opponent_moves > 0) {
+            // Create a pass move child
+            let child_idx = try_allocate_node(my_workgroup);
+            if (child_idx == INVALID_INDEX) {
+                // Memory pressure! Can't create pass move
+                atomicStore(&node_state[node_idx], NODE_STATE_READY);
+                return false;
+            }
+            // Set up pass move child
+            node_info[child_idx].parent_idx = node_idx;
+            node_info[child_idx].move_id = PASS_MOVE_ID;  // Special pass move ID
+            atomicStore(&node_info[child_idx].num_children, 0u);
+            node_info[child_idx].player_at_node = -player;  // Switch player
+            atomicStore(&node_info[child_idx].flags, 0u);
+            node_info[child_idx]._pad = 0u;
+            node_info[child_idx]._pad2 = 0u;
+            node_info[child_idx]._pad3 = 0u;
+            atomicStore(&node_state[child_idx], NODE_STATE_READY);
+            set_child_idx(node_idx, 0u, child_idx);
+            set_child_prior(node_idx, 0u, 1.0);  // 100% probability (only move)
+            num_children = 1u;
+        }
+        // else: num_children stays 0, node will be treated as terminal
     }
     
     // Normalize priors to sum to 1.0 (uniform distribution)
@@ -1240,5 +1539,805 @@ fn gather_root_stats(@builtin(global_invocation_id) global_id: vec3<u32>) {
         root_stats[slot].move_id = node_info[child_idx].move_id;
         root_stats[slot].visits = atomicLoad(&node_visits[child_idx]);
         root_stats[slot].wins = atomicLoad(&node_wins[child_idx]);
+    }
+}
+// Defragmentation kernel: Consolidate free lists and release unused ownership
+// This runs after pruning to prevent free list fragmentation
+@compute @workgroup_size(256)
+fn defragment_free_lists(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let list_idx = global_id.x;
+    if (list_idx >= 256u) { return; }
+    
+    let owner = atomicLoad(&free_list_ownership[list_idx]);
+    let top = atomicLoad(&free_tops[list_idx]);
+    
+    // If this list is owned but empty, release ownership back to UNOWNED
+    const UNOWNED: u32 = 0xFFFFu;
+    if (owner != UNOWNED && top == 0u) {
+        atomicStore(&free_list_ownership[list_idx], UNOWNED);
+    }
+    
+    // If this list has many nodes, transfer some to global free list
+    // This helps redistribute nodes for better workgroup access
+    if (top > params.free_list_capacity / 2u) {
+        // Transfer half of the nodes to global free list
+        let transfer_count = top / 2u;
+        for (var i = 0u; i < transfer_count; i++) {
+            let local_top = atomicSub(&free_tops[list_idx], 1u);
+            if (local_top > 0u && local_top <= params.free_list_capacity) {
+                let flat_idx = list_idx * params.free_list_capacity + (local_top - 1u);
+                let node_idx = free_lists_flat[flat_idx];
+                if (node_idx != INVALID_INDEX) {
+                    // Add to global free list
+                    let global_idx = atomicAdd(&global_free_head_alloc, 1u);
+                    if (global_idx < params.max_nodes) {
+                        global_free_queue_alloc[global_idx] = node_idx;
+                    } else {
+                        // Global list full, restore local counter
+                        atomicAdd(&free_tops[list_idx], 1u);
+                        break;
+                    }
+                }
+            } else {
+                // Restore counter if underflow
+                atomicAdd(&free_tops[list_idx], 1u);
+                break;
+            }
+        }
+    }
+}// =============================================================================
+// Incremental MCTS Execution (Fast Phases Only)
+// =============================================================================
+// This file contains kernels for incremental MCTS execution and chunked rollouts.
+// Designed to work with the thread state buffer (Group 7).
+
+/// Incremental MCTS step: ONE phase per thread per dispatch.
+/// Handles SELECTION, EXPANSION, and BACKPROP phases.
+/// ROLLOUT_ACTIVE threads are skipped (handled by separate rollout_chunk_kernel).
+@compute @workgroup_size(64)
+fn incremental_mcts_step(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+    let thread_id = global_id.x;
+    
+    // Bounds check
+    if (thread_id >= params.num_threads) {
+        return;
+    }
+    
+    var state = thread_states[thread_id];
+    
+    // Skip if finished or in rollout (handled by separate kernel)
+    if (state.phase == PHASE_FINISHED || state.phase == PHASE_ROLLOUT_ACTIVE) {
+        return;
+    }
+    
+    // Execute ONE step based on current phase
+    if (state.phase == PHASE_SELECTION) {
+        // Traverse ONE node down the tree
+        let current = state.current_node;
+        
+        // Check if current node is terminal or has no children
+        let num_children = atomicLoad(&node_info[current].num_children);
+        if (num_children == 0u) {
+            // Reached a leaf - move to expansion
+            state.phase = PHASE_EXPANSION;
+            state.leaf_player = node_info[current].player_at_node;
+        } else {
+            // Calculate PUCT scores for all children
+            var puct_scores: array<f32, MAX_CHILDREN>;
+            var valid_count = 0u;
+            
+            let parent_visits = f32(atomicLoad(&node_visits[current]));
+            let sqrt_parent = sqrt(parent_visits + 1.0);
+            
+            // Conditionally pre-increment VL for all children and capture old values
+            var old_vl: array<i32, MAX_CHILDREN>;
+            if (params.use_vl_preincrement != 0u) {
+                for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
+                    let child_idx = get_child_idx(current, i);
+                    if (child_idx != INVALID_INDEX) {
+                        old_vl[i] = atomicAdd(&node_vl[child_idx], 1);
+                    } else {
+                        old_vl[i] = 0;
+                    }
+                }
+            }
+            
+            for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
+                let child_idx = get_child_idx(current, i);
+                if (child_idx == INVALID_INDEX) { continue; }
+                
+                let visits = f32(atomicLoad(&node_visits[child_idx]));
+                let wins = f32(atomicLoad(&node_wins[child_idx]));
+                let vl = f32(select(atomicLoad(&node_vl[child_idx]), old_vl[i], params.use_vl_preincrement != 0u));
+                let prior = children_priors[current * MAX_CHILDREN + i];
+                
+                // Q-value (parent's perspective)
+                // Wins are in 0-2 range, so normalize to 0-1
+                var q = 0.5;
+                if (visits + vl > 0.0) {
+                    q = wins / (2.0 * (visits + vl));
+                }
+                
+                // U-value (exploration bonus)
+                let u = params.exploration * prior * sqrt_parent / (1.0 + visits + vl);
+                
+                puct_scores[i] = q + u;
+                valid_count++;
+            }
+            
+            if (valid_count == 0u) {
+                // No valid children - treat as leaf
+                state.phase = PHASE_EXPANSION;
+                state.leaf_player = node_info[current].player_at_node;
+            } else {
+                var selected_child = INVALID_INDEX;
+                var selected_idx = 0u;
+                
+                // Temperature = 0 or very small: argmax selection with tie-breaking
+                if (params.temperature < 0.01) {
+                    // Find max PUCT score
+                    var max_puct = -1000.0;
+                    for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
+                        let child_idx = get_child_idx(current, i);
+                        if (child_idx == INVALID_INDEX) { continue; }
+                        max_puct = max(max_puct, puct_scores[i]);
+                    }
+                    
+                    // Collect all children with max score
+                    var max_children: array<u32, MAX_CHILDREN>;
+                    var max_count = 0u;
+                    for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
+                        let child_idx = get_child_idx(current, i);
+                        if (child_idx == INVALID_INDEX) { continue; }
+                        
+                        if (abs(puct_scores[i] - max_puct) < 0.0001) {
+                            max_children[max_count] = i;
+                            max_count++;
+                        }
+                    }
+                    
+                    // Randomly select among tied children
+                    if (max_count > 0u) {
+                        let rng_val = pcg_hash(atomicAdd(&diagnostics.global_rollout_counter, 1u));
+                        // For small max_count, use high bits to avoid modulo bias
+                        // High 8 bits give range [0, 256), scale to [0, max_count)
+                        let rand_idx = ((rng_val >> 24u) * max_count) >> 8u;
+                        selected_idx = max_children[rand_idx];
+                        selected_child = get_child_idx(current, selected_idx);
+                    }
+                } else {
+                    // Apply softmax with temperature and sample
+                    // Find max PUCT for numerical stability
+                    var max_puct = -1000.0;
+                    for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
+                        let child_idx = get_child_idx(current, i);
+                        if (child_idx == INVALID_INDEX) { continue; }
+                        max_puct = max(max_puct, puct_scores[i]);
+                    }
+                    
+                    var exp_sum = 0.0;
+                    var exp_scores: array<f32, MAX_CHILDREN>;
+                    
+                    for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
+                        let child_idx = get_child_idx(current, i);
+                        if (child_idx == INVALID_INDEX) { continue; }
+                        
+                        // Subtract max for numerical stability
+                        let exp_score = exp((puct_scores[i] - max_puct) / params.temperature);
+                        exp_scores[i] = exp_score;
+                        exp_sum += exp_score;
+                    }
+                    
+                    // Sample from softmax distribution using independent RNG
+                    let rng_val = pcg_hash(atomicAdd(&diagnostics.global_rollout_counter, 1u));
+                    // Use power-of-2 masking: 2^20 = 1048576 for good precision
+                    let rand_val = rng_val & 1048575u;
+                    let sample = f32(rand_val) / 1048576.0;
+                    
+                    var cumulative = 0.0;
+                    
+                    for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
+                        let child_idx = get_child_idx(current, i);
+                        if (child_idx == INVALID_INDEX) { continue; }
+                        
+                        cumulative += exp_scores[i] / exp_sum;
+                        if (sample <= cumulative) {
+                            selected_child = child_idx;
+                            selected_idx = i;
+                            break;
+                        }
+                    }
+                    
+                    // Fallback to last valid child if sampling failed (e.g., NaN/Inf from extreme temperatures)
+                    if (selected_child == INVALID_INDEX) {
+                        for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
+                            let child_idx = get_child_idx(current, i);
+                            if (child_idx != INVALID_INDEX) {
+                                selected_child = child_idx;
+                                selected_idx = i;
+                            }
+                        }
+                    }
+                }
+                
+                if (selected_child != INVALID_INDEX) {
+                    // Conditionally decrement VL for non-selected children
+                    if (params.use_vl_preincrement != 0u) {
+                        for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
+                            let child_idx = get_child_idx(current, i);
+                            if (child_idx != INVALID_INDEX && child_idx != selected_child) {
+                                atomicAdd(&node_vl[child_idx], -1);
+                            }
+                        }
+                    } else {
+                        // Without pre-increment, add VL to selected child
+                        atomicAdd(&node_vl[selected_child], 1);
+                    }
+                    
+                    // Add to path
+                    state.path[state.path_len] = selected_child;
+                    state.path_len++;
+                    state.current_node = selected_child;
+                } else {
+                    // Should never happen, but treat as leaf
+                    state.phase = PHASE_EXPANSION;
+                    state.leaf_player = node_info[current].player_at_node;
+                }
+            }
+        }
+    } else if (state.phase == PHASE_EXPANSION) {
+        // Try to expand current node (the leaf) using existing expand_node logic
+        let leaf_idx = state.current_node;
+        
+        // Reconstruct board (use existing function)
+        var temp_path = state.path;
+        var board = reconstruct_board(&temp_path, state.path_len);
+        
+        // Try to expand using existing logic
+        let my_workgroup = workgroup_id.x;
+        let expanded = expand_node(leaf_idx, &board, my_workgroup);
+        
+        if (expanded) {
+            atomicAdd(&diagnostics.expansion_success, 1u);
+        }
+        
+        // DO NOT remove VL here! VL must stay until backprop completes.
+        // Backprop will remove VL as it walks up the tree.
+        
+        // PHASE 2: Enqueue rollout instead of blocking
+        // Tree worker queues rollout and becomes available for other work
+        let enqueued = enqueue_rollout(board, leaf_idx, state.leaf_player);
+        
+        // Transition to IDLE (available for backprop or new MCTS cycle)
+        state.phase = PHASE_IDLE;
+        
+    } else if (state.phase == PHASE_BACKPROP) {
+        // PHASE 4: Parent pointer backprop (walk up tree)
+        let node_idx = state.current_node;
+        
+        // Update this node's stats
+        atomicAdd(&node_visits[node_idx], 1);
+        
+        // Calculate reward from parent's perspective
+        let player_at_node = node_info[node_idx].player_at_node;
+        let player_who_moved = -player_at_node; // Parent is opponent
+        var reward = i32(state.rollout_result);
+        if (player_who_moved != state.leaf_player) {
+            reward = 2 - reward; // Flip perspective
+        }
+        atomicAdd(&node_wins[node_idx], reward);
+        
+        // Remove virtual loss from this node as we backprop through it
+        atomicAdd(&node_vl[node_idx], -1);
+        
+        // Move to parent
+        let parent_idx = node_info[node_idx].parent_idx;
+        if (parent_idx == INVALID_INDEX) {
+            // Reached root - backprop complete, transition to IDLE
+            state.phase = PHASE_IDLE;
+        } else {
+            // Continue backprop at parent
+            state.current_node = parent_idx;
+        }
+    } else if (state.phase == PHASE_IDLE) {
+        // PHASE 2 + 5: Tree worker looking for work with dynamic load balancing
+        // Priority 1: Process completed rollouts (backprop queue)
+        let backprop_job = dequeue_backprop();
+        
+        if (backprop_job.leaf_node_idx != INVALID_INDEX) {
+            // Got backprop work - start backpropping via parent pointers (Phase 4)
+            state.current_node = backprop_job.leaf_node_idx;
+            state.rollout_result = backprop_job.result;
+            state.leaf_player = backprop_job.leaf_player;
+            state.phase = PHASE_BACKPROP;
+        } else {
+            // No backprop work - check queue balance before starting new MCTS cycle
+            // If rollout queue is overloaded, skip new work to avoid overwhelming it
+            let rollout_size = atomicLoad(&rollout_head);
+            let queue_capacity = arrayLength(&rollout_queue);
+            let queue_usage = (rollout_size * 100u) / queue_capacity;
+            
+            // Only start new MCTS cycles if rollout queue isn't near capacity
+            if (queue_usage < 90u) {
+                // Start new MCTS cycle (will eventually enqueue more rollouts)
+                state.phase = PHASE_SELECTION;
+                state.current_node = params.root_node;
+                state.path_len = 1u;
+                state.path[0] = params.root_node;
+            }
+            // else: Stay IDLE if queue is overloaded - rollout workers need to catch up
+        }
+    }
+    
+    // Save state for next dispatch
+    thread_states[thread_id] = state;
+}
+
+// =============================================================================
+// Chunked Rollout Kernel (Separate from Fast Phases)
+// =============================================================================
+
+/// Chunked rollout: Execute N moves per dispatch for rollout jobs from queue.
+/// This prevents fast phases (selection/backprop) from waiting for slow rollouts.
+@compute @workgroup_size(64)
+fn rollout_chunk_kernel(
+    @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+    let thread_id = global_id.x;
+    
+    // Bounds check
+    if (thread_id >= params.num_threads) {
+        return;
+    }
+    
+    // PHASE 3: Dequeue rollout job from queue
+    let job = dequeue_rollout();
+    
+    // If no work, exit early
+    if (job.leaf_node_idx == INVALID_INDEX) {
+        return;
+    }
+    
+    // Track that we're executing a rollout
+    atomicAdd(&diagnostics.rollouts, 1u);
+    
+    // Initialize rollout state from job
+    var rollout_board = job.position;
+    var rollout_player = job.leaf_player;
+    var rollout_moves_remaining = 60u;
+    var rollout_result = 1u; // Default to draw
+    
+    // Get thread's RNG state
+    var state = thread_states[thread_id];
+    rng_state = state.rng_seed;
+    
+    // Test mode: generate random rollout result
+    if (params.use_random_rollouts != 0u) {
+        // Track thread ID range
+        atomicMin(&diagnostics.random_rollout_min_tid, thread_id);
+        atomicMax(&diagnostics.random_rollout_max_tid, thread_id);
+        
+        // Track which player perspective this rollout is from
+        if (job.leaf_player == 1) {
+            atomicAdd(&diagnostics.random_rollout_from_p1, 1u);
+        } else {
+            atomicAdd(&diagnostics.random_rollout_from_p2, 1u);
+        }
+        
+        // NEW APPROACH: Use independent global counter for seeding each rollout
+        // This completely bypasses selection-phase RNG state modifications
+        let rollout_id = atomicAdd(&diagnostics.global_rollout_counter, 1u);
+        rng_state = pcg_hash(rollout_id);
+        
+        // Generate random score
+        rng_state = pcg_hash(rng_state);
+        let p1_score = rng_state % 65u;
+        atomicAdd(&diagnostics.random_rollout_p1_score_sum, p1_score);
+        let p2_score = 64u - p1_score;
+        
+        // Determine winner
+        var winner = 0;
+        if (p1_score > p2_score) {
+            winner = 1;
+            atomicAdd(&diagnostics.random_rollout_p1_wins_raw, 1u);
+        } else if (p1_score < p2_score) {
+            winner = -1;
+            atomicAdd(&diagnostics.random_rollout_p1_losses_raw, 1u);
+        }
+        // else draw (p1_score == p2_score == 32)
+        
+        // Convert to leaf_player's perspective
+        if (winner == job.leaf_player) {
+            rollout_result = 2u;  // Win
+        } else if (winner == 0) {
+            rollout_result = 1u;  // Draw
+        } else {
+            rollout_result = 0u;  // Loss
+        }
+        
+        // Count results for diagnostics
+        // Update diagnostics - track from player 1's perspective for consistency
+        var result_from_p1_perspective = rollout_result;
+        if (job.leaf_player == -1) {
+            // Flip perspective: leaf_player's win = p1's loss
+            if (rollout_result == 2u) {
+                result_from_p1_perspective = 0u; // Win for -1 = loss for 1
+            } else if (rollout_result == 0u) {
+                result_from_p1_perspective = 2u; // Loss for -1 = win for 1
+            }
+        }
+        
+        if (result_from_p1_perspective == 2u) {
+            atomicAdd(&diagnostics.random_rollout_wins, 1u);
+        } else if (result_from_p1_perspective == 1u) {
+            atomicAdd(&diagnostics.random_rollout_draws, 1u);
+        } else {
+            atomicAdd(&diagnostics.random_rollout_losses, 1u);
+        }
+        
+        // Update thread's RNG state
+        thread_states[thread_id].rng_seed = rng_state;
+        
+        // Enqueue result and return early
+        let enqueued = enqueue_backprop(job.leaf_node_idx, rollout_result, job.leaf_player);
+        return;
+    }
+    
+    // Real rollout mode: run full game simulation
+    
+    // Run rollout to completion (not chunked anymore for simplicity)
+    var consecutive_passes = 0u;
+    var moves_remaining = 60u; // Safety limit
+    
+    // Simulate moves until terminal
+    loop {
+        // Check if game is terminal
+        if (consecutive_passes >= 2u || moves_remaining == 0u) {
+            // Game over - count pieces to determine winner
+            var p1_count = 0;
+            var p2_count = 0;
+            for (var j = 0; j < 64; j++) {
+                if (rollout_board[j] == 1) {
+                    p1_count++;
+                } else if (rollout_board[j] == -1) {
+                    p2_count++;
+                }
+            }
+            
+            // Determine winner
+            var winner = 0;
+            if (p1_count > p2_count) {
+                winner = 1;
+            } else if (p1_count < p2_count) {
+                winner = -1;
+            }
+            
+            // Convert to reward from leaf_player's perspective
+            if (winner == job.leaf_player) {
+                rollout_result = 2u;  // Win
+            } else if (winner == 0) {
+                rollout_result = 1u;  // Draw
+            } else {
+                rollout_result = 0u;  // Loss
+            }
+            
+            // PHASE 3: Enqueue result to backprop queue
+            let enqueued = enqueue_backprop(job.leaf_node_idx, rollout_result, job.leaf_player);
+            break;
+        }
+        
+        // Collect valid moves inline (avoid helper function to dodge Naga bug)
+        var valid_moves: array<i32, 64>;
+        var num_moves = 0;
+        
+        for (var sq = 0; sq < 64; sq++) {
+            if (rollout_board[sq] != 0) {
+                continue;  // Square occupied
+            }
+            
+            let row = sq / 8;
+            let col = sq % 8;
+            var is_valid = false;
+            
+            // Check all 8 directions for valid captures
+            for (var dir = 0; dir < 8; dir++) {
+                let dx = array<i32, 8>(-1, -1, -1, 0, 0, 1, 1, 1)[dir];
+                let dy = array<i32, 8>(-1, 0, 1, -1, 1, -1, 0, 1)[dir];
+                
+                var found_opponent = false;
+                var steps = 1;
+                
+                // Walk in this direction
+                loop {
+                    let nx = i32(col) + dx * steps;
+                    let ny = i32(row) + dy * steps;
+                    
+                    if (nx < 0 || nx >= 8 || ny < 0 || ny >= 8) {
+                        break;  // Out of bounds
+                    }
+                    
+                    let check_sq = ny * 8 + nx;
+                    let piece = rollout_board[check_sq];
+                    
+                    if (piece == -rollout_player) {
+                        found_opponent = true;
+                        steps++;
+                    } else if (piece == rollout_player && found_opponent) {
+                        is_valid = true;  // Valid capture sequence
+                        break;
+                    } else {
+                        break;  // Empty or our piece without opponent between
+                    }
+                    
+                    if (steps > 8) { break; }  // Safety limit
+                }
+                
+                if (is_valid) { break; }
+            }
+            
+            if (is_valid) {
+                valid_moves[num_moves] = sq;
+                num_moves++;
+            }
+        }
+        
+        // If no moves, pass
+        if (num_moves == 0) {
+            consecutive_passes++;
+            rollout_player = -rollout_player;
+            continue;
+        }
+        consecutive_passes = 0u;
+        
+        // Select random move
+        let move_idx = i32(rand_f32() * f32(num_moves));
+        let selected_sq = valid_moves[move_idx];
+        let sel_row = selected_sq / 8;
+        let sel_col = selected_sq % 8;
+        
+        // Place piece
+        rollout_board[selected_sq] = rollout_player;
+        
+        // Flip pieces in all valid directions
+        for (var dir = 0; dir < 8; dir++) {
+            let dx = array<i32, 8>(-1, -1, -1, 0, 0, 1, 1, 1)[dir];
+            let dy = array<i32, 8>(-1, 0, 1, -1, 1, -1, 0, 1)[dir];
+            
+            var found_opponent = false;
+            var steps = 1;
+            var flip_count = 0;
+            
+            // Check if this direction has valid captures
+            loop {
+                let nx = i32(sel_col) + dx * steps;
+                let ny = i32(sel_row) + dy * steps;
+                
+                if (nx < 0 || nx >= 8 || ny < 0 || ny >= 8) {
+                    break;
+                }
+                
+                let check_sq = ny * 8 + nx;
+                let piece = rollout_board[check_sq];
+                
+                if (piece == -rollout_player) {
+                    found_opponent = true;
+                    flip_count++;
+                    steps++;
+                } else if (piece == rollout_player && found_opponent) {
+                    // Valid capture - flip all pieces in between
+                    for (var f = 1; f <= flip_count; f++) {
+                        let flip_x = i32(sel_col) + dx * f;
+                        let flip_y = i32(sel_row) + dy * f;
+                        let flip_sq = flip_y * 8 + flip_x;
+                        rollout_board[flip_sq] = rollout_player;
+                    }
+                    break;
+                } else {
+                    break;
+                }
+                
+                if (steps > 8) { break; }
+            }
+        }
+        
+        // Update state
+        rollout_player = -rollout_player;
+        rollout_moves_remaining--;
+        moves_remaining--;
+    }
+    
+    // No need to save RNG state - we use independent global counter now
+    thread_states[thread_id] = state;
+}
+// ============================================================================
+// Kernel: collect_leaf_candidates
+// 
+// Purpose: Scan all allocated nodes to find leaves suitable for pre-computation.
+// A leaf is suitable if:
+//   - It has num_children == 0 (unexpanded)
+//   - It has visits > 0 (has been encountered during selection)
+//   - Its parent has high visit count (prioritize popular subtrees)
+//
+// Each workgroup scans 64 nodes. Threads write candidates
+// to a local buffer, then the workgroup writes them to the global candidates
+// buffer using an atomic counter.
+//
+// Buffer Layout:
+//   - candidate_count: atomic u32 (number of candidates written)
+//   - leaf_candidates: array of LeafCandidate structs (node_id, score)
+//
+// This kernel is called before each batch of incremental steps to identify
+// which leaves need their legal moves pre-computed.
+// ============================================================================
+
+// Shared memory for workgroup-level aggregation
+var<workgroup> wg_candidates: array<LeafCandidate, 64>;
+var<workgroup> wg_candidate_count: atomic<u32>;
+
+@compute
+@workgroup_size(64)
+fn collect_leaf_candidates(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+) {
+    let thread_idx = local_id.x;
+    let node_idx = global_id.x;
+    
+    // Initialize workgroup-shared atomic counter (first thread only)
+    if (thread_idx == 0u) {
+        atomicStore(&wg_candidate_count, 0u);
+    }
+    workgroupBarrier();
+    
+    // Each thread examines one node
+    var is_candidate = false;
+    var candidate_score: u32 = 0u;
+    
+    if (node_idx < params.max_nodes) {
+        let visits = atomicLoad(&node_visits[node_idx]);
+        
+        // Load num_children atomically
+        let num_children = atomicLoad(&node_info[node_idx].num_children);
+        let parent_idx = node_info[node_idx].parent_idx;
+        
+        // Check if this is a suitable leaf:
+        // 1. Has been visited (visits > 0)
+        // 2. Is unexpanded (num_children == 0)
+        // 3. Is not the root (parent_idx != INVALID_INDEX)
+        if (visits > 0 && num_children == 0u && parent_idx != INVALID_INDEX) {
+            is_candidate = true;
+            
+            // Score by parent's visit count (for prioritization)
+            let parent_visits = atomicLoad(&node_visits[parent_idx]);
+            candidate_score = u32(parent_visits);
+        }
+    }
+    
+    // Thread writes its candidate to workgroup-local buffer
+    if (is_candidate) {
+        let local_slot = atomicAdd(&wg_candidate_count, 1u);
+        if (local_slot < 64u) {
+            wg_candidates[local_slot] = LeafCandidate(node_idx, candidate_score);
+        }
+    }
+    
+    // Wait for all threads in workgroup to finish
+    workgroupBarrier();
+    
+    // First thread in workgroup writes all candidates to global buffer
+    if (thread_idx == 0u) {
+        let count = atomicLoad(&wg_candidate_count);
+        if (count > 0u) {
+            // Reserve space in global buffer using atomic counter
+            let global_offset = atomicAdd(&candidate_count, count);
+            
+            // Write candidates to global buffer
+            for (var i = 0u; i < count && i < 64u; i++) {
+                let global_slot = global_offset + i;
+                // Note: Buffer might overflow if too many leaves exist
+                // In practice, we'll sort and take top K, so overflow is acceptable
+                if (global_slot < arrayLength(&leaf_candidates)) {
+                    leaf_candidates[global_slot] = wg_candidates[i];
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Kernel: bitonic_sort_candidates
+// 
+// Purpose: Sort candidates by score (descending) using parallel bitonic sort.
+// Each candidate is 2 u32s: [score, node_idx]
+//
+// Bitonic sort is a comparison-based parallel sorting algorithm that works
+// in stages. For N elements, it takes log2(N) stages, each with multiple steps.
+//
+// Parameters passed via push constants or uniform:
+//   - stage: Current stage (0 to log2(N)-1)
+//   - step: Current step within stage (0 to stage)
+//
+// This kernel is called multiple times with different stage/step values.
+// After all stages complete, candidates are sorted by score descending.
+// ============================================================================
+
+@compute
+@workgroup_size(64)
+fn bitonic_sort_candidates(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+) {
+    let thread_id = global_id.x;
+    
+    // Get total number of candidates from counter
+    let num_candidates = atomicLoad(&candidate_count);
+    
+    // Round up to next power of 2 for bitonic sort
+    var n = 1u;
+    while (n < num_candidates) {
+        n = n << 1u;
+    }
+    
+    // Each thread handles one pair of elements
+    let i = thread_id;
+    
+    if (i >= n / 2u) {
+        return; // Thread has no work
+    }
+    
+    // Bitonic sort: log2(n) stages, each stage has multiple steps
+    // For simplicity, we'll do this in multiple kernel dispatches
+    // Each dispatch handles one (stage, step) pair
+    
+    // We'll use params.turn_number to pass stage and params.game_type to pass step
+    // (abusing existing fields to avoid adding new params struct)
+    let stage = params.turn_number;
+    let step = params.game_type;
+    
+    // Calculate partner index for compare-and-swap
+    let block_size = 2u << stage;
+    let block_start = (i / (block_size / 2u)) * block_size;
+    let offset_in_block = i % (block_size / 2u);
+    
+    var partner: u32;
+    let step_size = 1u << step;
+    
+    if (offset_in_block < step_size) {
+        partner = block_start + offset_in_block + step_size;
+    } else {
+        return; // Already handled by partner
+    }
+    
+    // Skip if partner is out of bounds
+    if (partner >= n || i >= arrayLength(&leaf_candidates) || partner >= arrayLength(&leaf_candidates)) {
+        return;
+    }
+    
+    // Load candidates and their scores
+    let cand_a = leaf_candidates[i];
+    let cand_b = leaf_candidates[partner];
+    
+    let score_a = cand_a.score;
+    let score_b = cand_b.score;
+    
+    // Determine sort direction (ascending or descending for this block)
+    // For descending overall sort, we want largest scores first
+    let ascending = ((i >> stage) & 1u) == 0u;
+    
+    // Compare and swap if needed
+    var should_swap = false;
+    if (ascending) {
+        should_swap = score_a > score_b;
+    } else {
+        should_swap = score_a < score_b;
+    }
+    
+    if (should_swap) {
+        // Swap the two LeafCandidate structs
+        leaf_candidates[i] = cand_b;
+        leaf_candidates[partner] = cand_a;
     }
 }

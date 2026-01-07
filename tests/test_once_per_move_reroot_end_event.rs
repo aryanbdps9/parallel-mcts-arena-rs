@@ -26,9 +26,9 @@ fn test_once_per_move_reroot_end_event() {
     engine.init_tree(&board, 1, &legal_moves);
 
     // Run the kernel with multiple dispatches to build tree
-    engine.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 1.0, 42);
+    engine.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 1.0, 0.01, 42);
     for _ in 0..3 {
-        engine.dispatch_mcts_othello_kernel(32, 1.4, 1.0, 1.0, 42);
+        engine.dispatch_mcts_othello_kernel(32, 1.4, 1.0, 1.0, 0.01, 42);
     }
 
     // Poll urgent events manually

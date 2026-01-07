@@ -20,8 +20,21 @@ use std::str::FromStr;
 ///
 /// Contains the row and column coordinates where a player wants to place their piece.
 /// Both coordinates are 0-based indices.
+/// Special case: (usize::MAX, usize::MAX) represents a pass move.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct OthelloMove(pub usize, pub usize);
+
+impl OthelloMove {
+    /// Create a pass move
+    pub fn pass() -> Self {
+        OthelloMove(usize::MAX, usize::MAX)
+    }
+    
+    /// Check if this is a pass move
+    pub fn is_pass(&self) -> bool {
+        self.0 == usize::MAX && self.1 == usize::MAX
+    }
+}
 
 /// Represents the complete state of an Othello game
 ///
@@ -83,20 +96,29 @@ impl GameState for OthelloState {
                 }
             }
         }
+        
+        // If current player has no legal moves but opponent has moves, return pass move
+        if moves.is_empty() && !self.is_terminal() {
+            moves.push(OthelloMove::pass());
+        }
+        
         moves
     }
 
     fn make_move(&mut self, mv: &Self::Move) {
+        // Handle pass move explicitly
+        if mv.is_pass() {
+            // Pass move: just switch players
+            self.current_player = -self.current_player;
+            self.last_move = None; // No actual move was made
+            return;
+        }
+        
         let (r, c) = (mv.0, mv.1);
         self.board[r * self.board_size + c] = self.current_player;
         self.last_move = Some((r, c));
         self.flip_pieces(r, c);
         self.current_player = -self.current_player;
-
-        // If the new player has no moves, skip their turn
-        if self.get_possible_moves().is_empty() {
-            self.current_player = -self.current_player;
-        }
     }
 
     fn get_move_weight(&self, _mv: &Self::Move) -> f64 {
@@ -198,6 +220,13 @@ impl OthelloState {
     pub fn get_line_size(&self) -> usize {
         1 // Othello doesn't have a line size concept, return 1 as default
     }
+    
+    /// Test helper to set board state directly (for testing only)
+    pub fn set_board_for_test(&mut self, board: Vec<i32>, current_player: i32) {
+        assert_eq!(board.len(), self.board_size * self.board_size, "Board size mismatch");
+        self.board = board;
+        self.current_player = current_player;
+    }
 
     /// Checks if a move is legal in the current game state
     ///
@@ -209,6 +238,20 @@ impl OthelloState {
     /// # Returns
     /// True if the move is legal, false otherwise
     pub fn is_legal(&self, mv: &OthelloMove) -> bool {
+        // Pass moves are legal if player has no other moves but game isn't terminal
+        if mv.is_pass() {
+            // Check if current player has any legal non-pass moves
+            for r in 0..self.board_size {
+                for c in 0..self.board_size {
+                    if self.is_valid_move((r, c)) {
+                        return false; // Has legal moves, so pass is NOT legal
+                    }
+                }
+            }
+            // No legal moves for current player - pass is legal if game isn't terminal
+            return !self.is_terminal();
+        }
+        
         self.is_valid_move((mv.0, mv.1))
     }
 

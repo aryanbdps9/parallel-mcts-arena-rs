@@ -86,7 +86,7 @@ fn test_gpu_perspective_diagnostic() {
         println!("Root player_at_node: {} (player to move)", current_player);
         
         // Dispatch kernel
-        mcts.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 0.06, 42);
+        mcts.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 0.06, 0.01, 42);
         
         // Run exactly 256 iterations (one batch)
         println!("\n--- STEP 2: Running 256 iterations ---");
@@ -111,7 +111,7 @@ fn test_gpu_perspective_diagnostic() {
         // Now run many more iterations to see convergence
         println!("\n--- STEP 4: Running 4000 more iterations (16 batches) ---");
         for i in 0..16 {
-            mcts.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 0.06, 1000 + i);
+            mcts.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 0.06, 0.01, 1000 + i);
             mcts.run_iterations(256, 1.4, 1.0, 0.06, 1000 + i); // Use temp=0.06
         }
         

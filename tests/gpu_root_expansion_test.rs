@@ -40,7 +40,7 @@ fn test_reproduce_root_expansion_failure() {
     // Run 1 batch of iterations
     println!("Running iterations...");
     // Dispatch kernel first
-    mcts.dispatch_mcts_othello_kernel(2048, 1.4, 1.0, 1.0, 42);
+    mcts.dispatch_mcts_othello_kernel(2048, 1.4, 1.0, 1.0, 0.01, 42);
     
     let telemetry = mcts.run_iterations(2048, 0.1, 1.0, 0.06, 42);
     println!("Telemetry: {:?}", telemetry);

@@ -158,6 +158,7 @@ impl AIWorker {
         gpu_native_batch_size: u32,
         gpu_virtual_loss_weight: f32,
         gpu_temperature: f32,
+        gpu_vl_temp_scale: f32,
         gpu_max_nodes: Option<u32>,
     ) -> Self {
         use std::sync::mpsc::channel;
@@ -251,6 +252,7 @@ impl AIWorker {
                                     gpu_exploration_constant as f32,
                                     gpu_virtual_loss_weight,
                                     gpu_temperature,
+                                    gpu_vl_temp_scale,
                                     timeout,
                                     gpu_max_nodes,
                                 ) {
@@ -315,12 +317,14 @@ impl AIWorker {
                                     // === End TSV Logging ===
                                     
                                     // Create SearchStatistics for UI display
+                                    let max_temp_boost = telemetry.diagnostics.max_temp_boost as f32 / 1000.0;
                                     let stats = SearchStatistics {
                                         total_nodes: total_nodes as i32,
                                         root_visits: total_visits,
                                         root_wins: q * total_visits as f64,
                                         root_value: q,
                                         children_stats: stats_map,
+                                        max_temp_boost: Some(max_temp_boost),
                                     };
                                     
                                     if !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
@@ -442,8 +446,10 @@ impl AIWorker {
                                     
                                     // Check if game is terminal before advancing root
                                     // Terminal nodes have no children, so pruning will fail
-                                    if othello_state.is_terminal() {
-                                        println!("[GPU-Native] Game is terminal - skipping advance_root (will reset tree on next search)");
+                                    // Check both is_terminal() and empty legal moves (should be equivalent)
+                                    if othello_state.is_terminal() || legal_moves_xy.is_empty() {
+                                        println!("[GPU-Native] Game is terminal (is_terminal={} legal_moves={}) - skipping advance_root (will reset tree on next search)", 
+                                            othello_state.is_terminal(), legal_moves_xy.len());
                                     } else {
                                         // Advance GPU-native tree
                                         // mv.0 is row, mv.1 is col, but advance_root expects (x, y) = (col, row)
@@ -594,6 +600,8 @@ pub struct GuiApp {
     pub gpu_virtual_loss_weight: f32,
     /// Temperature for GPU-native softmax selection
     pub gpu_temperature: f32,
+    /// Scaling factor for VL-based temperature boost
+    pub gpu_vl_temp_scale: f32,
     /// Optional override for max nodes in GPU-native MCTS
     pub gpu_max_nodes: Option<u32>,
     pub selected_settings_index: usize,
@@ -649,6 +657,7 @@ impl GuiApp {
         gpu_native_batch_size: u32,
         gpu_virtual_loss_weight: f32,
         gpu_temperature: f32,
+        gpu_vl_temp_scale: f32,
         gpu_max_nodes: Option<u32>,
     ) -> Self {
         let default_game = GameWrapper::Gomoku(GomokuState::new(board_size, line_size));
@@ -667,7 +676,7 @@ impl GuiApp {
             game_status: GameStatus::InProgress,
             move_history: Vec::new(),
             game_renderer: renderer,
-            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q, gpu_native_batch_size, gpu_virtual_loss_weight, gpu_temperature, gpu_max_nodes),
+            ai_worker: AIWorker::new(cpu_exploration_constant, gpu_exploration_constant, num_threads, max_nodes, search_iterations, shared_tree, gpu_threads, gpu_use_heuristic, cpu_select_by_q, gpu_select_by_q, gpu_native_batch_size, gpu_virtual_loss_weight, gpu_temperature, gpu_vl_temp_scale, gpu_max_nodes),
             ai_thinking: false,
             ai_thinking_start: None,
             last_search_stats: None,
@@ -689,6 +698,7 @@ impl GuiApp {
             gpu_native_batch_size,
             gpu_virtual_loss_weight,
             gpu_temperature,
+            gpu_vl_temp_scale,
             gpu_max_nodes,
             selected_settings_index: 0,
             needs_redraw: true,
@@ -758,6 +768,7 @@ impl GuiApp {
             self.gpu_native_batch_size,
             self.gpu_virtual_loss_weight,
             self.gpu_temperature,
+            self.gpu_vl_temp_scale,
             self.gpu_max_nodes,
         );
 
@@ -1169,6 +1180,9 @@ impl GuiApp {
             lines.push(format!("Total Nodes: {}", stats.total_nodes));
             lines.push(format!("Root Visits: {}", stats.root_visits));
             lines.push(format!("Root Value: {:.3}", stats.root_value));
+            if let Some(boost) = stats.max_temp_boost {
+                lines.push(format!("Max Temp Boost: {:.3}x", boost));
+            }
             lines.push(String::new());
             
             // Sort children by visits

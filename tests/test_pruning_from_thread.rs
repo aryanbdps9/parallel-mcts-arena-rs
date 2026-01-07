@@ -41,7 +41,7 @@ fn test_pruning_from_separate_thread() {
     // Run ~1700 batches like the game does
     println!("[TEST] Running 1700 batches");
     for i in 0..1700 {
-        engine.dispatch_mcts_othello_kernel(128, 1.4, 1.0, 1.0, 42);
+        engine.dispatch_mcts_othello_kernel(128, 1.4, 1.0, 1.0, 0.01, 42);
         if i % 500 == 0 {
             println!("[TEST] Completed {} batches", i);
         }

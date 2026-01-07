@@ -69,27 +69,27 @@ fn test_cpu_gpu_q_value_consistency() {
         // Initialize tree
         gpu_mcts.init_tree(&board, current_player, &legal_moves);
         
-        // Dispatch the main GPU MCTS kernel (required before run_iterations)
-        println!("Dispatching GPU kernel...");
-        gpu_mcts.dispatch_mcts_othello_kernel(iterations_per_batch, 1.4, 1.0, 1.0, 42);
-        
         // Run some iterations
         println!("Running GPU iterations...");
         let num_batches = 40; // 10k iterations total
         for batch in 0..num_batches {
-            let telemetry = gpu_mcts.run_iterations(
+            // Dispatch kernel for each batch
+            gpu_mcts.dispatch_mcts_othello_kernel(
                 iterations_per_batch,
                 1.4,  // exploration
                 1.0,  // virtual_loss_weight
                 1.0,  // temperature
+                0.01, // vl_temp_scale
                 batch * 1000, // seed
             );
+            
             if batch % 10 == 0 {
-                println!("  Batch {}: {} rollouts", batch, telemetry.diagnostics.rollouts);
+                println!("  Batch {}/{}", batch, num_batches);
             }
         }
         
         gpu_mcts.flush_and_wait();
+        gpu_mcts.update_root_stats();
         
         // Check root visits
         let root_visits = gpu_mcts.get_root_visits();

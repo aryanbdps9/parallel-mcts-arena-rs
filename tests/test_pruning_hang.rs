@@ -55,7 +55,7 @@ fn test_pruning_hang() {
     let mut batch_count = 0;
     
     while start.elapsed() < timeout && batch_count < target_batches {
-        engine.dispatch_mcts_othello_kernel(128, 1.4, 1.0, 1.0, 42); // 128 workgroups * 64 threads = 8192 iterations per batch
+        engine.dispatch_mcts_othello_kernel(128, 1.4, 1.0, 1.0, 0.01, 42); // 128 workgroups * 64 threads = 8192 iterations per batch
         batch_count += 1;
         
         // Log progress every 500 batches

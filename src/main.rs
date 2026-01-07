@@ -249,6 +249,13 @@ struct Args {
     #[arg(long, default_value_t = 0.6)]
     gpu_temperature: f32,
 
+    /// Scaling factor for virtual-loss-based temperature boost.
+    /// Higher values increase temperature dynamically when nodes have high VL (contention).
+    /// Formula: effective_temp = base_temp × (1 + parent_vl × vl_weight × vl_temp_scale)
+    /// Typical range: 0.001 (subtle) to 0.1 (aggressive).
+    #[arg(long, default_value_t = 0.01)]
+    gpu_vl_temp_scale: f32,
+
     /// Maximum nodes for GPU-native MCTS tree (Othello).
     /// 
     /// If not specified, automatically calculated based on GPU buffer limits (~8.2M).
@@ -404,6 +411,7 @@ fn main() -> io::Result<()> {
             args.gpu_native_batch_size,
             args.gpu_virtual_loss_weight,
             args.gpu_temperature,
+            args.gpu_vl_temp_scale,
             args.gpu_max_nodes,
         );
         

@@ -103,11 +103,11 @@ fn test_exploration_constant_comparison() {
         ).expect("Failed to create GPU engine"));
         
         engine.init_tree(&board, current_player, &legal_moves);
-        engine.dispatch_mcts_othello_kernel(1, exploration, 1.0, 0.06, 42);
+        engine.dispatch_mcts_othello_kernel(1, exploration, 1.0, 0.06, 0.01, 42);
         
         // Run 10 batches
         for batch in 0..10 {
-            engine.dispatch_mcts_othello_kernel(8192, exploration, 1.0, 0.06, 42 + batch * 1000);
+            engine.dispatch_mcts_othello_kernel(8192, exploration, 1.0, 0.06, 0.01, 42 + batch * 1000);
         }
         
         engine.flush_and_wait();

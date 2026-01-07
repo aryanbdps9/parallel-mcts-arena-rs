@@ -107,6 +107,7 @@ fn main() {
                 1.4,
                 1.0, // virtual loss weight
                 1.0, // temperature
+                0.01, // vl_temp_scale
                 0, // timeout_secs
                 None, // gpu_max_nodes
             );

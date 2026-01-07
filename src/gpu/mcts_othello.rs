@@ -24,7 +24,7 @@ pub fn assert_no_early_exit_events(events: &crossbeam_queue::SegQueue<UrgentEven
 }
 impl GpuOthelloMcts {
             /// Dispatch the main GPU-native MCTS kernel and bind the urgent event buffer for logging
-            pub fn dispatch_mcts_othello_kernel(&self, num_workgroups: u32, exploration: f32, virtual_loss_weight: f32, temperature: f32, seed: u32) {
+            pub fn dispatch_mcts_othello_kernel(&self, num_workgroups: u32, exploration: f32, virtual_loss_weight: f32, temperature: f32, vl_temp_scale: f32, seed: u32) {
         // Handle WGPU limit of 65535 workgroups per dimension
         let max_dim = 65535;
         let (dispatch_x, dispatch_y) = if num_workgroups > max_dim {
@@ -80,6 +80,7 @@ impl GpuOthelloMcts {
                     children_priors,
                     free_lists,
                     free_tops,
+                    free_list_ownership_buf,
                     global_free_queue_buf,
                     global_free_head_buf,
                     expansion_paused_buf
@@ -95,6 +96,7 @@ impl GpuOthelloMcts {
                         inner.children_priors_buffer.as_ref().expect("children_priors missing").clone(),
                         inner.free_lists_buffer.as_ref().expect("free_lists missing").clone(),
                         inner.free_tops_buffer.as_ref().expect("free_tops missing").clone(),
+                        inner.free_list_ownership_buffer.as_ref().expect("free_list_ownership missing").clone(),
                         inner.global_free_queue_buffer.as_ref().expect("global_free_queue missing").clone(),
                         inner.global_free_head_buffer.as_ref().expect("global_free_head missing").clone(),
                         inner.expansion_paused_buffer.as_ref().expect("expansion_paused missing").clone(),
@@ -104,7 +106,7 @@ impl GpuOthelloMcts {
                 // Layouts for each group
                 let group0_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("Group 0 Layout (Node Data)"),
-                    entries: &(0..=11).map(|i| BindGroupLayoutEntry {
+                    entries: &(0..=12).map(|i| BindGroupLayoutEntry {
                         binding: i,
                         visibility: ShaderStages::COMPUTE,
                         ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
@@ -125,9 +127,10 @@ impl GpuOthelloMcts {
                         BindGroupEntry { binding: 6, resource: children_priors.as_entire_binding() },
                         BindGroupEntry { binding: 7, resource: free_lists.as_entire_binding() },
                         BindGroupEntry { binding: 8, resource: free_tops.as_entire_binding() },
-                        BindGroupEntry { binding: 9, resource: global_free_queue_buf.as_entire_binding() },
-                        BindGroupEntry { binding: 10, resource: global_free_head_buf.as_entire_binding() },
-                        BindGroupEntry { binding: 11, resource: expansion_paused_buf.as_entire_binding() },
+                        BindGroupEntry { binding: 9, resource: free_list_ownership_buf.as_entire_binding() },
+                        BindGroupEntry { binding: 10, resource: global_free_queue_buf.as_entire_binding() },
+                        BindGroupEntry { binding: 11, resource: global_free_head_buf.as_entire_binding() },
+                        BindGroupEntry { binding: 12, resource: expansion_paused_buf.as_entire_binding() },
                     ],
                 });
 
@@ -178,6 +181,11 @@ impl GpuOthelloMcts {
                         temperature,
                         turn_number: 0, 
                         free_list_capacity,
+                        vl_temp_scale,
+                        num_threads: 0, // Not used for monolithic kernel
+                        root_node: inner.current_root_idx,
+                        use_vl_preincrement: 0, // Disabled by default for testing
+                        use_random_rollouts: 0,
                     };
                     queue.write_buffer(&mcts_params_buf, 0, bytemuck::bytes_of(&params));
                     device.poll(wgpu::Maintain::Wait); // Ensure params are written before creating bind group
@@ -698,6 +706,7 @@ impl GpuOthelloMcts {
                 children_priors,
                 free_lists,
                 free_tops,
+                free_list_ownership_buf,
                 global_free_queue_buf,
                 global_free_head_buf,
                 expansion_paused_buf
@@ -713,6 +722,7 @@ impl GpuOthelloMcts {
                     inner.children_priors_buffer.as_ref().expect("children_priors missing").clone(),
                     inner.free_lists_buffer.as_ref().expect("free_lists missing").clone(),
                     inner.free_tops_buffer.as_ref().expect("free_tops missing").clone(),
+                    inner.free_list_ownership_buffer.as_ref().expect("free_list_ownership missing").clone(),
                     inner.global_free_queue_buffer.as_ref().expect("global_free_queue missing").clone(),
                     inner.global_free_head_buffer.as_ref().expect("global_free_head missing").clone(),
                     inner.expansion_paused_buffer.as_ref().expect("expansion_paused missing").clone(),
@@ -721,7 +731,7 @@ impl GpuOthelloMcts {
 
             let group0_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("Pruning Group 0 Layout"),
-                entries: &(0..=11).map(|i| BindGroupLayoutEntry {
+                entries: &(0..=12).map(|i| BindGroupLayoutEntry {
                     binding: i,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
@@ -742,9 +752,10 @@ impl GpuOthelloMcts {
                     BindGroupEntry { binding: 6, resource: children_priors.as_entire_binding() },
                     BindGroupEntry { binding: 7, resource: free_lists.as_entire_binding() },
                     BindGroupEntry { binding: 8, resource: free_tops.as_entire_binding() },
-                    BindGroupEntry { binding: 9, resource: global_free_queue_buf.as_entire_binding() },
-                    BindGroupEntry { binding: 10, resource: global_free_head_buf.as_entire_binding() },
-                    BindGroupEntry { binding: 11, resource: expansion_paused_buf.as_entire_binding() },
+                    BindGroupEntry { binding: 9, resource: free_list_ownership_buf.as_entire_binding() },
+                    BindGroupEntry { binding: 10, resource: global_free_queue_buf.as_entire_binding() },
+                    BindGroupEntry { binding: 11, resource: global_free_head_buf.as_entire_binding() },
+                    BindGroupEntry { binding: 12, resource: expansion_paused_buf.as_entire_binding() },
                 ],
             });
 
@@ -925,6 +936,35 @@ impl GpuOthelloMcts {
                 println!("[DIAG] Pruning: Phase 2 submitted (simplified non-recursive version)");
             }
             
+            // Phase 3: Defragment free lists to prevent fragmentation
+            {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Defragment Shader"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mcts_othello.wgsl").into()),
+                });
+                let defrag_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("Defragment Pipeline"),
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some("defragment_free_lists"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    cache: None,
+                });
+                
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Defragment Encoder") });
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Defragment Pass"), timestamp_writes: None });
+                cpass.set_pipeline(&defrag_pipeline);
+                cpass.set_bind_group(0, &group0_bind_group, &[]);
+                cpass.set_bind_group(1, &group1_bind_group, &[]);
+                cpass.set_bind_group(2, &group2_bind_group, &[]);
+                cpass.set_bind_group(3, &group3_bind_group, &[]);
+                cpass.set_bind_group(4, &group4_bind_group, &[]);
+                cpass.dispatch_workgroups(1, 1, 1); // 256 threads = 1 workgroup with size 256
+                drop(cpass);
+                queue.submit(Some(encoder.finish()));
+                println!("[DIAG] Pruning: Defragmentation complete");
+            }
+            
             // Create encoder for final readback
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Final Readback Encoder") });
             
@@ -1063,6 +1103,19 @@ impl GpuOthelloMcts {
                 // Update host state only if pruning succeeded
                 let mut inner = self.inner.lock().unwrap();
                 inner.current_root_idx = new_root_idx;
+                
+                // Reset thread states after pruning - any threads working on pruned nodes
+                // or in partial states should be reset to IDLE
+                if let Some(thread_states_buf) = &inner.thread_states_buffer {
+                    println!("[DIAG] Resetting thread states after pruning");
+                    // Write zeros to reset all thread states to IDLE (phase=0)
+                    // ThreadState is 816 bytes, but we only need to zero the first u32 (phase field)
+                    // However, it's safer to zero the entire buffer to clear all partial state
+                    let num_bytes = thread_states_buf.size();
+                    let zeros = vec![0u8; num_bytes as usize];
+                    queue.write_buffer(thread_states_buf, 0, &zeros);
+                    device.poll(wgpu::Maintain::Wait);
+                }
             }
             true
         }
@@ -1070,6 +1123,129 @@ impl GpuOthelloMcts {
         pub fn dispatch_prune_unreachable_topdown(&self) {
             // Legacy wrapper
             self.dispatch_pruning_kernels(0, 0);
+        }
+
+        /// Dispatch garbage collection to free unreachable nodes without changing root
+        /// This should be called periodically during search to prevent memory exhaustion
+        pub fn dispatch_garbage_collection(&self) {
+            let device = self.context.device();
+            let queue = self.context.queue();
+            
+            // Get current state
+            let (max_nodes, mcts_params_buf, node_info, node_visits, node_wins, node_vl, node_state,
+                 children_indices, children_priors, free_lists, free_tops) = {
+                let inner = self.inner.lock().unwrap();
+                (
+                    inner.max_nodes,
+                    inner.mcts_params_buffer.as_ref().expect("params missing").clone(),
+                    inner.node_info_buffer.as_ref().expect("node_info missing").clone(),
+                    inner.node_visits_buffer.as_ref().expect("node_visits missing").clone(),
+                    inner.node_wins_buffer.as_ref().expect("node_wins missing").clone(),
+                    inner.node_vl_buffer.as_ref().expect("node_vl missing").clone(),
+                    inner.node_state_buffer.as_ref().expect("node_state missing").clone(),
+                    inner.children_indices_buffer.as_ref().expect("children_indices missing").clone(),
+                    inner.children_priors_buffer.as_ref().expect("children_priors missing").clone(),
+                    inner.free_lists_buffer.as_ref().expect("free_lists missing").clone(),
+                    inner.free_tops_buffer.as_ref().expect("free_tops missing").clone(),
+                )
+            };
+            
+            // Create shader module
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("GC Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mcts_othello.wgsl").into()),
+            });
+            
+            // Create bind group layout for Group 0 (node data)
+            let group0_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("GC Group 0 Layout"),
+                entries: &(0..=8).map(|i| wgpu::BindGroupLayoutEntry {
+                    binding: i,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }).collect::<Vec<_>>(),
+            });
+            
+            // Create bind group layout for Group 1 (params)
+            let group1_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("GC Group 1 Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+            
+            // Create pipeline
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("GC Pipeline Layout"),
+                bind_group_layouts: &[&group0_layout, &group1_layout],
+                push_constant_ranges: &[],
+            });
+            
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("GC Pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("prune_unreachable"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+            
+            // Create bind groups
+            let group0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("GC Group 0"),
+                layout: &group0_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: node_info.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: node_visits.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: node_wins.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: node_vl.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: node_state.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: children_indices.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: children_priors.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: free_lists.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: free_tops.as_entire_binding() },
+                ],
+            });
+            
+            let group1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("GC Group 1"),
+                layout: &group1_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: mcts_params_buf.as_entire_binding() },
+                ],
+            });
+            
+            // Dispatch - use enough workgroups to cover all nodes
+            // prune_unreachable uses workgroup_size(256), so need (max_nodes + 255) / 256 workgroups
+            let num_workgroups = (max_nodes + 255) / 256;
+            
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("GC Encoder"),
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("GC Pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &group0, &[]);
+                pass.set_bind_group(1, &group1, &[]);
+                pass.dispatch_workgroups(num_workgroups, 1, 1);
+            }
+            queue.submit(Some(encoder.finish()));
+            device.poll(wgpu::Maintain::Wait);
         }
 
     /// Create bind groups for urgent event logging (binds host-mapped urgent event buffer to GPU pipeline)
@@ -1130,7 +1306,11 @@ impl GpuOthelloMcts {
         pub fn prune_unreachable_nodes(&mut self) {
             let mut inner = self.inner.lock().unwrap();
             // Match shader's encode_move: y * width + x
-            let legal_idxs: std::collections::HashSet<_> = inner.legal_moves.iter().map(|&(x, y)| y * 8 + x).collect();
+            // Filter out pass moves (usize::MAX, usize::MAX) to avoid overflow
+            let legal_idxs: std::collections::HashSet<_> = inner.legal_moves.iter()
+                .filter(|&&(x, y)| x != usize::MAX && y != usize::MAX)
+                .map(|&(x, y)| y * 8 + x)
+                .collect();
             for idx in 0..inner.visits.len() {
                 if inner.visits[idx] > 0 && !legal_idxs.contains(&idx) {
                     inner.visits[idx] = 0;
@@ -1190,6 +1370,11 @@ pub struct MctsOthelloParams {
     pub temperature: f32,
     pub turn_number: u32, // NEW: unique per-turn identifier
     pub free_list_capacity: u32, // Capacity per free list (max_nodes / 256 rounded up)
+    pub vl_temp_scale: f32, // Scaling factor for VL-based temperature boost
+    pub num_threads: u32, // NEW: Number of threads for incremental execution
+    pub root_node: u32, // NEW: Current root node index for incremental execution
+    pub use_vl_preincrement: u32, // 1 = use pre-increment VL, 0 = increment only selected child
+    pub use_random_rollouts: u32, // 1 = use random test rollouts, 0 = real game simulation
 }
 
 #[repr(C)]
@@ -1227,6 +1412,18 @@ pub struct OthelloDiagnostics {
     pub total_children_gen: u32,
     pub prune_work_claimed: u32, // DEBUG: How many work items successfully claimed in Phase 2
     pub prune_push_attempts: u32, // DEBUG: Total attempts in free list push loop
+    pub max_temp_boost: u32, // Maximum temperature boost observed (stored as u32, divide by 1000 for f32)
+    pub random_rollout_wins: u32, // Count of result=2 (win) from random rollouts (from p1 perspective)
+    pub random_rollout_draws: u32, // Count of result=1 (draw) from random rollouts
+    pub random_rollout_losses: u32, // Count of result=0 (loss) from random rollouts (from p1 perspective)
+    pub random_rollout_from_p1: u32, // Count of rollouts where leaf_player == 1
+    pub random_rollout_from_p2: u32, // Count of rollouts where leaf_player == -1
+    pub random_rollout_p1_wins_raw: u32, // Count where p1_score > 32 in game simulation
+    pub random_rollout_p1_losses_raw: u32, // Count where p1_score < 32 in game simulation
+    pub random_rollout_p1_score_sum: u32, // Sum of all p1_score values for distribution checking
+    pub random_rollout_min_tid: u32, // Minimum thread ID that did a rollout (initialized to 0xFFFFFFFF)
+    pub random_rollout_max_tid: u32, // Maximum thread ID that did a rollout
+    pub global_rollout_counter: u32, // Global counter for independent RNG seeding
 }
 
 #[repr(C)]
@@ -1304,6 +1501,7 @@ pub struct GpuOthelloMctsInner {
     pub children_priors_buffer: Option<Arc<wgpu::Buffer>>,
     pub free_lists_buffer: Option<Arc<wgpu::Buffer>>,
     pub free_tops_buffer: Option<Arc<wgpu::Buffer>>,
+    pub free_list_ownership_buffer: Option<Arc<wgpu::Buffer>>, // Which workgroup owns each free list (0-255, or 0xFFFF for unowned)
     // GPU-side urgent event buffers (bound to pipeline, not mapped)
     pub urgent_event_buffer_gpu: Option<Arc<wgpu::Buffer>>,
     pub urgent_event_write_head_gpu: Option<Arc<wgpu::Buffer>>,
@@ -1338,17 +1536,38 @@ pub struct GpuOthelloMctsInner {
     pub root_stats_buffer: Option<Arc<wgpu::Buffer>>, // Binding 5
     // Root Board Buffer (Group 2)
     pub root_board_buffer: Option<Arc<wgpu::Buffer>>, // Binding 0
+    // Pre-Computation Buffers (Group 6 - Optimization)
+    pub leaf_candidates_buffer: Option<Arc<wgpu::Buffer>>, // Binding 0: LeafCandidate[max_nodes]
+    pub candidate_count_buffer: Option<Arc<wgpu::Buffer>>, // Binding 1: atomic<u32>
+    pub precomputed_cache_buffer: Option<Arc<wgpu::Buffer>>, // Binding 2: PrecomputedMoves[budget]
+    pub cache_size_buffer: Option<Arc<wgpu::Buffer>>, // Binding 3: u32
+    pub precompute_diagnostics_buffer: Option<Arc<wgpu::Buffer>>, // Binding 4: PrecomputeDiagnostics
+    // Thread State Buffer (Group 7 - Incremental Execution)
+    pub thread_states_buffer: Option<Arc<wgpu::Buffer>>, // Binding 0: ThreadState[num_threads]
+    // Queue Buffers (Group 8 - Decoupled Rollout Architecture)
+    pub rollout_queue_buffer: Option<Arc<wgpu::Buffer>>, // Binding 0: RolloutJob[queue_size]
+    pub rollout_head_buffer: Option<Arc<wgpu::Buffer>>, // Binding 1: atomic<u32>
+    pub backprop_queue_buffer: Option<Arc<wgpu::Buffer>>, // Binding 2: BackpropJob[queue_size]
+    pub backprop_head_buffer: Option<Arc<wgpu::Buffer>>, // Binding 3: atomic<u32>
+    // Diagnostics baseline for computing per-search deltas
+    pub max_temp_boost_baseline: u32,
+    // Progressive wave tracking
+    pub current_wave_workgroups: u32,
 }
 
 impl GpuOthelloMcts {
     pub fn run_iterations(&self, _iterations: u32, _exploration: f32, _virtual_loss_weight: f32, _temperature: f32, _seed: u32) -> OthelloRunTelemetry {
         // In GPU-native mode, the kernel is dispatched separately.
         // This function just reads back the telemetry.
-        self.update_root_stats();
-        let diagnostics = self.read_diagnostics();
+        let mut diagnostics = self.read_diagnostics();
         let nodes_used = self.calculate_nodes_used();
         
         let inner = self.inner.lock().unwrap();
+        
+        // Compute per-search delta for max_temp_boost (since GPU buffer resets don't work)
+        let per_search_boost = diagnostics.max_temp_boost.saturating_sub(inner.max_temp_boost_baseline);
+        diagnostics.max_temp_boost = per_search_boost;
+        
         OthelloRunTelemetry {
             iterations_launched: diagnostics.rollouts,
             alloc_count_after: nodes_used,
@@ -1357,6 +1576,1180 @@ impl GpuOthelloMcts {
             saturated: diagnostics.alloc_failures > 0,
             diagnostics,
         }
+    }
+
+    /// Set the baseline for diagnostics delta tracking.
+    /// Call this before starting a new search to capture the starting values.
+    pub fn set_diagnostics_baseline(&self) {
+        // Just read current value as baseline (don't reset here to avoid lock issues)
+        let diagnostics = self.read_diagnostics();
+        let mut inner = self.inner.lock().unwrap();
+        inner.max_temp_boost_baseline = diagnostics.max_temp_boost;
+    }
+
+    /// Run incremental MCTS with stateful thread execution.
+    /// 
+    /// This orchestrates the full incremental execution pipeline:
+    /// 1. Collect leaf candidates (find unexpanded nodes with visits > 0)
+    /// 2. Sort candidates by parent visit count (prioritize hot subtrees)
+    /// 3. Run incremental_mcts_step for SELECTION/EXPANSION/BACKPROP phases
+    /// 4. Run rollout_chunk_kernel for active rollouts (8 moves per dispatch)
+    /// 5. Repeat steps 3-4 until convergence
+    ///
+    /// Parameters:
+    ///   - num_threads: Number of parallel threads to use
+    ///   - max_steps: Maximum number of incremental steps (safety limit)
+    ///   - exploration: PUCT exploration constant
+    ///   - virtual_loss_weight: Virtual loss weight for parallelism
+    ///   - temperature: Temperature for move selection
+    ///   - seed: RNG seed
+    ///   - timeout: Optional timeout duration to limit search time
+    pub fn run_incremental_mcts(
+        &self,
+        num_threads: u32,
+        max_steps: u32,
+        exploration: f32,
+        virtual_loss_weight: f32,
+        temperature: f32,
+        seed: u32,
+        timeout: Option<std::time::Duration>,
+        use_random_rollouts: bool,
+    ) -> OthelloRunTelemetry {
+        println!("[INCREMENTAL] Starting incremental MCTS: {} threads, {} max steps", num_threads, max_steps);
+        
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        // Upload root board to GPU (needed for expand_node to reconstruct board states)
+        {
+            let inner = self.inner.lock().unwrap();
+            let root_board_buf = inner.root_board_buffer.as_ref().expect("root_board_buffer missing");
+            queue.write_buffer(root_board_buf, 0, bytemuck::cast_slice(&inner.root_board));
+        }
+        
+        // Allocate/recreate thread states buffer (force recreation to ensure clean state)
+        let thread_states_buf = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.thread_states_buffer = None; // Clear any existing buffer
+            drop(inner);
+            self.ensure_thread_states_buffer(num_threads)
+        };
+        
+        let _candidates_buf = self.ensure_candidates_buffer(16384); // Support up to 16K candidates
+        let counter_buf = self.ensure_candidate_counter_buffer();
+        
+        // Reset candidate counter to 0
+        queue.write_buffer(&counter_buf, 0, &0u32.to_le_bytes());
+        
+        // Initialize thread states: All threads start in SELECTION phase at root
+        {
+            let inner = self.inner.lock().unwrap();
+            let root_idx = inner.current_root_idx;
+            
+            // ThreadState layout: phase(4), current_node(4), path(512), path_len(4), 
+            // rng_seed(4), leaf_player(4), rollout_result(4), backprop_index(4),
+            // rollout_board(256), rollout_player(4), rollout_moves_remaining(4), _pad0(4) = 816 bytes
+            const THREAD_STATE_SIZE: usize = 816;
+            let mut init_data = vec![0u8; THREAD_STATE_SIZE * num_threads as usize]; // Already zeros entire buffer
+            
+            for tid in 0..num_threads {
+                let offset = tid as usize * THREAD_STATE_SIZE;
+                let slice = &mut init_data[offset..offset + THREAD_STATE_SIZE];
+                
+                // All fields default to 0 which is correct for most
+                // phase = SELECTION (0) - already 0
+                // current_node = root_idx
+                slice[4..8].copy_from_slice(&root_idx.to_le_bytes());
+                // path[0] = root_idx (path is at offset 8, 128 u32s = 512 bytes)
+                slice[8..12].copy_from_slice(&root_idx.to_le_bytes());
+                // path_len = 1 (at offset 8 + 512 = 520)
+                slice[520..524].copy_from_slice(&1u32.to_le_bytes());
+                // rng_seed = seed + tid (at offset 524)
+                slice[524..528].copy_from_slice(&(seed + tid).to_le_bytes());
+                // leaf_player, rollout_result, backprop_index all 0 is fine
+                // rollout_board all 0 is fine
+            }
+            
+            queue.write_buffer(&thread_states_buf, 0, &init_data);
+        }
+        
+        // Ensure all buffer writes are complete before dispatching kernels
+        device.poll(wgpu::Maintain::Wait);
+        
+        // DEBUG: Verify thread states were initialized correctly (disabled)
+        if false {
+            let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Thread States Verify"),
+                size: 816 * 4,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            encoder.copy_buffer_to_buffer(&thread_states_buf, 0, &staging, 0, 816 * 4);
+            queue.submit(Some(encoder.finish()));
+            
+            let slice = staging.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |v| { let _ = tx.send(v); });
+            device.poll(wgpu::Maintain::Wait);
+            rx.recv().unwrap().unwrap();
+            
+            let data = slice.get_mapped_range();
+            println!("[INIT CHECK] Thread states immediately after initialization:");
+            for tid in 0..4.min(num_threads) {
+                let offset = tid as usize * 816;
+                let phase = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap());
+                let current_node = u32::from_le_bytes(data[offset+4..offset+8].try_into().unwrap());
+                let path0 = u32::from_le_bytes(data[offset+8..offset+12].try_into().unwrap());
+                let path_len = u32::from_le_bytes(data[offset+520..offset+524].try_into().unwrap());
+                let rng_seed = u32::from_le_bytes(data[offset+524..offset+528].try_into().unwrap());
+                let leaf_player = i32::from_le_bytes(data[offset+528..offset+532].try_into().unwrap());
+                let rollout_result = u32::from_le_bytes(data[offset+532..offset+536].try_into().unwrap());
+                let backprop_idx = u32::from_le_bytes(data[offset+536..offset+540].try_into().unwrap());
+                println!("[INIT CHECK] Thread {}: phase={} current_node={} path[0]={} path_len={} rng={} leaf={} rollout={} backprop={}", 
+                         tid, phase, current_node, path0, path_len, rng_seed, leaf_player, rollout_result, backprop_idx);
+            }
+            drop(data);
+            staging.unmap();
+        }
+        
+        // Step 1: Collect leaf candidates
+        println!("[INCREMENTAL] Collecting leaf candidates...");
+        self.dispatch_collect_candidates();
+        
+        // Step 2: Sort candidates by score (bitonic sort)
+        println!("[INCREMENTAL] Sorting candidates...");
+        self.dispatch_bitonic_sort();
+        
+        // Step 3-4: Run incremental steps until convergence
+        println!("[INCREMENTAL] Running {} steps with {} threads...", max_steps, num_threads);
+        let start_time = std::time::Instant::now();
+        let mut steps_completed = 0;
+        for step in 0..max_steps {
+            // Check timeout every 10 steps to avoid overhead
+            if step % 10 == 0 {
+                if let Some(t) = timeout {
+                    if start_time.elapsed() >= t {
+                        println!("[INCREMENTAL] Timeout reached after {} steps ({:.2}s)", step, start_time.elapsed().as_secs_f64());
+                        steps_completed = step;
+                        break;
+                    }
+                }
+            }
+            
+            // Dispatch incremental_mcts_step (handles SELECTION/EXPANSION/BACKPROP)
+            self.dispatch_incremental_step(num_threads, exploration, virtual_loss_weight, temperature, seed + step, use_random_rollouts);
+            
+            // Dispatch rollout_chunk_kernel for threads in ROLLOUT_ACTIVE phase
+            self.dispatch_rollout_chunk(num_threads, seed + step * 1000);
+            
+            steps_completed = step + 1;
+        }
+        
+        println!("[INCREMENTAL] Incremental MCTS complete after {} steps ({:.2}s)", steps_completed, start_time.elapsed().as_secs_f64());
+        
+        // Return telemetry (reuse existing run_iterations logic)
+        self.run_iterations(0, exploration, virtual_loss_weight, temperature, seed)
+    }
+
+    /// Dispatch collect_leaf_candidates kernel to scan tree for unexpanded leaves.
+    fn dispatch_collect_candidates(&self) {
+        use wgpu::*;
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        // Get buffers
+        let (node_info, node_visits, candidates_buf, counter_buf, params_buf, max_nodes) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.node_info_buffer.as_ref().expect("node_info missing").clone(),
+                inner.node_visits_buffer.as_ref().expect("node_visits missing").clone(),
+                inner.leaf_candidates_buffer.as_ref().expect("candidates missing").clone(),
+                inner.candidate_count_buffer.as_ref().expect("counter missing").clone(),
+                inner.mcts_params_buffer.as_ref().expect("params missing").clone(),
+                inner.max_nodes,
+            )
+        };
+        
+        // Create shader module
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Collect Candidates Shader"),
+            source: ShaderSource::Wgsl(include_str!("shaders/mcts_othello.wgsl").into()),
+        });
+        
+        // Group 0: Node data (just what we need: node_info, node_visits)
+        let group0_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Collect Group 0 Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        
+        let group0 = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Collect Group 0"),
+            layout: &group0_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: node_info.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: node_visits.as_entire_binding() },
+            ],
+        });
+        
+        // Group 1: Params
+        let group1_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Collect Group 1 Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        
+        let group1 = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Collect Group 1"),
+            layout: &group1_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
+            ],
+        });
+        
+        // Create dummy bind group layouts for groups 2-5 (required for contiguous layout)
+        let dummy_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Dummy Layout"),
+            entries: &[],
+        });
+        
+        let dummy_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Dummy Group"),
+            layout: &dummy_layout,
+            entries: &[],
+        });
+        
+        // Group 6: Candidates buffer + counter
+        let group6_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Collect Group 6 Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        
+        let group6 = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Collect Group 6"),
+            layout: &group6_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: candidates_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: counter_buf.as_entire_binding() },
+            ],
+        });
+        
+        // Create pipeline with all groups (0, 1, 2-dummy, 3-dummy, 4-dummy, 5-dummy, 6)
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Collect Candidates Pipeline Layout"),
+            bind_group_layouts: &[&group0_layout, &group1_layout, &dummy_layout, &dummy_layout, &dummy_layout, &dummy_layout, &group6_layout],
+            push_constant_ranges: &[],
+        });
+        
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Collect Candidates Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("collect_leaf_candidates"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        
+        // Dispatch
+        // Cap at 65535 due to GPU hardware limit on workgroup dimensions
+        let workgroups = ((max_nodes + 63) / 64).min(65535);
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Collect Candidates Encoder"),
+        });
+        
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Collect Candidates Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group0, &[]);
+            pass.set_bind_group(1, &group1, &[]);
+            pass.set_bind_group(2, &dummy_group, &[]);
+            pass.set_bind_group(3, &dummy_group, &[]);
+            pass.set_bind_group(4, &dummy_group, &[]);
+            pass.set_bind_group(5, &dummy_group, &[]);
+            pass.set_bind_group(6, &group6, &[]);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+        
+        queue.submit(Some(encoder.finish()));
+        device.poll(Maintain::Wait);
+    }
+    
+    /// Dispatch bitonic_sort_candidates kernel (multiple passes for sorting).
+    fn dispatch_bitonic_sort(&self) {
+        use wgpu::*;
+        
+        let _poll_lock = DEVICE_POLL_MUTEX.lock().unwrap();
+        
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        // Get buffers using ensure methods (they return Arc<Buffer>)
+        let counter_buf = self.ensure_candidate_counter_buffer();
+        let candidates_buf = self.ensure_candidates_buffer(16384);
+        
+        // Get node buffers and params for bind groups
+        let (node_info, node_visits, node_children, mcts_params_buf, _max_nodes) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.node_info_buffer.clone().expect("node_info missing"),
+                inner.node_visits_buffer.clone().expect("node_visits missing"),
+                inner.children_indices_buffer.clone().expect("children_indices missing"),
+                inner.mcts_params_buffer.clone().expect("mcts_params missing"),
+                inner.max_nodes,
+            )
+        };
+        
+        // Read back candidate count to determine number of sort passes
+        let staging = device.create_buffer(&BufferDescriptor {
+            label: Some("Counter Staging"),
+            size: 4,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Counter Read"),
+        });
+        encoder.copy_buffer_to_buffer(&counter_buf, 0, &staging, 0, 4);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(MapMode::Read, move |result| {
+            tx.send(result).ok();
+        });
+        device.poll(Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let num_candidates = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        drop(data);
+        staging.unmap();
+        
+        if num_candidates == 0 {
+            return; // Nothing to sort
+        }
+        
+        // Round up to next power of 2
+        let mut n = 1u32;
+        while n < num_candidates {
+            n <<= 1;
+        }
+        
+        let num_stages = n.trailing_zeros();
+        
+        // Create shader
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Bitonic Sort Shader"),
+            source: ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/mcts_othello.wgsl"))),
+        });
+        
+        // Group 0: Node data (not used by sort, but required for contiguous layout)
+        let group0_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Sort Group 0 Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        
+        let group0 = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Sort Group 0"),
+            layout: &group0_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: node_info.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: node_visits.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: node_children.as_entire_binding() },
+            ],
+        });
+        
+        // Group 1: Params
+        let group1_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Sort Group 1 Layout"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+        
+        let group1 = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Sort Group 1"),
+            layout: &group1_layout,
+            entries: &[BindGroupEntry { binding: 0, resource: mcts_params_buf.as_entire_binding() }],
+        });
+        
+        // Dummy groups 2-5
+        let dummy_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Dummy Layout"),
+            entries: &[],
+        });
+        
+        let dummy_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Dummy Group"),
+            layout: &dummy_layout,
+            entries: &[],
+        });
+        
+        // Group 6: Candidates
+        let group6_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Sort Group 6 Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        
+        let group6 = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Sort Group 6"),
+            layout: &group6_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: candidates_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: counter_buf.as_entire_binding() },
+            ],
+        });
+        
+        // Create pipeline
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Sort Pipeline Layout"),
+            bind_group_layouts: &[&group0_layout, &group1_layout, &dummy_layout, &dummy_layout, &dummy_layout, &dummy_layout, &group6_layout],
+            push_constant_ranges: &[],
+        });
+        
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Sort Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("bitonic_sort_candidates"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        
+        // Dispatch multiple passes: for each stage, for each step in that stage
+        // Cap at 65535 due to GPU hardware limit on workgroup dimensions
+        let workgroups = ((n / 2 + 63) / 64).min(65535); // Each thread handles one comparison pair
+        
+        for stage in 0..num_stages {
+            for step in (0..=stage).rev() {
+                // Update params with stage/step (abusing turn_number and game_type fields)
+                let mut params = MctsOthelloParams::default();
+                params.turn_number = stage;
+                params.game_type = step;
+                
+                queue.write_buffer(&mcts_params_buf, 0, bytemuck::bytes_of(&params));
+                
+                let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some(&format!("Sort Stage {} Step {}", stage, step)),
+                });
+                
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some(&format!("Sort Pass {}-{}", stage, step)),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&pipeline);
+                    pass.set_bind_group(0, &group0, &[]);
+                    pass.set_bind_group(1, &group1, &[]);
+                    pass.set_bind_group(2, &dummy_group, &[]);
+                    pass.set_bind_group(3, &dummy_group, &[]);
+                    pass.set_bind_group(4, &dummy_group, &[]);
+                    pass.set_bind_group(5, &dummy_group, &[]);
+                    pass.set_bind_group(6, &group6, &[]);
+                    pass.dispatch_workgroups(workgroups, 1, 1);
+                }
+                
+                queue.submit(Some(encoder.finish()));
+                device.poll(Maintain::Wait);
+            }
+        }
+    }
+    
+    /// Helper: Create Group 0 bind group layout and bind group with all 13 buffers
+    fn create_group0_bind_group(&self, device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+        use wgpu::*;
+        
+        // Get all Group 0 buffers
+        let (
+            node_info,
+            node_visits,
+            node_wins,
+            node_vl,
+            node_state,
+            children_indices,
+            children_priors,
+            free_lists,
+            free_tops,
+            free_list_ownership_buf,
+            global_free_queue_buf,
+            global_free_head_buf,
+            expansion_paused_buf
+        ) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.node_info_buffer.as_ref().expect("node_info missing").clone(),
+                inner.node_visits_buffer.as_ref().expect("node_visits missing").clone(),
+                inner.node_wins_buffer.as_ref().expect("node_wins missing").clone(),
+                inner.node_vl_buffer.as_ref().expect("node_vl missing").clone(),
+                inner.node_state_buffer.as_ref().expect("node_state missing").clone(),
+                inner.children_indices_buffer.as_ref().expect("children_indices missing").clone(),
+                inner.children_priors_buffer.as_ref().expect("children_priors missing").clone(),
+                inner.free_lists_buffer.as_ref().expect("free_lists missing").clone(),
+                inner.free_tops_buffer.as_ref().expect("free_tops missing").clone(),
+                inner.free_list_ownership_buffer.as_ref().expect("free_list_ownership missing").clone(),
+                inner.global_free_queue_buffer.as_ref().expect("global_free_queue missing").clone(),
+                inner.global_free_head_buffer.as_ref().expect("global_free_head missing").clone(),
+                inner.expansion_paused_buffer.as_ref().expect("expansion_paused missing").clone(),
+            )
+        };
+
+        // Create layout with 13 bindings (0-12)
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Group 0 Layout (Node Data)"),
+            entries: &(0..=12).map(|i| BindGroupLayoutEntry {
+                binding: i,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }).collect::<Vec<_>>(),
+        });
+        
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Group 0 Bind Group (Node Data)"),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: node_info.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: node_visits.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: node_wins.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: node_vl.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: node_state.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: children_indices.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: children_priors.as_entire_binding() },
+                BindGroupEntry { binding: 7, resource: free_lists.as_entire_binding() },
+                BindGroupEntry { binding: 8, resource: free_tops.as_entire_binding() },
+                BindGroupEntry { binding: 9, resource: free_list_ownership_buf.as_entire_binding() },
+                BindGroupEntry { binding: 10, resource: global_free_queue_buf.as_entire_binding() },
+                BindGroupEntry { binding: 11, resource: global_free_head_buf.as_entire_binding() },
+                BindGroupEntry { binding: 12, resource: expansion_paused_buf.as_entire_binding() },
+            ],
+        });
+        
+        (layout, bind_group)
+    }
+    
+    /// Helper: Create Group 1 bind group layout and bind group with all 6 buffers
+    fn create_group1_bind_group(&self, device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+        use wgpu::*;
+        
+        // Get all Group 1 buffers
+        let (
+            mcts_params_buf,
+            work_items_buf,
+            paths_buf,
+            alloc_counter_buf,
+            diagnostics_buf,
+            root_stats_buf
+        ) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.mcts_params_buffer.as_ref().expect("mcts_params missing").clone(),
+                inner.work_items_buffer.as_ref().expect("work_items missing").clone(),
+                inner.paths_buffer.as_ref().expect("paths missing").clone(),
+                inner.alloc_counter_buffer.as_ref().expect("alloc_counter missing").clone(),
+                inner.diagnostics_buffer.as_ref().expect("diagnostics missing").clone(),
+                inner.root_stats_buffer.as_ref().expect("root_stats missing").clone(),
+            )
+        };
+
+        // Create layout with 6 bindings (0-5)
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Group 1 Layout (MCTS Params)"),
+            entries: &[
+                BindGroupLayoutEntry { binding: 0, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 1, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 2, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 3, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 4, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 5, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+        
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Group 1 Bind Group (MCTS Params)"),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: mcts_params_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: work_items_buf.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: paths_buf.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: alloc_counter_buf.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: diagnostics_buf.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: root_stats_buf.as_entire_binding() },
+            ],
+        });
+        
+        (layout, bind_group)
+    }
+    
+    /// Helper: Create Group 2 bind group layout and bind group (root_board)
+    fn create_group2_bind_group(&self, device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+        use wgpu::*;
+        
+        let root_board_buf = {
+            let inner = self.inner.lock().unwrap();
+            inner.root_board_buffer.as_ref().expect("root_board missing").clone()
+        };
+
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Group 2 Layout (Root Board)"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+        
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Group 2 Bind Group (Root Board)"),
+            layout: &layout,
+            entries: &[BindGroupEntry { binding: 0, resource: root_board_buf.as_entire_binding() }],
+        });
+        
+        (layout, bind_group)
+    }
+    
+    /// Helper: Create Group 3 bind group layout and bind group (urgent events)
+    fn create_group3_bind_group(&self, device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+        use wgpu::*;
+        
+        let (urgent_event_buffer_gpu, urgent_event_write_head_gpu) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.urgent_event_buffer_gpu.as_ref().expect("urgent_event_buffer_gpu missing").clone(),
+                inner.urgent_event_write_head_gpu.as_ref().expect("urgent_event_write_head_gpu missing").clone(),
+            )
+        };
+
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Group 3 Layout (Urgent Events)"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Group 3 Bind Group (Urgent Events)"),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: urgent_event_buffer_gpu.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: urgent_event_write_head_gpu.as_entire_binding() }
+            ],
+        });
+        
+        (layout, bind_group)
+    }
+    
+    /// Helper: Create Group 4 bind group layout and bind group (pruning/reroot)
+    fn create_group4_bind_group(&self, device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+        use wgpu::*;
+        
+        let (
+            reroot_params_buf,
+            new_root_output_buf,
+            global_free_queue_buf,
+            global_free_head_buf,
+            work_queue_buf,
+            work_head_buf,
+            work_claimed_buf,
+            work_completed_buf
+        ) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.reroot_params_buffer.as_ref().expect("reroot_params missing").clone(),
+                inner.new_root_output_buffer.as_ref().expect("new_root_output missing").clone(),
+                inner.global_free_queue_buffer.as_ref().expect("global_free_queue missing").clone(),
+                inner.global_free_head_buffer.as_ref().expect("global_free_head missing").clone(),
+                inner.work_queue_buffer.as_ref().expect("work_queue missing").clone(),
+                inner.work_head_buffer.as_ref().expect("work_head missing").clone(),
+                inner.work_claimed_buffer.as_ref().expect("work_claimed missing").clone(),
+                inner.work_completed_buffer.as_ref().expect("work_completed missing").clone(),
+            )
+        };
+
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Group 4 Layout (Pruning)"),
+            entries: &[
+                BindGroupLayoutEntry { binding: 0, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 1, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 2, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 3, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 4, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 5, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 6, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                BindGroupLayoutEntry { binding: 7, visibility: ShaderStages::COMPUTE, ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+        
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Group 4 Bind Group (Pruning)"),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: reroot_params_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: new_root_output_buf.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: global_free_queue_buf.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: global_free_head_buf.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: work_queue_buf.as_entire_binding() },
+                BindGroupEntry { binding: 5, resource: work_head_buf.as_entire_binding() },
+                BindGroupEntry { binding: 6, resource: work_claimed_buf.as_entire_binding() },
+                BindGroupEntry { binding: 7, resource: work_completed_buf.as_entire_binding() },
+            ],
+        });
+        
+        (layout, bind_group)
+    }
+    
+    /// Helper: Create Group 5 bind group layout and bind group (reroot synchronization)
+    fn create_group5_bind_group(&self, device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+        use wgpu::*;
+        
+        let (global_reroot_threads_remaining, global_reroot_start_threads_remaining) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.global_reroot_threads_remaining.as_ref().expect("global_reroot_threads_remaining missing").clone(),
+                inner.global_reroot_start_threads_remaining.as_ref().expect("global_reroot_start_threads_remaining missing").clone(),
+            )
+        };
+
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Group 5 Layout (Reroot Sync)"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Group 5 Bind Group (Reroot Sync)"),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: global_reroot_threads_remaining.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: global_reroot_start_threads_remaining.as_entire_binding() },
+            ],
+        });
+        
+        (layout, bind_group)
+    }
+    
+    /// Dispatch incremental_mcts_step kernel for one phase step.
+    fn dispatch_incremental_step(&self, num_threads: u32, exploration: f32, vl_weight: f32, temp: f32, seed: u32, use_random_rollouts: bool) {
+        use wgpu::*;
+        
+        let _poll_lock = DEVICE_POLL_MUTEX.lock().unwrap();
+        
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        // Get buffers
+        let thread_states_buf = self.ensure_thread_states_buffer(num_threads);
+        
+        // UPDATE PARAMS BUFFER with current num_threads and other values
+        {
+            let inner = self.inner.lock().unwrap();
+            let params_buf = inner.mcts_params_buffer.as_ref().expect("mcts_params missing");
+            
+            // MctsOthelloParams struct (16 u32/f32 fields):
+            let params = MctsOthelloParams {
+                num_iterations: 0, // Not used in incremental
+                max_nodes: inner.max_nodes,
+                exploration,
+                virtual_loss_weight: vl_weight,
+                root_idx: inner.current_root_idx,
+                seed,
+                board_width: 8,
+                board_height: 8,
+                game_type: 0, // Othello
+                temperature: temp,
+                turn_number: 0,
+                free_list_capacity: (inner.max_nodes + 255) / 256,
+                vl_temp_scale: 0.01, // Not used in incremental
+                num_threads,
+                root_node: inner.current_root_idx,
+                use_vl_preincrement: 0,
+                use_random_rollouts: if use_random_rollouts { 1 } else { 0 },
+            };
+            
+            queue.write_buffer(params_buf, 0, bytemuck::bytes_of(&params));
+        }
+        
+        // Create shader
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Incremental Step Shader"),
+            source: ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/mcts_othello.wgsl"))),
+        });
+        
+        // Group 0: Node data (all 13 bindings)
+        let (group0_layout, group0) = self.create_group0_bind_group(device);
+        
+        // Group 1: Params (all 6 bindings)
+        let (group1_layout, group1) = self.create_group1_bind_group(device);
+        
+        // Group 2: Root board
+        let (group2_layout, group2) = self.create_group2_bind_group(device);
+        
+        // Group 3: Urgent events
+        let (group3_layout, group3) = self.create_group3_bind_group(device);
+        
+        // Group 4: Pruning/reroot
+        let (group4_layout, group4) = self.create_group4_bind_group(device);
+        
+        // Group 5: Reroot synchronization
+        let (group5_layout, group5) = self.create_group5_bind_group(device);
+        
+        // Dummy group 6
+        let dummy_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Dummy Layout"),
+            entries: &[],
+        });
+        
+        let dummy_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Dummy Group"),
+            layout: &dummy_layout,
+            entries: &[],
+        });
+        
+        // Group 7: Thread states + queue buffers (5 bindings: 0-4)
+        let (rollout_queue, rollout_head, backprop_queue, backprop_head) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.rollout_queue_buffer.as_ref().expect("rollout_queue missing").clone(),
+                inner.rollout_head_buffer.as_ref().expect("rollout_head missing").clone(),
+                inner.backprop_queue_buffer.as_ref().expect("backprop_queue missing").clone(),
+                inner.backprop_head_buffer.as_ref().expect("backprop_head missing").clone(),
+            )
+        };
+        
+        let group7_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Incremental Group 7 Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        
+        let group7 = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Incremental Group 7"),
+            layout: &group7_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: thread_states_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: rollout_queue.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: rollout_head.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: backprop_queue.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: backprop_head.as_entire_binding() },
+            ],
+        });
+        
+        // Create pipeline
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Incremental Step Pipeline Layout"),
+            bind_group_layouts: &[&group0_layout, &group1_layout, &group2_layout, &group3_layout, &group4_layout, &group5_layout, &dummy_layout, &group7_layout],
+            push_constant_ranges: &[],
+        });
+        
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Incremental Step Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("incremental_mcts_step"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        
+        // Dispatch
+        let workgroups = (num_threads + 63) / 64;
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Incremental Step Encoder"),
+        });
+        
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Incremental Step Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group0, &[]);
+            pass.set_bind_group(1, &group1, &[]);
+            pass.set_bind_group(2, &group2, &[]);
+            pass.set_bind_group(3, &group3, &[]);
+            pass.set_bind_group(4, &group4, &[]);
+            pass.set_bind_group(5, &group5, &[]);
+            pass.set_bind_group(6, &dummy_group, &[]);
+            pass.set_bind_group(7, &group7, &[]);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+        
+        queue.submit(Some(encoder.finish()));
+        device.poll(Maintain::Wait);
+    }
+    
+    /// Dispatch rollout_chunk_kernel for threads in ROLLOUT_ACTIVE phase.
+    fn dispatch_rollout_chunk(&self, num_threads: u32, _seed: u32) {
+        use wgpu::*;
+        
+        let _poll_lock = DEVICE_POLL_MUTEX.lock().unwrap();
+        
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        // Get buffers
+        let thread_states_buf = self.ensure_thread_states_buffer(num_threads);
+        
+        // Create shader
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Rollout Chunk Shader"),
+            source: ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shaders/mcts_othello.wgsl"))),
+        });
+        
+        // Group 0: Node data (all 13 bindings)
+        let (group0_layout, group0) = self.create_group0_bind_group(device);
+        
+        // Group 1: Params (all 6 bindings)
+        let (group1_layout, group1) = self.create_group1_bind_group(device);
+        
+        // Group 2: Root board
+        let (group2_layout, group2) = self.create_group2_bind_group(device);
+        
+        // Group 3: Urgent events
+        let (group3_layout, group3) = self.create_group3_bind_group(device);
+        
+        // Group 4: Pruning/reroot
+        let (group4_layout, group4) = self.create_group4_bind_group(device);
+        
+        // Group 5: Reroot synchronization
+        let (group5_layout, group5) = self.create_group5_bind_group(device);
+        
+        // Dummy group 6
+        let dummy_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Dummy Layout"),
+            entries: &[],
+        });
+        
+        let dummy_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Dummy Group"),
+            layout: &dummy_layout,
+            entries: &[],
+        });
+        
+        // Group 7: Thread states + queue buffers (5 bindings: 0-4)
+        let (rollout_queue, rollout_head, backprop_queue, backprop_head) = {
+            let inner = self.inner.lock().unwrap();
+            (
+                inner.rollout_queue_buffer.as_ref().expect("rollout_queue missing").clone(),
+                inner.rollout_head_buffer.as_ref().expect("rollout_head missing").clone(),
+                inner.backprop_queue_buffer.as_ref().expect("backprop_queue missing").clone(),
+                inner.backprop_head_buffer.as_ref().expect("backprop_head missing").clone(),
+            )
+        };
+        
+        let group7_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Rollout Group 7 Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        
+        let group7 = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Rollout Group 7"),
+            layout: &group7_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: thread_states_buf.as_entire_binding() },
+                BindGroupEntry { binding: 1, resource: rollout_queue.as_entire_binding() },
+                BindGroupEntry { binding: 2, resource: rollout_head.as_entire_binding() },
+                BindGroupEntry { binding: 3, resource: backprop_queue.as_entire_binding() },
+                BindGroupEntry { binding: 4, resource: backprop_head.as_entire_binding() },
+            ],
+        });
+        
+        // Create pipeline
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Rollout Chunk Pipeline Layout"),
+            bind_group_layouts: &[&group0_layout, &group1_layout, &group2_layout, &group3_layout, &group4_layout, &group5_layout, &dummy_layout, &group7_layout],
+            push_constant_ranges: &[],
+        });
+        
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Rollout Chunk Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("rollout_chunk_kernel"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        
+        // Dispatch
+        let workgroups = (num_threads + 63) / 64;
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Rollout Chunk Encoder"),
+        });
+        
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Rollout Chunk Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group0, &[]);
+            pass.set_bind_group(1, &group1, &[]);
+            pass.set_bind_group(2, &group2, &[]);
+            pass.set_bind_group(3, &group3, &[]);
+            pass.set_bind_group(4, &group4, &[]);
+            pass.set_bind_group(5, &group5, &[]);
+            pass.set_bind_group(6, &dummy_group, &[]);
+            pass.set_bind_group(7, &group7, &[]);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+        
+        queue.submit(Some(encoder.finish()));
+        device.poll(Maintain::Wait);
     }
 
     pub fn calculate_nodes_used(&self) -> u32 {
@@ -1431,7 +2824,7 @@ impl GpuOthelloMcts {
         inner.max_nodes.saturating_sub(total_freed)
     }
 
-    pub fn update_root_stats(&self) {
+    fn update_root_stats_internal(&self) {
         let device = self.context.device();
         let queue = self.context.queue();
         
@@ -1453,6 +2846,11 @@ impl GpuOthelloMcts {
                 temperature: 1.0,
                 turn_number: 0,
                 free_list_capacity,
+                vl_temp_scale: 0.01,
+                num_threads: 0, // Not used for stats gathering
+                root_node: inner.current_root_idx,
+                use_vl_preincrement: 0,
+                use_random_rollouts: 0,
             };
             queue.write_buffer(mcts_params, 0, bytemuck::bytes_of(&params));
             device.poll(wgpu::Maintain::Wait);
@@ -1598,29 +2996,16 @@ impl GpuOthelloMcts {
         device.poll(wgpu::Maintain::Wait);
         rx.recv().unwrap().unwrap();
         
-        let data = slice.get_mapped_range();
-        let stats: &[RootChildStats] = bytemuck::cast_slice(&data);
-        
-        // 5. Update inner
-        let mut inner = self.inner.lock().unwrap();
-        let width = 8; // Othello width
-        for stat in stats {
-            if stat.move_id != u32::MAX {
-                let x = (stat.move_id % width) as usize;
-                let y = (stat.move_id / width) as usize;
-                // Match shader's encode_move: y * width + x
-                let idx = y * 8 + x;
-                if idx < inner.visits.len() {
-                    inner.visits[idx] = stat.visits;
-                    inner.wins[idx] = stat.wins;
-                }
-            }
-        }
-        drop(data);
-        staging_buf.unmap();
+        // Stats are now in staging_buf, ready to be read by caller
+        // We don't copy to position-indexed arrays anymore (that was the bug!)
+    }
+    
+    fn dispatch_gather_root_stats_kernel(&self) {
+        // Just call the full update_root_stats_internal which dispatches gather_root_stats
+        self.update_root_stats_internal();
     }
 
-    fn read_diagnostics(&self) -> OthelloDiagnostics {
+    pub fn read_diagnostics(&self) -> OthelloDiagnostics {
         let inner = self.inner.lock().unwrap();
         let device = self.context.device();
         let queue = self.context.queue();
@@ -1651,6 +3036,174 @@ impl GpuOthelloMcts {
         staging_buf.unmap();
         
         diagnostics
+    }
+
+    /// Read total virtual loss across all nodes in the tree
+    /// Used for testing/debugging VL leak issues
+    pub fn read_total_virtual_loss(&self) -> i32 {
+        // Calculate nodes used first (acquires DEVICE_POLL_MUTEX internally)
+        let nodes_used = self.calculate_nodes_used();
+        
+        // Now acquire both locks for buffer read
+        let _poll_lock = DEVICE_POLL_MUTEX.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
+        
+        let device = self.context.device();
+        let queue = self.context.queue();
+        let node_vl_buf = inner.node_vl_buffer.as_ref().expect("node_vl missing");
+        
+        let size = (nodes_used as u64) * 4; // i32 per node
+        let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VL Staging"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { 
+            label: Some("Read VL") 
+        });
+        encoder.copy_buffer_to_buffer(node_vl_buf, 0, &staging_buf, 0, size);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let vl_values: &[i32] = bytemuck::cast_slice(&data);
+        let total: i32 = vl_values.iter().sum();
+        
+        drop(data);
+        staging_buf.unmap();
+        
+        total
+    }
+    
+    /// Allocate thread states buffer for incremental execution (if not already allocated).
+    /// ThreadState struct: ~600 bytes per thread
+    /// For 16,384 threads: ~10 MB total
+    pub fn ensure_thread_states_buffer(&self, num_threads: u32) -> Arc<wgpu::Buffer> {
+        use wgpu::BufferUsages;
+        
+        const THREAD_STATE_SIZE: u64 = 816;
+        
+        let mut inner = self.inner.lock().unwrap();
+        
+        // Check if existing buffer is large enough
+        let required_size = THREAD_STATE_SIZE * num_threads as u64;
+        
+        if let Some(existing) = &inner.thread_states_buffer {
+            if existing.size() >= required_size {
+                return existing.clone();
+            }
+            // Buffer too small - will recreate below
+        }
+        
+        let device = &self.context.device;
+        
+        // ThreadState layout (matching WGSL):
+        // - phase: u32
+        // - current_node: u32
+        // - path: array<u32, 128> = 512 bytes
+        // - path_len: u32
+        // - rng_seed: u32
+        // - leaf_player: i32 (4 bytes)
+        // - rollout_result: u32
+        // - backprop_index: u32
+        // - rollout_board: array<i32, 64> = 256 bytes
+        // - rollout_player: i32 (4 bytes)
+        // - rollout_moves_remaining: u32
+        // - _pad0: u32
+        // Total: 4 + 4 + 512 + 4 + 4 + 4 + 4 + 4 + 256 + 4 + 4 + 4 = 808 bytes (need padding to 816 for alignment)
+        
+        let buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ThreadStates"),
+            size: THREAD_STATE_SIZE * num_threads as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        
+        inner.thread_states_buffer = Some(buffer.clone());
+        buffer
+    }
+    
+    /// Ensure candidates buffer is allocated (for collect_leaf_candidates kernel).
+    /// Buffer stores [score0, node_idx0, score1, node_idx1, ...] as u32 pairs.
+    fn ensure_candidates_buffer(&self, max_capacity: u32) -> Arc<wgpu::Buffer> {
+        let mut inner = self.inner.lock().unwrap();
+        
+        // Reuse existing buffer if already allocated
+        if let Some(ref buf) = inner.leaf_candidates_buffer {
+            return buf.clone();
+        }
+        
+        let device = self.context.device();
+        
+        // Buffer size: 2 u32s per candidate (score + node_idx)
+        let buffer_size = (max_capacity * 2 * 4) as u64; // *4 for u32 size
+        
+        let buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("LeafCandidates"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        
+        inner.leaf_candidates_buffer = Some(buffer.clone());
+        buffer
+    }
+    
+    /// Ensure candidate counter buffer is allocated (atomic u32).
+    fn ensure_candidate_counter_buffer(&self) -> Arc<wgpu::Buffer> {
+        let mut inner = self.inner.lock().unwrap();
+        
+        // Reuse existing buffer if already allocated
+        if let Some(ref buf) = inner.candidate_count_buffer {
+            return buf.clone();
+        }
+        
+        let device = self.context.device();
+        
+        let buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("CandidateCounter"),
+            size: 4, // Single u32 atomic counter
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        
+        inner.candidate_count_buffer = Some(buffer.clone());
+        buffer
+    }
+    
+    /// Calculate optimal workgroup count based on tree state (adaptive dispatch sizing).
+    /// Uses progressive wave sizing: starts small (16), grows exponentially up to 256.
+    /// This reduces contention by matching thread count to available leaves.
+    pub fn calculate_optimal_workgroups(&self) -> u32 {
+        // Drop lock to call calculate_nodes_used (which acquires its own lock)
+        let nodes_used = self.calculate_nodes_used();
+        let mut inner = self.inner.lock().unwrap();
+        
+        // Progressive wave sizing: 16 → 32 → 64 → 128 → 256
+        // Rule: Double the wave size every 10,000 nodes
+        let next_workgroups = if nodes_used < 1_000 {
+            16  // Very early: minimal threads
+        } else if nodes_used < 10_000 {
+            32  // Early: small waves
+        } else if nodes_used < 50_000 {
+            64  // Mid: medium waves
+        } else if nodes_used < 100_000 {
+            128 // Late: large waves
+        } else {
+            256 // Full tree: maximum parallelism
+        };
+        
+        // Update for next dispatch
+        inner.current_wave_workgroups = next_workgroups;
+        
+        next_workgroups
     }
     pub fn new(
         context: Arc<GpuContext>,
@@ -1725,6 +3278,14 @@ impl GpuOthelloMcts {
         let free_tops_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("FreeTopsBuffer"),
             size: 256 * 4, // 256 atomic u32s
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+
+        // Free list ownership: tracks which workgroup owns each free list (0xFFFF = unowned)
+        let free_list_ownership_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("FreeListOwnershipBuffer"),
+            size: 256 * 4, // 256 u32s (workgroup IDs, or 0xFFFF for unowned)
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
@@ -1890,6 +3451,42 @@ impl GpuOthelloMcts {
             mapped_at_creation: false,
         }));
 
+        // Queue buffers for decoupled rollout architecture (Group 8)
+        // Queue size: Allow up to 2x num_threads worth of pending work
+        let max_queue_size = 32768_u32; // Support up to 16K threads with 2x buffering
+        
+        // RolloutJob is 272 bytes (64 i32s + 3 u32s + padding)
+        let rollout_job_size = 272_u64;
+        let rollout_queue_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("RolloutQueueBuffer"),
+            size: max_queue_size as u64 * rollout_job_size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+        
+        let rollout_head_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("RolloutHeadBuffer"),
+            size: 4, // atomic<u32>
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+        
+        // BackpropJob is 16 bytes (4 u32s)
+        let backprop_job_size = 16_u64;
+        let backprop_queue_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("BackpropQueueBuffer"),
+            size: max_queue_size as u64 * backprop_job_size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+        
+        let backprop_head_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("BackpropHeadBuffer"),
+            size: 4, // atomic<u32>
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+
         // === Initialize Allocator (Free Lists) ===
         // Force rebuild comment
         {
@@ -2023,6 +3620,7 @@ impl GpuOthelloMcts {
                 children_priors_buffer: Some(children_priors_buffer),
                 free_lists_buffer: Some(free_lists_buffer),
                 free_tops_buffer: Some(free_tops_buffer),
+                free_list_ownership_buffer: Some(free_list_ownership_buffer),
                 urgent_event_buffer_gpu: Some(urgent_event_buffer_gpu),
                 urgent_event_write_head_gpu: Some(urgent_event_write_head_gpu),
                 urgent_event_buffer_host: Some(urgent_event_buffer_host),
@@ -2059,6 +3657,21 @@ impl GpuOthelloMcts {
                 diagnostics_buffer: Some(diagnostics_buffer),
                 root_stats_buffer: Some(root_stats_buffer),
                 root_board_buffer: Some(root_board_buffer),
+                // Pre-computation buffers (allocated lazily or on first use)
+                leaf_candidates_buffer: None,
+                candidate_count_buffer: None,
+                precomputed_cache_buffer: None,
+                cache_size_buffer: None,
+                precompute_diagnostics_buffer: None,
+                // Thread state buffer (allocated lazily or on first incremental dispatch)
+                thread_states_buffer: None,
+                // Queue buffers (Group 8 - Decoupled Rollout Architecture)
+                rollout_queue_buffer: Some(rollout_queue_buffer),
+                rollout_head_buffer: Some(rollout_head_buffer),
+                backprop_queue_buffer: Some(backprop_queue_buffer),
+                backprop_head_buffer: Some(backprop_head_buffer),
+                max_temp_boost_baseline: 0,
+                current_wave_workgroups: 16, // Start with small waves
             }),
             _not_send_sync: std::marker::PhantomData,
         })
@@ -2071,6 +3684,10 @@ impl GpuOthelloMcts {
             inner.root_board.copy_from_slice(board);
             inner.legal_moves = legal_moves.to_vec();
             for &(x, y) in legal_moves {
+                // Skip pass moves - they don't have visit counts to track
+                if x == usize::MAX && y == usize::MAX {
+                    continue;
+                }
                 // Match shader's encode_move: y * width + x
                 let idx = y * 8 + x;
                 inner.visits[idx] = 0;
@@ -2082,29 +3699,93 @@ impl GpuOthelloMcts {
         
         println!("[GPU-Native] init_tree: Initializing GPU tree (resetting allocator and Node 0)");
         self.reset_gpu_tree(root_player);
+        
+        // Reset diagnostics using compute shader and set baseline to 0
+        self.reset_diagnostics_gpu();
+        let mut inner = self.inner.lock().unwrap();
+        inner.max_temp_boost_baseline = 0;
     }
 
     // ...existing code...
 
                 // removed stray line: pub seen_boards
     pub fn get_children_stats(&self) -> Vec<(usize, usize, i32, i32, f64)> {
+        // Dispatch gather_root_stats kernel to populate root_stats buffer
+        // This must be done WITHOUT holding the inner lock to avoid GPU operations while locked
+        self.dispatch_gather_root_stats_kernel();
+        
+        // Now read back the root_stats buffer
         let inner = self.inner.lock().unwrap();
-        inner.legal_moves
-            .iter()
-            .map(|&(x, y)| {
-                // Match shader's encode_move: y * width + x
-                let idx = y * 8 + x;
-                let visits = inner.visits[idx];
-                let wins = inner.wins[idx];
-                // Q from child's perspective (the player making this move)
-                let q = if visits > 0 {
-                    wins as f64 / (visits as f64 * 2.0)
-                } else {
-                    0.0 // Unknown for unvisited nodes
-                };
-                (x, y, visits, wins, q)
-            })
-            .collect()
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        // Read back root_stats buffer
+        let size = (std::mem::size_of::<RootChildStats>() * 64) as u64;
+        let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Root Stats Staging"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let root_stats = inner.root_stats_buffer.as_ref().expect("root_stats missing").clone();
+        let legal_moves_copy = inner.legal_moves.clone();
+        drop(inner); // Release lock before GPU operations
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Read Root Stats") });
+        encoder.copy_buffer_to_buffer(&root_stats, 0, &staging_buf, 0, size);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let stats: &[RootChildStats] = bytemuck::cast_slice(&data);
+        
+        // Build result from root_stats, matching with legal_moves
+        let width = 8;
+        let mut result = Vec::new();
+        
+        for &(x, y) in &legal_moves_copy {
+            // Pass moves don't have visit/win stats
+            if x == usize::MAX && y == usize::MAX {
+                result.push((x, y, 0, 0, 0.0));
+                continue;
+            }
+            
+            // Match shader's encode_move: y * width + x
+            let move_id = (y * width + x) as u32;
+            
+            // Find this move in root_stats
+            let mut found = false;
+            for stat in stats {
+                if stat.move_id == move_id {
+                    let visits = stat.visits;
+                    let wins = stat.wins;
+                    // Q from parent's perspective (wins are already from parent's view)
+                    let q = if visits > 0 {
+                        wins as f64 / (visits as f64 * 2.0)
+                    } else {
+                        0.0
+                    };
+                    result.push((x, y, visits, wins, q));
+                    found = true;
+                    break;
+                }
+            }
+            
+            // If not found in root_stats, it's unvisited
+            if !found {
+                result.push((x, y, 0, 0, 0.0));
+            }
+        }
+        
+        drop(data);
+        staging_buf.unmap();
+        result
     }
 
     pub fn get_total_nodes(&self) -> u32 {
@@ -2130,9 +3811,39 @@ impl GpuOthelloMcts {
     pub fn flush_and_wait(&self) {}
 
     pub fn get_root_visits(&self) -> u32 {
+        // Read from GPU node_visits buffer for the current root
         let inner = self.inner.lock().unwrap();
-        // Match shader's encode_move: y * width + x
-        inner.legal_moves.iter().map(|&(x, y)| inner.visits[y * 8 + x] as u32).sum()
+        let device = self.context.device();
+        let queue = self.context.queue();
+        
+        let root_idx = inner.current_root_idx;
+        let node_visits_buf = inner.node_visits_buffer.as_ref().expect("node_visits missing");
+        
+        // Copy one i32 from node_visits[root_idx]
+        let offset = (root_idx as u64) * 4; // i32 size
+        let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Root Visits Staging"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Read Root Visits") });
+        encoder.copy_buffer_to_buffer(node_visits_buf, offset, &staging_buf, 0, 4);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let visits = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        drop(data);
+        staging_buf.unmap();
+        
+        visits.max(0) as u32
     }
 
     pub fn reset_gpu_tree(&self, root_player: i32) {
@@ -2144,7 +3855,7 @@ impl GpuOthelloMcts {
         // 1. Retrieve buffers
         let (
             node_info, node_visits, node_wins, node_vl, node_state,
-            children_indices, children_priors, free_lists, free_tops,
+            children_indices, children_priors, free_lists, free_tops, free_list_ownership,
             global_free_queue, global_free_head, expansion_paused,
             mcts_params, work_items, paths, alloc_counter, diagnostics,
             max_nodes
@@ -2160,6 +3871,7 @@ impl GpuOthelloMcts {
                 inner.children_priors_buffer.as_ref().expect("children_priors missing").clone(),
                 inner.free_lists_buffer.as_ref().expect("free_lists missing").clone(),
                 inner.free_tops_buffer.as_ref().expect("free_tops missing").clone(),
+                inner.free_list_ownership_buffer.as_ref().expect("free_list_ownership missing").clone(),
                 inner.global_free_queue_buffer.as_ref().expect("global_free_queue missing").clone(),
                 inner.global_free_head_buffer.as_ref().expect("global_free_head missing").clone(),
                 inner.expansion_paused_buffer.as_ref().expect("expansion_paused missing").clone(),
@@ -2176,7 +3888,7 @@ impl GpuOthelloMcts {
         // Group 0 (Node Data)
         let group0_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Init Group 0 Layout"),
-            entries: &(0..=11).map(|i| BindGroupLayoutEntry {
+            entries: &(0..=12).map(|i| BindGroupLayoutEntry {
                 binding: i,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer { ty: BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
@@ -2196,9 +3908,10 @@ impl GpuOthelloMcts {
                 BindGroupEntry { binding: 6, resource: children_priors.as_entire_binding() },
                 BindGroupEntry { binding: 7, resource: free_lists.as_entire_binding() },
                 BindGroupEntry { binding: 8, resource: free_tops.as_entire_binding() },
-                BindGroupEntry { binding: 9, resource: global_free_queue.as_entire_binding() },
-                BindGroupEntry { binding: 10, resource: global_free_head.as_entire_binding() },
-                BindGroupEntry { binding: 11, resource: expansion_paused.as_entire_binding() },
+                BindGroupEntry { binding: 9, resource: free_list_ownership.as_entire_binding() },
+                BindGroupEntry { binding: 10, resource: global_free_queue.as_entire_binding() },
+                BindGroupEntry { binding: 11, resource: global_free_head.as_entire_binding() },
+                BindGroupEntry { binding: 12, resource: expansion_paused.as_entire_binding() },
             ],
         });
 
@@ -2255,9 +3968,21 @@ impl GpuOthelloMcts {
         let zeros_256 = vec![0u8; 256 * 4];
         queue.write_buffer(&free_tops, 0, &zeros_256);
         
+        // Initialize all free lists as unowned (0xFFFF)
+        let unowned_marker = 0xFFFFu32;
+        let ownership_init: Vec<u8> = (0..256)
+            .flat_map(|_| unowned_marker.to_le_bytes())
+            .collect();
+        queue.write_buffer(&free_list_ownership, 0, &ownership_init);
+        
         // Zero out global allocator state
         queue.write_buffer(&global_free_head, 0, &0u32.to_le_bytes());
         queue.write_buffer(&expansion_paused, 0, &0u32.to_le_bytes());
+        
+        // NOTE: We do NOT reset diagnostics here because GPU buffer writes do not reliably
+        // clear atomicMax values before the next kernel runs. The diagnostics buffer
+        // accumulates across searches. To get per-search metrics, we read the baseline
+        // value at the start of each search and compute deltas.
         
         // Note: We don't need to initialize global_free_queue_alloc because 
         // global_free_head_alloc starts at 0, so the queue is empty.
@@ -2333,30 +4058,123 @@ impl GpuOthelloMcts {
         println!("[GPU-Native] GPU Tree Reset Complete. Root set to 0.");
     }
 
+    /// Reset diagnostics buffer using a compute shader.
+    /// This is more reliable than queue.write_buffer() for atomic values.
+    pub fn reset_diagnostics_gpu(&self) {
+        let device = self.context.device();
+        let queue = self.context.queue();
+        let inner = self.inner.lock().unwrap();
+        
+        let diagnostics_buf = inner.diagnostics_buffer.as_ref().expect("diagnostics missing");
+        
+        // Load and compile reset shader
+        let shader_source = include_str!("shaders/reset_diagnostics.wgsl");
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Reset Diagnostics Shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+        
+        // Create bind group layout
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Reset Diagnostics Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        
+        // Create bind group
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Reset Diagnostics Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: diagnostics_buf.as_entire_binding(),
+                },
+            ],
+        });
+        
+        // Create pipeline
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Reset Diagnostics Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Reset Diagnostics Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        
+        // Dispatch single workgroup
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Reset Diagnostics Encoder"),
+        });
+        
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Reset Diagnostics Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+    }
+
     pub fn advance_root(&self, x: usize, y: usize, new_board: &[i32; 64], new_player: i32, legal_moves: &[(usize, usize)]) -> bool {
         
         // Dispatch pruning kernels to clean up the tree on the GPU
         // The pruning kernel will handle the case where root has no children and return 0xFFFFFFF0
         if !self.dispatch_pruning_kernels(x as u32, y as u32) {
-            eprintln!("[GPU-Native ERROR] Pruning failed - aborting advance_root");
+            // Pruning failed - root likely has no children (timeout before search completed)
+            // OR the move wasn't found in children (shouldn't happen if caller validates)
+            // Reset tree to new position and return false to indicate tree wasn't reused
+            eprintln!("[GPU-Native] Pruning failed for move ({},{}) - resetting tree to new position", x, y);
+            self.init_tree(new_board, new_player, legal_moves);
             return false;
         }
         
         // 2. Update host state
-        let mut inner = self.inner.lock().unwrap();
-        inner.root_board.copy_from_slice(new_board);
-        inner.root_player = new_player;
-        inner.legal_moves = legal_moves.to_vec();
-        inner.expanded_nodes.insert(*new_board);
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.root_board.copy_from_slice(new_board);
+            inner.root_player = new_player;
+            inner.legal_moves = legal_moves.to_vec();
+            inner.expanded_nodes.insert(*new_board);
+        }
         
         println!("[GPU-Native] Tree reuse successful");
         true
     }
 
     pub fn get_best_move(&self) -> Option<(usize, usize, i32, f64)> {
+        // Select move by best Q-value (quality), not by most visits
+        // With softmax sampling, the most-visited move isn't necessarily the best
         self.get_children_stats()
             .into_iter()
-            .max_by_key(|&(_, _, visits, _, _)| visits)
+            .max_by(|a, b| {
+                let (_x_a, _y_a, _visits_a, _wins_a, q_a) = a;
+                let (_x_b, _y_b, _visits_b, _wins_b, q_b) = b;
+                // Compare by Q-value, handling NaN cases
+                q_a.partial_cmp(q_b).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(x, y, visits, _wins, q)| (x, y, visits, q))
     }
 
@@ -2585,71 +4403,12 @@ mod tests {
             println!("[DIAG] about to call start_and_log_urgent_events");
             let events_arc = start_and_log_urgent_events(engine_arc.clone(), 10, stop_flag.clone());
             println!("[DIAG] after start_and_log_urgent_events (polling thread spawn)");
-            println!("[DIAG] after start_and_log_urgent_events (polling thread spawn)");
 
-            // Run GPU-native iterations to trigger urgent events
-            println!("[DIAG] before engine_arc.lock() for run_iterations (main thread)");
-            // All &mut self operations must be done before wrapping in Arc. Use engine_arc immutably from here on.
+            // Inject a test urgent event from CPU to verify the logging pipeline works
+            let mut payload = [0u32; 255];
+            payload[0] = 0xDEADBEEF;
+            engine_arc.log_urgent_event_from_cpu_with_payload(123, 999999, &payload);
 
-            // Diagnostics: print urgent event write head and first event bytes immediately after run_iterations
-            {
-                // No lock needed, use engine_arc directly
-                let engine = &*engine_arc;
-                let device = engine.context.device();
-                let queue = engine.context.queue();
-                let urgent_event_buffers = &engine.urgent_event_buffers;
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("UrgentEventWriteHeadDiag") });
-                println!("[DIAG] diagnostics: after creating encoder");
-                println!("[DIAG] diagnostics: before copying urgent_event_write_head_buffer");
-                encoder.copy_buffer_to_buffer(&urgent_event_buffers.urgent_event_write_head_buffer, 0, &urgent_event_buffers.urgent_event_write_head_staging, 0, 4);
-                println!("[DIAG] diagnostics: after copying urgent_event_write_head_buffer");
-                println!("[DIAG] diagnostics: before copying urgent_event_buffer");
-                encoder.copy_buffer_to_buffer(&urgent_event_buffers.urgent_event_buffer, 0, &urgent_event_buffers.urgent_event_staging_buffer, 0, 1024 * 4); // Copy first 4 events
-                println!("[DIAG] diagnostics: after copying urgent_event_buffer");
-                println!("[DIAG] diagnostics: before submitting queue");
-                queue.submit(std::iter::once(encoder.finish()));
-                println!("[DIAG] diagnostics: after submitting queue");
-                // Write head
-                println!("[DIAG] diagnostics: before slicing urgent_event_write_head_staging");
-                let slice = urgent_event_buffers.urgent_event_write_head_staging.slice(..);
-                println!("[DIAG] diagnostics: after slicing urgent_event_write_head_staging");
-                println!("[DIAG] diagnostics: before map_async urgent_event_write_head_staging");
-                slice.map_async(wgpu::MapMode::Read, |_| {});
-                println!("[DIAG] diagnostics: after map_async urgent_event_write_head_staging");
-                println!("[DIAG] diagnostics: before device.poll");
-                device.poll(wgpu::Maintain::Wait);
-                println!("[DIAG] diagnostics: after device.poll");
-                println!("[DIAG] diagnostics: before get_mapped_range urgent_event_write_head_staging");
-                let data = slice.get_mapped_range();
-                println!("[DIAG] diagnostics: after get_mapped_range urgent_event_write_head_staging");
-                let val = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                println!("[DIAG] urgent_event_write_head after run_iterations: {}", val);
-                drop(data);
-                urgent_event_buffers.urgent_event_write_head_staging.unmap();
-                // First event bytes
-                println!("[DIAG] diagnostics: before slicing urgent_event_staging_buffer");
-                let event_slice = urgent_event_buffers.urgent_event_staging_buffer.slice(..);
-                println!("[DIAG] diagnostics: after slicing urgent_event_staging_buffer");
-                println!("[DIAG] diagnostics: before map_async urgent_event_staging_buffer");
-                event_slice.map_async(wgpu::MapMode::Read, |_| {});
-                println!("[DIAG] diagnostics: after map_async urgent_event_staging_buffer");
-                println!("[DIAG] diagnostics: before device.poll (event)");
-                device.poll(wgpu::Maintain::Wait);
-                println!("[DIAG] diagnostics: after device.poll (event)");
-                println!("[DIAG] diagnostics: before get_mapped_range urgent_event_staging_buffer");
-                let event_data = event_slice.get_mapped_range();
-                println!("[DIAG] diagnostics: after get_mapped_range urgent_event_staging_buffer");
-                for i in 0..4 {
-                    let start = i * 1024;
-                    let end = start + 16;
-                    if end <= event_data.len() {
-                        println!("[DIAG] urgent_event[{}] first 16 bytes: {:?}", i, &event_data[start..end]);
-                    }
-                }
-                drop(event_data);
-                urgent_event_buffers.urgent_event_staging_buffer.unmap();
-                println!("[DIAG] diagnostics: done");
-            }
             // Wait for urgent events with a timeout and fail if exceeded
             let max_wait_ms = 5000;
             let poll_interval = 50;
@@ -2873,15 +4632,14 @@ mod tests {
         mcts.init_tree(&board, root_player, &legal_moves);
         
         // Multiple dispatches to allow tree growth
-        mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 42);
+        mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 0.01, 42);
         for _ in 0..10 {
-            mcts.dispatch_mcts_othello_kernel(32, 1.4, 1.0, 0.06, 42);
+            mcts.dispatch_mcts_othello_kernel(32, 1.4, 1.0, 0.06, 0.01, 42);
         }
         
         // Wait for GPU to finish
         std::thread::sleep(std::time::Duration::from_millis(500));
         
-        mcts.update_root_stats(); // Read stats from GPU before checking
         let children = mcts.get_children_stats();
         assert!(children.iter().any(|&(_, _, visits, _, _)| visits > 0), "No child visits recorded!");
     }
@@ -2902,12 +4660,11 @@ mod tests {
         mcts.init_tree(&board, root_player, &legal_moves);
         
         // Multiple dispatches
-        mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 42);
+        mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 0.01, 42);
         for _ in 0..3 {
-            mcts.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 0.06, 42);
+            mcts.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 0.06, 0.01, 42);
         }
         
-        mcts.update_root_stats(); // Read stats from GPU before checking
         let children = mcts.get_children_stats();
         assert!(children.iter().any(|&(_, _, visits, _, _)| visits > 0), "No child visits recorded in large batch!");
     }
@@ -2953,9 +4710,9 @@ mod tests {
         mcts.init_tree(&board, root_player, &legal_moves);
         
         // Run MCTS iterations to build tree before advance_root
-        mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 42);
+        mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 0.01, 42);
         for _ in 0..3 {
-            mcts.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 0.06, 42);
+            mcts.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 0.06, 0.01, 42);
         }
         
         let host_hash_1 = {

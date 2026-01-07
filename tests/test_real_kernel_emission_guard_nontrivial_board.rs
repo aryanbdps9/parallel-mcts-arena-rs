@@ -26,7 +26,7 @@ mod tests {
                 device.poll(wgpu::Maintain::Wait);
             }
         }
-        engine.dispatch_mcts_othello_kernel(num_workgroups, 1.4, 1.0, 1.0, 42);
+        engine.dispatch_mcts_othello_kernel(num_workgroups, 1.4, 1.0, 1.0, 0.01, 42);
         device.poll(wgpu::Maintain::Wait);
         let mut atomic_val = 0u32;
         {

@@ -65,10 +65,10 @@ fn test_temperature_effect() {
         let mcts = mcts::gpu::mcts_othello::GpuOthelloMcts::new(ctx, 1_000_000, 256).expect("Failed to create GPU MCTS");
         
         mcts.init_tree(&board, current_player, &legal_moves);
-        mcts.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 10.0, 1000); // HIGH temp, different seed
+        mcts.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 10.0, 0.01, 1000); // HIGH temp, different seed
         
         for _i in 0..16 {
-            mcts.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 10.0, 2000 + _i);
+            mcts.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 10.0, 0.01, 2000 + _i);
             mcts.run_iterations(256, 1.4, 1.0, 10.0, 2000 + _i);
         }
         mcts.flush_and_wait();
@@ -92,10 +92,10 @@ fn test_temperature_effect() {
         let mcts2 = mcts::gpu::mcts_othello::GpuOthelloMcts::new(ctx2, 1_000_000, 256).expect("Failed to create GPU MCTS");
         
         mcts2.init_tree(&board, current_player, &legal_moves);
-        mcts2.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 0.01, 3000); // LOW temp, different seed range
+        mcts2.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 0.01, 0.01, 3000); // LOW temp, different seed range
         
         for _i in 0..16 {
-            mcts2.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 0.01, 4000 + _i);
+            mcts2.dispatch_mcts_othello_kernel(256, 1.4, 1.0, 0.01, 0.01, 4000 + _i);
             mcts2.run_iterations(256, 1.4, 1.0, 0.01, 4000 + _i);
         }
         mcts2.flush_and_wait();

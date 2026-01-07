@@ -33,7 +33,7 @@ fn test_gpu_q_value_perspective() {
 
     // Run some MCTS iterations to build statistics
     println!("[TEST] Running initial dispatch (1 workgroup)...");
-    engine.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 42);
+    engine.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 0.01, 42);
     
     println!("[TEST] Running MCTS for 5 seconds...");
     let timeout = Duration::from_secs(5);
@@ -42,7 +42,7 @@ fn test_gpu_q_value_perspective() {
     let mut seed = 1000;
     
     while start.elapsed() < timeout {
-        engine.dispatch_mcts_othello_kernel(128, 1.4, 1.0, 0.06, seed);
+        engine.dispatch_mcts_othello_kernel(128, 1.4, 1.0, 0.06, 0.01, seed);
         seed += 1;
         total_iterations += 128 * 64; // 128 workgroups * 64 threads
     }

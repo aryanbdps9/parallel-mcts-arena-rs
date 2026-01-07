@@ -34,11 +34,11 @@ fn test_gpu_basic_expansion() {
     
     // Run multiple batches for tree growth
     println!("[TEST] Running initial batch (1 workgroup)");
-    engine.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 1.0, 42);
+    engine.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 1.0, 0.01, 42);
     
     println!("[TEST] Running follow-up batches (16 workgroups x 3)");
     for i in 0..3 {
-        engine.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 1.0, 1000 + i);
+        engine.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 1.0, 0.01, 1000 + i);
     }
     
     let nodes_after = engine.calculate_nodes_used();

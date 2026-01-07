@@ -85,6 +85,7 @@ pub struct SearchStatistics {
     pub root_wins: f64,
     pub root_value: f64,
     pub children_stats: HashMap<String, (f64, i32)>,
+    pub max_temp_boost: Option<f32>,
 }
 
 /// Strategy for selecting the best move after MCTS search
@@ -968,6 +969,46 @@ impl<S: GameState> MCTS<S> {
                 }
             }
         }
+        
+        // If no regular moves, check if this is a pass situation
+        // (opponent has moves) or terminal (neither player has moves)
+        if moves.is_empty() {
+            // Check if opponent has any moves
+            let opponent = -player;
+            let opponent_has_moves = (0..w).any(|y| {
+                (0..w).any(|x| {
+                    if board[(y * w + x) as usize] != 0 {
+                        return false;
+                    }
+                    DIRS.iter().any(|(dx, dy)| {
+                        let mut cx = x + dx;
+                        let mut cy = y + dy;
+                        let mut seen_player = false;
+                        while cx >= 0 && cx < w && cy >= 0 && cy < w {
+                            let cell = board[(cy * w + cx) as usize];
+                            if cell == player {  // Opponent needs to see current player to flip
+                                seen_player = true;
+                                cx += dx;
+                                cy += dy;
+                                continue;
+                            }
+                            if cell == opponent && seen_player {  // Then opponent piece closes the line
+                                return true;
+                            }
+                            break;
+                        }
+                        false
+                    })
+                })
+            });
+            
+            // If opponent has moves, this is a pass move situation
+            if opponent_has_moves {
+                moves.push((usize::MAX, usize::MAX));
+            }
+            // If opponent also has no moves, it's terminal - return empty (no pass)
+        }
+        
         moves
     }
 
@@ -1000,6 +1041,7 @@ impl<S: GameState> MCTS<S> {
         exploration: f32,
         virtual_loss_weight: f32,
         temperature: f32,
+        _vl_temp_scale: f32,  // Unused in incremental mode
         timeout_secs: u64,
         gpu_max_nodes: Option<u32>,
     ) -> Option<((usize, usize), i32, f64, Vec<(usize, usize, i32, i32, f64)>, u32, gpu::OthelloRunTelemetry)> {
@@ -1021,7 +1063,13 @@ impl<S: GameState> MCTS<S> {
         };
         
         if legal_moves.is_empty() {
-            return None;
+            // No legal moves means the game is terminal (both players have no moves)
+            // This should never be called - the game should have detected terminal state
+            panic!(
+                "[GPU-Native HOST ERROR] search called with no legal moves (terminal position). \
+                Board state: {:?}, Player: {}. Game should have detected terminal state before calling search.",
+                board, current_player
+            );
         }
         
         // NOTE: Removed single-move short-circuit - we need to run search to get accurate Q-value
@@ -1176,16 +1224,17 @@ impl<S: GameState> MCTS<S> {
             }
         }
 
-        // === DISPATCH MAIN GPU KERNEL MULTIPLE TIMES FOR TREE BUILDING ===
-        println!("[HOST] BATCH_START: Dispatching main GPU MCTS kernel");
+        // === RUN INCREMENTAL MCTS WITH STATEFUL THREAD EXECUTION ===
+        println!("[HOST] BATCH_START: Running incremental MCTS");
+        
+        // Reset diagnostics before each search to get per-search metrics
+        gpu_mcts.reset_diagnostics_gpu();
+        gpu_mcts.set_diagnostics_baseline();
+        
         let seed_init = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u32;
-        
-        // First dispatch with 1 workgroup for initialization (critical for tree building)
-        gpu_mcts.dispatch_mcts_othello_kernel(1, exploration, virtual_loss_weight, temperature, seed_init);
-        println!("[HOST] Initial 1-workgroup dispatch complete");
 
         // Run iterations with timeout enforcement
         let start_time = std::time::Instant::now();
@@ -1194,63 +1243,37 @@ impl<S: GameState> MCTS<S> {
         } else {
             None
         };
-        let mut seed = seed_init + 1000;
 
-        let mut last_telemetry: Option<gpu::OthelloRunTelemetry> = None;
+        // Calculate thread count and iterations per thread
+        // For incremental MCTS: use iterations_per_batch as thread count,
+        // and calculate how many steps each thread needs to reach target total
+        let num_threads = iterations_per_batch.min(16384); // Cap at reasonable thread count  
+        let target_total_iterations = iterations_per_batch * num_batches;
+        // Each of num_threads does max_steps iterations = num_threads * max_steps total
+        // We want num_threads * max_steps ≈ target_total_iterations
+        // So max_steps = target_total_iterations / num_threads
+        let max_steps_per_search = ((target_total_iterations + num_threads - 1) / num_threads).max(1); // Ceiling division, at least 1
 
-        let mut batch = 0u32;
-        loop {
-            // Check timeout before each batch
-            if let Some(t) = timeout {
-                if start_time.elapsed() >= t {
-                    break;
-                }
-            } else if batch >= num_batches {
-                // No timeout - use batch count limit
-                break;
+        // Run incremental MCTS (handles all dispatch orchestration internally)
+        let telemetry = gpu_mcts.run_incremental_mcts(
+            num_threads,
+            max_steps_per_search,
+            exploration,
+            virtual_loss_weight,
+            temperature,
+            seed_init,
+            timeout,
+            false, // Use real rollouts
+        );
+        
+        let last_telemetry = Some(telemetry);
+        
+        // Check timeout periodically during search
+        let elapsed = start_time.elapsed();
+        if let Some(t) = timeout {
+            if elapsed >= t {
+                eprintln!("[INCREMENTAL] Timeout reached after {:.2}s", elapsed.as_secs_f64());
             }
-            
-            // Dispatch kernel for this batch (not just read telemetry)
-            gpu_mcts.dispatch_mcts_othello_kernel(
-                iterations_per_batch,
-                exploration,
-                virtual_loss_weight,
-                temperature,
-                seed.wrapping_add(batch * 1000),
-            );
-            
-            // Read telemetry after dispatch
-            let telemetry = gpu_mcts.run_iterations(
-                iterations_per_batch,
-                exploration,
-                virtual_loss_weight,
-                temperature,
-                seed.wrapping_add(batch * 1000),
-            );
-            last_telemetry = Some(telemetry);
-            // Force GPU sync every 100 batches to prevent command buffer buildup
-            if batch % 100 == 0 {
-                gpu_mcts.flush_and_wait();
-            }
-            if telemetry.saturated {
-                eprintln!(
-                    "[GPU-Native WARNING] Node pool saturated: {} / {} nodes after batch {}",
-                    telemetry.alloc_count_after, telemetry.node_capacity, batch
-                );
-                break;
-            }
-            // If we are within 2% of capacity, stop dispatching more batches to avoid illegal proposals
-            let nodes_in_use = telemetry.alloc_count_after.saturating_sub(telemetry.free_count_after);
-            let cap_guard = (telemetry.node_capacity as f32 * 0.98) as u32;
-            if nodes_in_use >= cap_guard {
-                eprintln!(
-                    "[GPU-Native WARNING] Node pool near capacity: {} in use ({} allocated - {} freed) / {} after batch {}; stopping early",
-                    nodes_in_use, telemetry.alloc_count_after, telemetry.free_count_after, telemetry.node_capacity, batch
-                );
-                break;
-            }
-            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-            batch += 1;
         }
         
         // Final flush to ensure all work completes
@@ -1273,19 +1296,19 @@ impl<S: GameState> MCTS<S> {
             gpu_mcts.get_total_nodes()
         };
 
-        eprintln!("[GPU-Native] Completed {} batches ({} iterations) in {:.2}s", 
-            batch, batch as u64 * iterations_per_batch as u64, start_time.elapsed().as_secs_f64());
+        eprintln!("[INCREMENTAL] Completed incremental MCTS with {} threads, {} steps in {:.2}s", 
+            num_threads, max_steps_per_search, start_time.elapsed().as_secs_f64());
 
         // Diagnostics: show how many nodes were used vs capacity and whether we saturated
-        let diag_prefix = "\x1b[33m[GPU-Native DIAG]\x1b[0m";
+        let diag_prefix = "\x1b[33m[INCREMENTAL DIAG]\x1b[0m";
         let sat_flag = if telemetry.saturated { "\x1b[31mSATURATED\x1b[0m" } else { "OK" };
         eprintln!(
-            "{} nodes_used={} capacity={} batches={} iter_per_batch={} virtual_loss_weight={:.2} status={}",
+            "{} nodes_used={} capacity={} threads={} max_steps={} virtual_loss_weight={:.2} status={}",
             diag_prefix,
             total_nodes,
             telemetry.node_capacity,
-            batch,
-            iterations_per_batch,
+            num_threads,
+            max_steps_per_search,
             virtual_loss_weight,
             sat_flag,
         );
@@ -1306,8 +1329,9 @@ impl<S: GameState> MCTS<S> {
 
         // Selection/expansion counters to spot algorithmic early exits
         let d = telemetry.diagnostics;
+        let max_temp_boost = d.max_temp_boost as f32 / 1000.0;
         eprintln!(
-            "{} diag_counts sel_term={} sel_no_child={} sel_invalid={} sel_path_cap={} exp_attempts={} exp_success={} exp_locked={} exp_term={} alloc_fail={} rollouts={} root_board_hash_GPU={:#x} total_children_gen={} init_nodes_count={} heartbeat={} zero_wg={}",
+            "{} diag_counts sel_term={} sel_no_child={} sel_invalid={} sel_path_cap={} exp_attempts={} exp_success={} exp_locked={} exp_term={} alloc_fail={} rollouts={} root_board_hash_GPU={:#x} total_children_gen={} init_nodes_count={} heartbeat={} zero_wg={} max_temp_boost={:.3}",
             diag_prefix,
             d.selection_terminal,
             d.selection_no_children,
@@ -1323,7 +1347,8 @@ impl<S: GameState> MCTS<S> {
             d.total_children_gen,
             d.init_nodes_count,
             d.exp_lock_rollout,
-            d.exp_lock_sibling
+            d.exp_lock_sibling,
+            max_temp_boost
         );
 
         let diag_red_flag = d.selection_invalid_child > 0 || d.alloc_failures > 0;
@@ -1434,6 +1459,23 @@ impl<S: GameState> MCTS<S> {
         let device = engine.context.device();
         engine.create_bind_groups(device);
         engine.init_tree(board, current_player, legal_moves);
+        
+        // Warmup: Run a quick MCTS to initialize all GPU resources (shaders, buffers, etc.)
+        // This prevents the first move from paying the initialization cost during its timeout
+        eprintln!("[GPU-Native] Warming up GPU (initializing kernels and buffers)...");
+        let warmup_start = std::time::Instant::now();
+        engine.run_incremental_mcts(
+            256,    // Small number of threads for warmup
+            10,     // Just 10 steps to trigger initialization
+            1.414,  // Standard exploration
+            1.0,    // Virtual loss weight
+            1.0,    // Temperature
+            12345,  // Seed
+            None,   // No timeout for warmup
+            false,  // Use real rollouts
+        );
+        eprintln!("[GPU-Native] Warmup complete in {:.2}s", warmup_start.elapsed().as_secs_f64());
+        
         *self.gpu_native_othello.lock() = Some(Arc::new(engine));
     }
 
@@ -2153,6 +2195,7 @@ impl<S: GameState> MCTS<S> {
                 .into_iter()
                 .map(|(m, (w, v))| (format!("{:?}", m), (w, v)))
                 .collect(),
+            max_temp_boost: None,
         };
 
         if prune_memory_count > 0 {
@@ -2282,6 +2325,7 @@ impl<S: GameState> MCTS<S> {
                 .into_iter()
                 .map(|(m, (w, v))| (format!("{:?}", m), (w, v)))
                 .collect(),
+            max_temp_boost: None,
         };
 
         (best_move, stats)
@@ -2368,6 +2412,7 @@ impl<S: GameState> MCTS<S> {
                 .into_iter()
                 .map(|(m, (w, v))| (format!("{:?}", m), (w, v)))
                 .collect(),
+            max_temp_boost: None,
         };
 
         (best_move, stats)

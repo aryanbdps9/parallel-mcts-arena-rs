@@ -26,11 +26,11 @@ fn test_params_storage_buffer_works() {
     
     // Dispatch kernel multiple times to allow memory visibility
     // First dispatch: expand root
-    mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 42);
+    mcts.dispatch_mcts_othello_kernel(1, 1.4, 1.0, 0.06, 0.01, 42);
     
     // Subsequent dispatches: do rollouts with expanded tree
     for _ in 0..3 {
-        mcts.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 0.06, 42);
+        mcts.dispatch_mcts_othello_kernel(16, 1.4, 1.0, 0.06, 0.01, 42);
     }
     
     // Small delay to let urgent events propagate

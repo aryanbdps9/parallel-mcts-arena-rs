@@ -34,7 +34,7 @@ mod tests {
         }
 
         // Dispatch the real kernel
-        engine.dispatch_mcts_othello_kernel(num_workgroups, 1.4, 1.0, 1.0, 42);
+        engine.dispatch_mcts_othello_kernel(num_workgroups, 1.4, 1.0, 1.0, 0.01, 42);
         device.poll(wgpu::Maintain::Wait);
 
         // Read back the atomic after dispatch
