@@ -209,6 +209,7 @@ fn identify_garbage() {
         return;
     }
 
+    var new_root_idx_temp = INVALID_INDEX;
     for (var i = 0u; i < num_children && i < MAX_CHILDREN; i++) {
         let child_idx = get_child_idx(current_root, i);
         if (child_idx == INVALID_INDEX) { continue; }
@@ -216,6 +217,7 @@ fn identify_garbage() {
         let child_info = node_info[child_idx];
         if (child_info.move_id == target_move_id) {
             // This is the survivor
+            new_root_idx_temp = child_idx;
             new_root_output = child_idx;
             found_new_root = true;
         } else {
@@ -233,6 +235,14 @@ fn identify_garbage() {
 
     if (!found_new_root) {
         new_root_output = 0xFFFFFFFFu;
+    } else {
+        // New root and its subtree are preserved - do NOT modify them
+        new_root_output = new_root_idx_temp;
+        
+        // CRITICAL: The new root is now the tree root, so it has no parent
+        // We MUST clear its parent pointer, otherwise backprop will walk past the root
+        // into the old (freed) root node, corrupting VL accounting
+        node_info[new_root_idx_temp].parent_idx = INVALID_INDEX;
     }
     
     // Manually free the old root (current_root) WITHOUT adding its children to the work queue.
@@ -248,6 +258,12 @@ fn identify_garbage() {
     node_info[current_root].move_id = INVALID_INDEX;
     atomicStore(&node_info[current_root].num_children, 0u);
     node_info[current_root].player_at_node = 0;
+    
+    // Clear children indices and priors
+    for (var i = 0u; i < MAX_CHILDREN; i++) {
+        set_child_idx(current_root, i, INVALID_INDEX);
+        set_child_prior(current_root, i, 0.0);
+    }
     
     // Mark as deleted and add to free list (using workgroup 0)
     // We use free_node which handles flags and free list insertion
@@ -301,6 +317,12 @@ fn prune_unreachable_topdown(@builtin(global_invocation_id) global_id: vec3<u32>
                         atomicStore(&node_info[node_idx].num_children, 0u);
                         node_info[node_idx].player_at_node = 0;
                         node_info[node_idx]._pad = 0u;
+                        
+                        // Clear children indices and priors
+                        for (var i = 0u; i < MAX_CHILDREN; i++) {
+                            set_child_idx(node_idx, i, INVALID_INDEX);
+                            set_child_prior(node_idx, i, 0.0);
+                        }
                         
                         // Set deleted flag
                         atomicOr(&node_info[node_idx].flags, 1u);
@@ -464,6 +486,12 @@ fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32, workgroup_id: ve
             break;
         }
         
+        // Check if node is deleted before reading its data
+        if (is_node_deleted(current)) {
+            atomicAdd(&diagnostics.selection_terminal, 1u);
+            break;
+        }
+        
         let info = node_info[current];
         if (atomicLoad(&node_info[current].num_children) == 0u) {
             atomicAdd(&diagnostics.selection_no_children, 1u);
@@ -475,7 +503,9 @@ fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32, workgroup_id: ve
         }
         // Select child
         let child = select_best_child(current);
-        if (child == INVALID_INDEX) {
+        // Check for all error codes (INVALID_INDEX, NO_CHILDREN, NO_VALID, SOFTMAX_PANIC)
+        // All error codes are >= 0xFFFFFFFB, so check if child is in that range
+        if (child >= SELECT_BEST_CHILD_SOFTMAX_PANIC) {
             atomicAdd(&diagnostics.selection_invalid_child, 1u);
             break;
         }
@@ -556,8 +586,16 @@ fn mcts_othello_iteration(global_id: vec3<u32>, local_idx: u32, workgroup_id: ve
     // Backpropagation phase
     for (var i = path_len; i > 0u; i--) {
         let node_idx = path[i - 1u];
+        
+        // Check if node was deleted during traversal
+        if (is_node_deleted(node_idx)) {
+            atomicAdd(&diagnostics.selection_terminal, 1u);
+            break;
+        }
+        
         atomicAdd(&node_vl[node_idx], -1);
         let v = atomicAdd(&node_visits[node_idx], 1);
+        mark_node_dirty(node_idx);
         
         // CRITICAL: Reward calculation must match CPU MCTS convention
         let player_at_node = node_info[node_idx].player_at_node;
@@ -679,6 +717,29 @@ const DIR_X: array<i32, 8> = array<i32, 8>(1, 1, 0, -1, -1, -1, 0, 1);
 const DIR_Y: array<i32, 8> = array<i32, 8>(0, 1, 1, 1, 0, -1, -1, -1);
 
 const MAX_SIM_MOVES: i32 = 60;
+
+// Flag bit positions
+const FLAG_DELETED: u32 = 0x1u;    // Bit 0: node is deleted/freed
+const FLAG_ZERO: u32 = 0x2u;       // Bit 1: node is freshly allocated
+const FLAG_DIRTY: u32 = 0x4u;      // Bit 2: node has been modified
+
+// Helper functions for flag management
+fn is_node_deleted(node_idx: u32) -> bool {
+    return (atomicLoad(&node_info[node_idx].flags) & FLAG_DELETED) != 0u;
+}
+
+fn mark_node_dirty(node_idx: u32) {
+    atomicOr(&node_info[node_idx].flags, FLAG_DIRTY);
+}
+
+fn mark_node_deleted(node_idx: u32) {
+    atomicOr(&node_info[node_idx].flags, FLAG_DELETED);
+}
+
+fn mark_node_clean(node_idx: u32) {
+    atomicAnd(&node_info[node_idx].flags, ~FLAG_DELETED);
+    atomicAnd(&node_info[node_idx].flags, ~FLAG_DIRTY);
+}
 
 // =============================================================================
 // Data Structures
@@ -1033,6 +1094,11 @@ fn calculate_puct(parent_idx: u32, child_slot: u32) -> f32 {
         return -1000000.0;
     }
     
+    // Check if child was deleted
+    if (is_node_deleted(child_idx)) {
+        return -1000000.0;
+    }
+    
     let parent_visits = atomicLoad(&node_visits[parent_idx]);
     let child_visits = atomicLoad(&node_visits[child_idx]);
     let child_wins = atomicLoad(&node_wins[child_idx]);
@@ -1062,18 +1128,23 @@ fn calculate_puct(parent_idx: u32, child_slot: u32) -> f32 {
 
 // Select child by sampling from probability distribution based on PUCT scores
 fn select_best_child(parent_idx: u32) -> u32 {
+    // Check if parent node was deleted
+    if (is_node_deleted(parent_idx)) {
+        return SELECT_BEST_CHILD_NO_VALID;
+    }
+    
     let info = node_info[parent_idx];
     let num_children = atomicLoad(&node_info[parent_idx].num_children);
     if (num_children == 0u) {
         return SELECT_BEST_CHILD_NO_CHILDREN;
     }
 
-    // Collect valid children (child_idx != INVALID_INDEX)
+    // Collect valid children (child_idx != INVALID_INDEX and not deleted)
     var valid_slots: array<u32, 64>;
     var valid_count: u32 = 0u;
     for (var i = 0u; i < num_children; i++) {
         let child_idx = get_child_idx(parent_idx, i);
-        if (child_idx != INVALID_INDEX) {
+        if (child_idx != INVALID_INDEX && !is_node_deleted(child_idx)) {
             valid_slots[valid_count] = i;
             valid_count++;
         }
@@ -1151,8 +1222,16 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
                 let flat_idx = list_idx * params.free_list_capacity + (local_top - 1u);
                 let idx = free_lists_flat[flat_idx];
                 if (idx != INVALID_INDEX) {
-                    atomicAnd(&node_info[idx].flags, ~1u); // clear deleted
-                    atomicAnd(&node_info[idx].flags, ~(1u << 2)); // clear dirty
+                    // Use helper to mark clean (clears deleted and dirty)
+                    mark_node_clean(idx);
+                    // Initialize to prevent garbage data causing stampede
+                    atomicStore(&node_info[idx].num_children, 0u);
+                    node_info[idx].parent_idx = INVALID_INDEX;
+                    node_info[idx].move_id = INVALID_INDEX;
+                    // Clear children indices (defense in depth - should already be clear from free_node)
+                    for (var i = 0u; i < MAX_CHILDREN; i++) {
+                        set_child_idx(idx, i, INVALID_INDEX);
+                    }
                     return idx;
                 }
             } else {
@@ -1173,8 +1252,16 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
                 let flat_idx = list_idx * params.free_list_capacity + (local_top - 1u);
                 let idx = free_lists_flat[flat_idx];
                 if (idx != INVALID_INDEX) {
-                    atomicAnd(&node_info[idx].flags, ~1u); // clear deleted
-                    atomicAnd(&node_info[idx].flags, ~(1u << 2)); // clear dirty
+                    // Use helper to mark clean (clears deleted and dirty)
+                    mark_node_clean(idx);
+                    // Initialize to prevent garbage data causing stampede
+                    atomicStore(&node_info[idx].num_children, 0u);
+                    node_info[idx].parent_idx = INVALID_INDEX;
+                    node_info[idx].move_id = INVALID_INDEX;
+                    // Clear children indices (defense in depth - should already be clear from free_node)
+                    for (var i = 0u; i < MAX_CHILDREN; i++) {
+                        set_child_idx(idx, i, INVALID_INDEX);
+                    }
                     return idx;
                 }
             } else {
@@ -1192,8 +1279,16 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
         if (claimed > 0u) {
             let idx = global_free_queue_alloc[claimed - 1u];
             if (idx != INVALID_INDEX && idx != 0u) {
-                 atomicAnd(&node_info[idx].flags, ~1u); // clear deleted
-                 atomicAnd(&node_info[idx].flags, ~(1u << 2)); // clear dirty
+                 // Use helper to mark clean (clears deleted and dirty)
+                 mark_node_clean(idx);
+                 // Initialize to prevent garbage data causing stampede
+                 atomicStore(&node_info[idx].num_children, 0u);
+                 node_info[idx].parent_idx = INVALID_INDEX;
+                 node_info[idx].move_id = INVALID_INDEX;
+                 // Clear children indices (defense in depth - should already be clear from free_node)
+                 for (var i = 0u; i < MAX_CHILDREN; i++) {
+                     set_child_idx(idx, i, INVALID_INDEX);
+                 }
                  return idx;
             }
         } else {
@@ -1210,6 +1305,14 @@ fn try_allocate_node(my_workgroup: u32) -> u32 {
         if (alloc_idx < params.max_nodes) {
             if (alloc_idx == 0u) { return INVALID_INDEX; }
             atomicStore(&node_info[alloc_idx].flags, (1u << 1)); // zero bit
+            // Initialize fresh nodes to prevent garbage data
+            atomicStore(&node_info[alloc_idx].num_children, 0u);
+            node_info[alloc_idx].parent_idx = INVALID_INDEX;
+            node_info[alloc_idx].move_id = INVALID_INDEX;
+            node_info[alloc_idx].player_at_node = 0;
+            atomicStore(&node_visits[alloc_idx], 0);
+            atomicStore(&node_wins[alloc_idx], 0);
+            atomicStore(&node_vl[alloc_idx], 0);
             return alloc_idx;
         }
     }
@@ -1225,10 +1328,21 @@ fn free_node(node_idx: u32, my_workgroup: u32) {
     if (node_idx == INVALID_INDEX || node_idx >= params.max_nodes) {
         return;
     }
-    // Set deleted bit, clear dirty and zero bits
-    atomicOr(&node_info[node_idx].flags, 1u); // set deleted
-    atomicAnd(&node_info[node_idx].flags, ~(1u << 1)); // clear zero
-    atomicAnd(&node_info[node_idx].flags, ~(1u << 2)); // clear dirty
+    // Clear node data to prevent garbage on reallocation
+    atomicStore(&node_info[node_idx].num_children, 0u);
+    node_info[node_idx].parent_idx = INVALID_INDEX;
+    node_info[node_idx].move_id = INVALID_INDEX;
+    atomicStore(&node_visits[node_idx], 0);
+    atomicStore(&node_wins[node_idx], 0);
+    atomicStore(&node_vl[node_idx], 0);
+    // Clear all children indices to prevent stale pointers
+    for (var i = 0u; i < MAX_CHILDREN; i++) {
+        set_child_idx(node_idx, i, INVALID_INDEX);
+        set_child_prior(node_idx, i, 0.0);
+    }
+    // Use helper to mark deleted (sets deleted, clears zero/dirty)
+    mark_node_deleted(node_idx);
+    
     let local_top = atomicAdd(&free_tops[my_workgroup], 1u);
     if (local_top < params.free_list_capacity) {
         let flat_idx = my_workgroup * params.free_list_capacity + local_top;
@@ -1324,12 +1438,24 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
     // it means someone else expanded it and set it back to READY.
     // We just transitioned it to EXPANDING, so we own it.
     // We should check if it's already expanded.
-    if (atomicLoad(&node_info[node_idx].num_children) > 0u) {
-        // Already expanded!
-        // Release lock (set back to READY).
-        atomicStore(&node_state[node_idx], NODE_STATE_READY);
-        atomicAdd(&diagnostics.exp_lock_retry, 1u); // Log this specific race
-        return false; 
+    let nc = atomicLoad(&node_info[node_idx].num_children);
+    if (nc > 0u) {
+        // Check if children are valid (not just garbage num_children)
+        let first_child = get_child_idx(node_idx, 0u);
+        if (first_child != INVALID_INDEX) {
+            // Already expanded with valid children!
+            // Release lock (set back to READY).
+            atomicStore(&node_state[node_idx], NODE_STATE_READY);
+            atomicAdd(&diagnostics.exp_lock_retry, 1u); // Log this specific race
+            return false;
+        }
+        // num_children > 0 but first child is INVALID - this is garbage data
+        // Proceed with expansion and reset num_children
+        atomicStore(&node_info[node_idx].num_children, 0u);
+        // Clear all children_indices to prevent reading garbage
+        for (var clear_i = 0u; clear_i < MAX_CHILDREN; clear_i++) {
+            set_child_idx(node_idx, clear_i, INVALID_INDEX);
+        }
     }
 
     // Minimal expansion: generate all valid moves for the current player
@@ -1350,12 +1476,13 @@ fn expand_node(node_idx: u32, board: ptr<function, array<i32, 64>>, my_workgroup
                     atomicStore(&node_state[node_idx], NODE_STATE_READY);
                     return false;
                 }
-                // Set up child node info
+                // Set up child node info and mark as dirty
+                mark_node_dirty(child_idx);
                 node_info[child_idx].parent_idx = node_idx;
                 node_info[child_idx].move_id = encode_move(x, y);
                 atomicStore(&node_info[child_idx].num_children, 0u);
                 node_info[child_idx].player_at_node = -player;
-                atomicStore(&node_info[child_idx].flags, 0u); // not deleted
+                atomicStore(&node_info[child_idx].flags, FLAG_DIRTY); // mark dirty, not deleted
                 node_info[child_idx]._pad = 0u;
                 node_info[child_idx]._pad2 = 0u;
                 node_info[child_idx]._pad3 = 0u;
@@ -1507,8 +1634,22 @@ fn init_allocator(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Initialize node state
+    // Initialize node state and clear all data to prevent garbage
     atomicStore(&node_state[node_idx], NODE_STATE_EMPTY);
+    atomicStore(&node_info[node_idx].num_children, 0u);
+    node_info[node_idx].parent_idx = INVALID_INDEX;
+    node_info[node_idx].move_id = INVALID_INDEX;
+    node_info[node_idx].player_at_node = 0;
+    atomicStore(&node_info[node_idx].flags, 0u);
+    atomicStore(&node_visits[node_idx], 0);
+    atomicStore(&node_wins[node_idx], 0);
+    atomicStore(&node_vl[node_idx], 0);
+    
+    // Clear children_indices (critical to prevent garbage pointers)
+    for (var i = 0u; i < MAX_CHILDREN; i++) {
+        set_child_idx(node_idx, i, INVALID_INDEX);
+    }
+    
     atomicAdd(&diagnostics.init_nodes_count, 1u);
     
     // Add to free list
@@ -1529,9 +1670,18 @@ fn gather_root_stats(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Use the current root index from params
     // children_indices is flat array: node_idx * MAX_CHILDREN + slot
     let root_idx = params.root_idx;
+    
+    // Check if root was deleted
+    if (is_node_deleted(root_idx)) {
+        root_stats[slot].move_id = INVALID_INDEX;
+        root_stats[slot].visits = 0;
+        root_stats[slot].wins = 0;
+        return;
+    }
+    
     let child_idx = children_indices[root_idx * MAX_CHILDREN + slot];
     
-    if (child_idx == INVALID_INDEX) {
+    if (child_idx == INVALID_INDEX || is_node_deleted(child_idx)) {
         root_stats[slot].move_id = INVALID_INDEX;
         root_stats[slot].visits = 0;
         root_stats[slot].wins = 0;
@@ -1618,6 +1768,10 @@ fn incremental_mcts_step(
         // Traverse ONE node down the tree
         let current = state.current_node;
         
+        // Add virtual loss to current node before selecting child
+        // This balances the VL decrement in backprop, which walks the entire path
+        atomicAdd(&node_vl[current], 1);
+        
         // Check if current node is terminal or has no children
         let num_children = atomicLoad(&node_info[current].num_children);
         if (num_children == 0u) {
@@ -1634,7 +1788,9 @@ fn incremental_mcts_step(
             var valid_count = 0u;
             
             let parent_visits = f32(atomicLoad(&node_visits[current]));
-            let sqrt_parent = sqrt(parent_visits + 1.0);
+            let parent_vl = f32(atomicLoad(&node_vl[current]));
+            // Include parent VL in sqrt calculation to account for in-flight selections
+            let sqrt_parent = sqrt(parent_visits + parent_vl + 1.0);
             
             // Conditionally pre-increment VL for all children and capture old values
             var old_vl: array<i32, MAX_CHILDREN>;
@@ -1733,7 +1889,8 @@ fn incremental_mcts_step(
                         let child_idx = get_child_idx(current, i);
                         if (child_idx == INVALID_INDEX) { continue; }
                         
-                        // Subtract max for numerical stability
+                        // Standard softmax: exp((score - max) / temp)
+                        // Higher scores → exponent closer to 0 → exp closer to 1 → higher probability
                         let exp_score = exp((puct_scores[i] - max_puct) / params.temperature);
                         exp_scores[i] = exp_score;
                         exp_sum += exp_score;
@@ -1780,10 +1937,8 @@ fn incremental_mcts_step(
                                 atomicAdd(&node_vl[child_idx], -1);
                             }
                         }
-                    } else {
-                        // Without pre-increment, add VL to selected child
-                        atomicAdd(&node_vl[selected_child], 1);
                     }
+                    // Note: VL for selected_child will be added when it becomes 'current' in next iteration
                     
                     // Add to path
                     state.path[state.path_len] = selected_child;
@@ -1823,8 +1978,11 @@ fn incremental_mcts_step(
         state.phase = PHASE_IDLE;
         
     } else if (state.phase == PHASE_BACKPROP) {
-        // PHASE 4: Parent pointer backprop (walk up tree)
+        // PHASE 4: Parent pointer backprop (walk up tree ONE NODE AT A TIME)
         let node_idx = state.current_node;
+        
+        // Decrement virtual loss (added during selection)
+        atomicAdd(&node_vl[node_idx], -1);
         
         // Update this node's stats
         atomicAdd(&node_visits[node_idx], 1);
@@ -1838,17 +1996,15 @@ fn incremental_mcts_step(
         }
         atomicAdd(&node_wins[node_idx], reward);
         
-        // Remove virtual loss from this node as we backprop through it
-        atomicAdd(&node_vl[node_idx], -1);
-        
-        // Move to parent
+        // Move to parent (ONE STEP - will continue in next dispatch)
         let parent_idx = node_info[node_idx].parent_idx;
         if (parent_idx == INVALID_INDEX) {
             // Reached root - backprop complete, transition to IDLE
             state.phase = PHASE_IDLE;
         } else {
-            // Continue backprop at parent
+            // Continue backprop at parent in NEXT dispatch
             state.current_node = parent_idx;
+            // Stay in PHASE_BACKPROP - will process parent next time
         }
     } else if (state.phase == PHASE_IDLE) {
         // PHASE 2 + 5: Tree worker looking for work with dynamic load balancing

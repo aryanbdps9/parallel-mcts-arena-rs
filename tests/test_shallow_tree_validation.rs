@@ -5,6 +5,7 @@ use std::sync::Arc;
 use mcts::gpu::{GpuContext, GpuConfig};
 use mcts::gpu::mcts_othello::GpuOthelloMcts;
 
+#[allow(dead_code)]
 fn pcg_hash(state: u32) -> u32 {
     let mut s = state;
     s = s.wrapping_mul(747796405u32).wrapping_add(2891336453u32);
@@ -51,6 +52,7 @@ fn compute_legal_moves(board: &[i32; 64], player: i32) -> Vec<(usize, usize)> {
     moves
 }
 
+#[allow(dead_code)]
 fn make_move(board: &mut [i32; 64], player: i32, x: usize, y: usize) {
     let idx = y * 8 + x;
     board[idx] = player;
@@ -173,6 +175,7 @@ fn test_shallow_tree_late_game() {
         temperature,
         seed,
         None, // No timeout
+        true,
     );
     let diagnostics = telemetry.diagnostics.clone();
     

@@ -1104,18 +1104,46 @@ impl GpuOthelloMcts {
                 let mut inner = self.inner.lock().unwrap();
                 inner.current_root_idx = new_root_idx;
                 
-                // Reset thread states after pruning - any threads working on pruned nodes
-                // or in partial states should be reset to IDLE
+                // CRITICAL: Ensure ALL GPU work (including any leftover MCTS work) is complete
+                // before we clear buffers. This prevents in-flight threads from accessing
+                // VL buffers after they've been zeroed.
+                println!("[DIAG] Waiting for all GPU work to complete before clearing buffers");
+                device.poll(wgpu::Maintain::Wait);
+                println!("[DIAG] GPU idle, now clearing search state");
+                
+                // CRITICAL: Clean up all search state after move
+                // This includes thread states and virtual loss counters
+                
+                // 1. Reset thread states - clear any in-flight work
                 if let Some(thread_states_buf) = &inner.thread_states_buffer {
                     println!("[DIAG] Resetting thread states after pruning");
-                    // Write zeros to reset all thread states to IDLE (phase=0)
-                    // ThreadState is 816 bytes, but we only need to zero the first u32 (phase field)
-                    // However, it's safer to zero the entire buffer to clear all partial state
                     let num_bytes = thread_states_buf.size();
                     let zeros = vec![0u8; num_bytes as usize];
                     queue.write_buffer(thread_states_buf, 0, &zeros);
-                    device.poll(wgpu::Maintain::Wait);
                 }
+                
+                // 2. Clear virtual loss for entire tree
+                // VL is transient search state, not tree state, so it must be reset after a move
+                if let Some(node_vl_buf) = &inner.node_vl_buffer {
+                    println!("[DIAG] Clearing virtual loss counters after pruning");
+                    let num_bytes = node_vl_buf.size();
+                    let zeros = vec![0u8; num_bytes as usize];
+                    queue.write_buffer(node_vl_buf, 0, &zeros);
+                }
+                
+                // 3. Clear rollout and backprop queues
+                // These contain jobs from the old tree that should not be processed
+                if let Some(rollout_head_buf) = &inner.rollout_head_buffer {
+                    println!("[DIAG] Clearing rollout queue after pruning");
+                    queue.write_buffer(rollout_head_buf, 0, &[0u8; 4]); // Reset head to 0
+                }
+                if let Some(backprop_head_buf) = &inner.backprop_head_buffer {
+                    println!("[DIAG] Clearing backprop queue after pruning");
+                    queue.write_buffer(backprop_head_buf, 0, &[0u8; 4]); // Reset head to 0
+                }
+                
+                // Ensure all writes complete before continuing
+                device.poll(wgpu::Maintain::Wait);
             }
             true
         }
@@ -1748,6 +1776,11 @@ impl GpuOthelloMcts {
         }
         
         println!("[INCREMENTAL] Incremental MCTS complete after {} steps ({:.2}s)", steps_completed, start_time.elapsed().as_secs_f64());
+        
+        // CRITICAL: Wait for all GPU work to complete before returning
+        // This ensures that if the caller immediately calls advance_root, there are no in-flight
+        // threads that would try to access VL buffers after they've been cleared
+        device.poll(wgpu::Maintain::Wait);
         
         // Return telemetry (reuse existing run_iterations logic)
         self.run_iterations(0, exploration, virtual_loss_weight, temperature, seed)
@@ -3749,6 +3782,15 @@ impl GpuOthelloMcts {
         let width = 8;
         let mut result = Vec::new();
         
+        // Calculate total visits for PUCT diagnostics
+        let total_visits: i32 = stats.iter().map(|s| s.visits).sum();
+        let num_children = legal_moves_copy.len();
+        
+        println!("\n=== PUCT Breakdown for Root Children ===");
+        println!("Parent total visits: {} (num_children: {})", total_visits, num_children);
+        println!("sqrt(parent_visits + 1) = {:.4}", ((total_visits + 1) as f64).sqrt());
+        println!();
+        
         for &(x, y) in &legal_moves_copy {
             // Pass moves don't have visit/win stats
             if x == usize::MAX && y == usize::MAX {
@@ -3771,6 +3813,16 @@ impl GpuOthelloMcts {
                     } else {
                         0.0
                     };
+                    
+                    // Calculate PUCT components for diagnostic
+                    let uniform_prior = 1.0 / num_children as f64;
+                    let sqrt_parent = ((total_visits + 1) as f64).sqrt();
+                    let u = uniform_prior * sqrt_parent / (1.0 + visits as f64);
+                    let puct = q + u;
+                    
+                    println!("  ({},{}) visits={:7} wins={:7} Q={:.4} U={:.4} PUCT={:.4}", 
+                             x, y, visits, wins, q, u, puct);
+                    
                     result.push((x, y, visits, wins, q));
                     found = true;
                     break;
@@ -4252,8 +4304,8 @@ impl GpuOthelloMcts {
         let device = &self.context.device;
         let queue = &self.context.queue;
         
-        // Each node has MAX_CHILDREN (60) child indices
-        let offset = (parent_idx * 60 + child_num) as u64 * 4; // u32 = 4 bytes
+        // Each node has MAX_CHILDREN (64) child indices
+        let offset = (parent_idx * 64 + child_num) as u64 * 4; // u32 = 4 bytes
         let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Child Index Staging"),
             size: 4,
@@ -4338,6 +4390,173 @@ impl GpuOthelloMcts {
         drop(data);
         staging_buffer.unmap();
         result
+    }
+
+    pub fn debug_get_child_prior(&self, parent_idx: u32, child_num: u32) -> f32 {
+        let inner = self.inner.lock().unwrap();
+        let buffer = inner.children_priors_buffer.as_ref().expect("children_priors missing");
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        
+        // children_priors[parent_idx * MAX_CHILDREN + child_num]
+        // MAX_CHILDREN is 64 in the shader
+        let offset = (parent_idx * 64 + child_num) as u64 * 4; // f32 = 4 bytes
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Child Prior Staging"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(buffer, offset, &staging_buffer, 0, 4);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let result = f32::from_le_bytes(data[0..4].try_into().unwrap());
+        drop(data);
+        staging_buffer.unmap();
+        result
+    }
+
+    pub fn debug_get_node_vl(&self, idx: u32) -> i32 {
+        let inner = self.inner.lock().unwrap();
+        let buffer = inner.node_vl_buffer.as_ref().expect("node_vl missing");
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        
+        let offset = idx as u64 * 4; // i32 = 4 bytes
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Node VL Staging"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(buffer, offset, &staging_buffer, 0, 4);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let result = i32::from_le_bytes(data[0..4].try_into().unwrap());
+        drop(data);
+        staging_buffer.unmap();
+        result
+    }
+
+    pub fn debug_get_node_state(&self, idx: u32) -> u32 {
+        let inner = self.inner.lock().unwrap();
+        let buffer = inner.node_state_buffer.as_ref().expect("node_state missing");
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+        
+        let offset = idx as u64 * 4; // u32 = 4 bytes
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Node State Staging"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(buffer, offset, &staging_buffer, 0, 4);
+        queue.submit(Some(encoder.finish()));
+        
+        let slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| tx.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        
+        let data = slice.get_mapped_range();
+        let result = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        drop(data);
+        staging_buffer.unmap();
+        result
+    }
+
+    /// Debug helper: print detailed state of root's children
+    pub fn debug_print_root_children(&self) {
+        let inner = self.inner.lock().unwrap();
+        let root_idx = inner.current_root_idx;
+        drop(inner);
+        
+        let root_info = self.debug_get_node_info(root_idx);
+        
+        // Check deleted flag (bit 0)
+        if (root_info.flags & 0x1) != 0 {
+            println!("\n=== DEBUG: Root Children State ===");
+            println!("Root index: {}", root_idx);
+            println!("WARNING: Root node is DELETED (flags={:#x})", root_info.flags);
+            println!("=== End Debug ===\n");
+            return;
+        }
+        
+        let num_children = root_info.num_children;
+        let root_state = self.debug_get_node_state(root_idx);
+        let root_vl = self.debug_get_node_vl(root_idx);
+        
+        println!("\n=== DEBUG: Root Children State ===");
+        println!("Root index: {}", root_idx);
+        println!("Root num_children: {}", num_children);
+        println!("Root visits: {}", self.debug_get_node_visits(root_idx));
+        println!("Root wins: {}", self.debug_get_node_wins(root_idx));
+        println!("Root virtual_loss: {}", root_vl);
+        println!("Root state: {} (0=EMPTY, 1=EXPANDING, 2=READY)", root_state);
+        println!("Root flags: {:#x} (bit0=deleted, bit1=zero, bit2=dirty)", root_info.flags);
+        println!();
+        
+        // Check ALL 64 possible children to find valid ones
+        let mut valid_count = 0;
+        let mut total_child_visits = 0;
+        for i in 0..64 {
+            let child_idx = self.debug_get_child_index(root_idx, i);
+            if child_idx != 0xFFFFFFFF {
+                let child_info = self.debug_get_node_info(child_idx);
+                
+                // Check if child is deleted
+                if (child_info.flags & 0x1) != 0 {
+                    println!("Child {}: idx={} DELETED (flags={:#x})", i, child_idx, child_info.flags);
+                    continue;
+                }
+                
+                let child_visits = self.debug_get_node_visits(child_idx);
+                let child_wins = self.debug_get_node_wins(child_idx);
+                let child_vl = self.debug_get_node_vl(child_idx);
+                let child_prior = self.debug_get_child_prior(root_idx, i);
+                
+                total_child_visits += child_visits;
+                
+                let move_x = child_info.move_id % 8;
+                let move_y = child_info.move_id / 8;
+                
+                println!("Child {}: idx={} move=({},{}) visits={} wins={} vl={} prior={:.4} flags={:#x}",
+                    i, child_idx, move_x, move_y, child_visits, child_wins, child_vl, child_prior, child_info.flags);
+                valid_count += 1;
+            }
+        }
+        
+        if valid_count == 0 {
+            println!("NO VALID CHILDREN FOUND! All 64 indices are INVALID_INDEX or deleted");
+            println!("This means num_children={} is garbage data", num_children);
+        } else {
+            println!("\nTotal valid children: {}", valid_count);
+            println!("Total child visits: {}", total_child_visits);
+        }
+        
+        println!("=== End Debug ===\n");
     }
 }
 

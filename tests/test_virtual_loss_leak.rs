@@ -51,8 +51,6 @@ fn test_virtual_loss_no_leak() {
             12345 + dispatch_num
         );
         
-        engine.update_root_stats();
-        
         // Read VL from GPU
         let total_vl = engine.read_total_virtual_loss();
         let nodes_used = engine.calculate_nodes_used();

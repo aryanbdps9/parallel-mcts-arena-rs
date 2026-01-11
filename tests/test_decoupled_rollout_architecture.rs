@@ -43,6 +43,7 @@ fn test_queue_based_execution() {
         0.06, // temperature
         42,   // seed
         None,
+        true,
     );
     
     eprintln!("\n=== RESULTS ===");
@@ -103,6 +104,7 @@ fn test_tree_workers_dont_block() {
         0.06,
         42,
         None,
+        true,
     );
     let elapsed = start.elapsed();
     
@@ -145,7 +147,7 @@ fn test_parent_pointer_backprop() {
         .expect("Failed to create engine");
     engine.init_tree(&board, 1, &legal_moves);
     
-    let telemetry = engine.run_incremental_mcts(
+    let _telemetry = engine.run_incremental_mcts(
         512,
         100,
         1.4,
@@ -153,6 +155,7 @@ fn test_parent_pointer_backprop() {
         0.06,
         42,
         None,
+        true,
     );
     
     let root_visits = engine.get_root_visits();
@@ -209,6 +212,7 @@ fn test_dynamic_load_balancing() {
         0.06,
         42,
         None,
+        true,
     );
     
     eprintln!("\n=== RESULTS ===");
@@ -279,6 +283,7 @@ fn test_opening_move_symmetry() {
         0.06,  // temperature (low, to make the problem worse)
         42,    // seed
         None,
+        true,
     );
     
     // Get visit counts for all 4 children

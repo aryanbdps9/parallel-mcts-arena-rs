@@ -1254,6 +1254,8 @@ impl<S: GameState> MCTS<S> {
         // So max_steps = target_total_iterations / num_threads
         let max_steps_per_search = ((target_total_iterations + num_threads - 1) / num_threads).max(1); // Ceiling division, at least 1
 
+        eprintln!("[GPU-Native DEBUG] Running MCTS with temperature={:.4}", temperature);
+        
         // Run incremental MCTS (handles all dispatch orchestration internally)
         let telemetry = gpu_mcts.run_incremental_mcts(
             num_threads,
@@ -1356,10 +1358,21 @@ impl<S: GameState> MCTS<S> {
         // DEBUG: Print ALL children to see visit distribution
         let mut sorted = children_stats.clone();
         sorted.sort_by_key(|(_, _, v, _, _)| -(*v));
-        eprintln!("[GPU-Native DEBUG] All {} children by visits:", sorted.len());
+        
+        // Calculate total visits for PUCT calculation
+        let total_visits: i32 = sorted.iter().map(|(_, _, v, _, _)| v).sum();
+        let sqrt_parent = (total_visits as f64 + 1.0).sqrt();
+        let exploration = 1.0; // From command line args
+        let uniform_prior = 1.0 / sorted.len() as f64;
+        
+        eprintln!("[GPU-Native DEBUG] All {} children by visits (PUCT breakdown):", sorted.len());
+        eprintln!("  Parent visits: {}, sqrt(parent+1): {:.4}", total_visits, sqrt_parent);
         for (i, (x, y, visits, wins, q)) in sorted.iter().enumerate() {
-            eprintln!("  {}. ({},{}) visits={:7} wins={:7} Q={:.4}", 
-                     i+1, x, y, visits, wins, q);
+            // Calculate U (exploration term)
+            let u = exploration * uniform_prior * sqrt_parent / (1.0 + *visits as f64);
+            let puct = q + u;
+            eprintln!("  {}. ({},{}) visits={:7} wins={:7} Q={:.4} U={:.4} PUCT={:.4}", 
+                     i+1, x, y, visits, wins, q, u, puct);
         }
 
         // DEBUG: Check if any child has move_id=0 (x=0, y=0)

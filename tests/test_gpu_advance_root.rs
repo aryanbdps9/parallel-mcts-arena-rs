@@ -93,9 +93,8 @@ fn test_gpu_advance_root() {
         
         // Sync GPU stats to host
         println!("[TEST] Syncing GPU stats to host");
-        engine.update_root_stats();
         
-        // Get statistics
+        // Get statistics (this dispatches gather_root_stats kernel internally)
         let stats = engine.get_children_stats();
         println!("[TEST] Children stats:");
         for (i, &(x, y, visits, wins, q)) in stats.iter().enumerate() {

@@ -111,7 +111,6 @@ fn test_exploration_constant_comparison() {
         }
         
         engine.flush_and_wait();
-        engine.update_root_stats();
         
         let stats = engine.get_children_stats();
         let mut sorted = stats.clone();

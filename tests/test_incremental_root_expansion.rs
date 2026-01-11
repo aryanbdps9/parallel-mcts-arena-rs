@@ -38,9 +38,10 @@ fn test_incremental_expands_root() {
         100,    // max_steps (enough for: root expand → root rollouts → select children → children rollouts)
         1.414,  // exploration
         1.0,    // virtual_loss_weight
-        1.0,    // temperature
+        0.0,    // temperature
         42,     // seed
         None,   // no timeout
+        true,
     );
     
     println!("[TEST] Incremental MCTS completed");

@@ -59,7 +59,6 @@ fn test_gpu_perspective_winning_position() {
     mcts.flush_and_wait();
     
     println!("Updating stats...");
-    mcts.update_root_stats();
     let children = mcts.get_children_stats();
     
     println!("\nRoot children stats:");

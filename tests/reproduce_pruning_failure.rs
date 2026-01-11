@@ -60,7 +60,7 @@ fn test_reproduce_pruning_failure() {
     println!("advance_root returned: {}", success);
 
     // Check if root changed
-    let new_root_info = mcts.debug_get_node_info(0); // Root is always index 0? No, advance_root might swap?
+    let _new_root_info = mcts.debug_get_node_info(0); // Root is always index 0? No, advance_root might swap?
     // Actually advance_root updates the root pointer or swaps content.
     // In this implementation, it likely swaps the new root to index 0 or updates internal state.
     // Let's check if it panicked or logged errors.

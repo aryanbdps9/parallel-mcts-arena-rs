@@ -45,7 +45,6 @@ fn test_gpu_basic_expansion() {
     println!("[TEST] Nodes after 1 batch: {}", nodes_after);
     
     // Get diagnostics
-    engine.update_root_stats();
     let stats = engine.get_children_stats();
     
     println!("[TEST] Root children:");

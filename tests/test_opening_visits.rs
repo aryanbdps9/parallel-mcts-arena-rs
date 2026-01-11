@@ -65,6 +65,7 @@ fn test_opening_position_visits() {
         temperature,
         seed,
         None,
+        true,
     );
     
     eprintln!("\n=== SEARCH RESULTS ===");
@@ -120,7 +121,7 @@ fn test_opening_position_visits() {
         eprintln!("Visit ratio: {:.2}:1", visit_ratio);
         
         // With temp=0.06, if Q_diff=0.1, expected ratio ≈ exp(0.1/0.06) ≈ 5.3
-        let expected_ratio = ((q_diff / temperature as f64).exp());
+        let expected_ratio = (q_diff / temperature as f64).exp();
         eprintln!("Expected visit ratio from softmax: {:.2}:1", expected_ratio);
         
         // Check if within reasonable bounds (softmax sampling has variance)

@@ -172,9 +172,10 @@ fn test_incremental_dispatch_flow() {
         5,     // max_steps (small for testing)
         1.414, // exploration
         1.0,   // vl_weight
-        1.0,   // temperature
+        0.0,   // temperature
         123,   // seed
         None,  // timeout
+        true,
     );
     
     println!("[TEST] Incremental MCTS completed");

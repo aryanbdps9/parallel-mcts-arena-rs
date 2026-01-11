@@ -81,6 +81,7 @@ fn test_endgame_detailed_diagnostics() {
         temperature,
         seed,
         None, // No timeout
+        true,
     );
     let diagnostics = telemetry.diagnostics.clone();
     

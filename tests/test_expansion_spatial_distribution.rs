@@ -56,7 +56,6 @@ fn test_expansion_spatial_distribution() {
     }
     
     // Get final tree state
-    engine.update_root_stats();
     let nodes_used = engine.calculate_nodes_used();
     
     println!("\n=== TREE GROWTH ===");

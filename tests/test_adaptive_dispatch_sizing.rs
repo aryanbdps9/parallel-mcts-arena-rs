@@ -26,7 +26,6 @@ fn test_progressive_wave_sizing() {
     
     // Dispatch with more workgroups to actually grow the tree
     engine.dispatch_mcts_othello_kernel(64, 1.4, 1.0, 1.0, 0.01, 12345);
-    engine.update_root_stats();
     
     // Wave 2: Should see growth
     let wg2 = engine.calculate_optimal_workgroups();
@@ -37,7 +36,6 @@ fn test_progressive_wave_sizing() {
     for i in 3..=8 {
         let wg = engine.calculate_optimal_workgroups();
         engine.dispatch_mcts_othello_kernel(128, 1.4, 1.0, 1.0, 0.01, 12345 + i);
-        engine.update_root_stats();
         
         let nodes = engine.calculate_nodes_used();
         println!("Wave {}: nodes={:6}, workgroups={:3} (threads={})", i, nodes, wg, wg * 64);

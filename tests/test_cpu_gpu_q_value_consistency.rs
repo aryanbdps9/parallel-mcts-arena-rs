@@ -89,7 +89,6 @@ fn test_cpu_gpu_q_value_consistency() {
         }
         
         gpu_mcts.flush_and_wait();
-        gpu_mcts.update_root_stats();
         
         // Check root visits
         let root_visits = gpu_mcts.get_root_visits();

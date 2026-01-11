@@ -53,7 +53,6 @@ fn test_gpu_q_value_perspective() {
     engine.flush_and_wait();
     
     // Update root stats before reading
-    engine.update_root_stats();
 
     // Get children statistics
     let stats = engine.get_children_stats();

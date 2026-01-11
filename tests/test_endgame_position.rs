@@ -209,7 +209,6 @@ fn test_near_endgame_position() {
             
             // Periodic diagnostics
             if batch > 0 && batch % 5 == 0 {
-                engine.update_root_stats();
                 let stats = engine.get_children_stats();
                 if !stats.is_empty() {
                     let (x, y, visits, _wins, q) = stats[0];
@@ -226,7 +225,6 @@ fn test_near_endgame_position() {
         
         // Final sync and statistics
         engine.flush_and_wait();
-        engine.update_root_stats();
         
         let stats = engine.get_children_stats();
         let total_visits: i32 = stats.iter().map(|(_, _, v, _, _)| *v).sum();
@@ -388,7 +386,6 @@ fn test_shallow_tree_rollout_quality() {
         engine.dispatch_mcts_othello_kernel(64, 1.414, 1.0, 0.06, 0.01, 100);
         
         engine.flush_and_wait();
-        engine.update_root_stats();
         
         let stats1 = engine.get_children_stats();
         let mut sorted1 = stats1.clone();
@@ -421,7 +418,6 @@ fn test_shallow_tree_rollout_quality() {
         }
         
         engine.flush_and_wait();
-        engine.update_root_stats();
         
         let stats2 = engine.get_children_stats();
         let mut sorted2 = stats2.clone();
@@ -454,7 +450,6 @@ fn test_shallow_tree_rollout_quality() {
         }
         
         engine.flush_and_wait();
-        engine.update_root_stats();
         
         let stats3 = engine.get_children_stats();
         let mut sorted3 = stats3.clone();
@@ -596,7 +591,6 @@ fn test_forced_win_position() {
         }
         
         engine.flush_and_wait();
-        engine.update_root_stats();
         
         let stats = engine.get_children_stats();
         let mut sorted = stats.clone();
