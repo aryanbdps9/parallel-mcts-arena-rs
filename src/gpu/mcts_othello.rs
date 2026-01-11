@@ -1452,6 +1452,12 @@ pub struct OthelloDiagnostics {
     pub random_rollout_min_tid: u32, // Minimum thread ID that did a rollout (initialized to 0xFFFFFFFF)
     pub random_rollout_max_tid: u32, // Maximum thread ID that did a rollout
     pub global_rollout_counter: u32, // Global counter for independent RNG seeding
+    pub phase_selection_count: u32, // Threads in PHASE_SELECTION
+    pub phase_expansion_count: u32, // Threads in PHASE_EXPANSION
+    pub phase_rollout_count: u32, // Threads in PHASE_ROLLOUT_ACTIVE
+    pub phase_backprop_count: u32, // Threads in PHASE_BACKPROP
+    pub phase_idle_count: u32, // Threads in PHASE_IDLE
+    pub phase_finished_count: u32, // Threads in PHASE_FINISHED
 }
 
 #[repr(C)]

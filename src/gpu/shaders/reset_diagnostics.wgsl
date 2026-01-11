@@ -32,6 +32,13 @@ struct Diagnostics {
     random_rollout_p1_score_sum: atomic<u32>,
     random_rollout_min_tid: atomic<u32>,
     random_rollout_max_tid: atomic<u32>,
+    global_rollout_counter: atomic<u32>,
+    phase_selection_count: atomic<u32>,
+    phase_expansion_count: atomic<u32>,
+    phase_rollout_count: atomic<u32>,
+    phase_backprop_count: atomic<u32>,
+    phase_idle_count: atomic<u32>,
+    phase_finished_count: atomic<u32>,
 }
 
 @group(0) @binding(0) var<storage, read_write> diagnostics: Diagnostics;
@@ -69,4 +76,11 @@ fn main() {
     atomicStore(&diagnostics.random_rollout_p1_score_sum, 0u);
     atomicStore(&diagnostics.random_rollout_min_tid, 0xFFFFFFFFu);
     atomicStore(&diagnostics.random_rollout_max_tid, 0u);
+    atomicStore(&diagnostics.global_rollout_counter, 0u);
+    atomicStore(&diagnostics.phase_selection_count, 0u);
+    atomicStore(&diagnostics.phase_expansion_count, 0u);
+    atomicStore(&diagnostics.phase_rollout_count, 0u);
+    atomicStore(&diagnostics.phase_backprop_count, 0u);
+    atomicStore(&diagnostics.phase_idle_count, 0u);
+    atomicStore(&diagnostics.phase_finished_count, 0u);
 }

@@ -1333,7 +1333,7 @@ impl<S: GameState> MCTS<S> {
         let d = telemetry.diagnostics;
         let max_temp_boost = d.max_temp_boost as f32 / 1000.0;
         eprintln!(
-            "{} diag_counts sel_term={} sel_no_child={} sel_invalid={} sel_path_cap={} exp_attempts={} exp_success={} exp_locked={} exp_term={} alloc_fail={} rollouts={} root_board_hash_GPU={:#x} total_children_gen={} init_nodes_count={} heartbeat={} zero_wg={} max_temp_boost={:.3}",
+            "{} diag_counts sel_term={} sel_no_child={} sel_invalid={} sel_path_cap={} exp_attempts={} exp_success={} exp_locked={} exp_term={} alloc_fail={} rollouts={} root_board_hash_GPU={:#x} total_children_gen={} init_nodes_count={} heartbeat={} zero_wg={} max_temp_boost={:.3} phase_sel={} phase_exp={} phase_roll={} phase_back={} phase_idle={} phase_fin={}",
             diag_prefix,
             d.selection_terminal,
             d.selection_no_children,
@@ -1350,7 +1350,13 @@ impl<S: GameState> MCTS<S> {
             d.init_nodes_count,
             d.exp_lock_rollout,
             d.exp_lock_sibling,
-            max_temp_boost
+            max_temp_boost,
+            d.phase_selection_count,
+            d.phase_expansion_count,
+            d.phase_rollout_count,
+            d.phase_backprop_count,
+            d.phase_idle_count,
+            d.phase_finished_count,
         );
 
         let diag_red_flag = d.selection_invalid_child > 0 || d.alloc_failures > 0;

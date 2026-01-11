@@ -808,6 +808,12 @@ struct Diagnostics {
     random_rollout_min_tid: atomic<u32>, // Minimum thread ID that did a rollout (initialized to 0xFFFFFFFF)
     random_rollout_max_tid: atomic<u32>, // Maximum thread ID that did a rollout
     global_rollout_counter: atomic<u32>, // Global counter for independent RNG seeding
+    phase_selection_count: atomic<u32>, // Threads in PHASE_SELECTION
+    phase_expansion_count: atomic<u32>, // Threads in PHASE_EXPANSION
+    phase_rollout_count: atomic<u32>, // Threads in PHASE_ROLLOUT_ACTIVE
+    phase_backprop_count: atomic<u32>, // Threads in PHASE_BACKPROP
+    phase_idle_count: atomic<u32>, // Threads in PHASE_IDLE
+    phase_finished_count: atomic<u32>, // Threads in PHASE_FINISHED
 }
 
 // =============================================================================
@@ -1757,6 +1763,21 @@ fn incremental_mcts_step(
     }
     
     var state = thread_states[thread_id];
+    
+    // Track phase distribution for diagnostics
+    if (state.phase == PHASE_SELECTION) {
+        atomicAdd(&diagnostics.phase_selection_count, 1u);
+    } else if (state.phase == PHASE_EXPANSION) {
+        atomicAdd(&diagnostics.phase_expansion_count, 1u);
+    } else if (state.phase == PHASE_ROLLOUT_ACTIVE) {
+        atomicAdd(&diagnostics.phase_rollout_count, 1u);
+    } else if (state.phase == PHASE_BACKPROP) {
+        atomicAdd(&diagnostics.phase_backprop_count, 1u);
+    } else if (state.phase == PHASE_IDLE) {
+        atomicAdd(&diagnostics.phase_idle_count, 1u);
+    } else if (state.phase == PHASE_FINISHED) {
+        atomicAdd(&diagnostics.phase_finished_count, 1u);
+    }
     
     // Skip if finished or in rollout (handled by separate kernel)
     if (state.phase == PHASE_FINISHED || state.phase == PHASE_ROLLOUT_ACTIVE) {
